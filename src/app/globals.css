@@ -826,6 +826,10 @@ body {
     background: #e0e7ff;
     color: #3730a3;
 }
+.text-ignored {
+    color: #666;
+    font-style: italic;
+}
 
 /* ---------- Result Tables ---------- */
 .result-table {

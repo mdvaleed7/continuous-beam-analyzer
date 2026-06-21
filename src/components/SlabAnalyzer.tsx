@@ -643,7 +643,7 @@ export default function SlabAnalyzer() {
                                     <tr>
                                         <td>Status</td>
                                         <td>
-                                            <span style={{ color: '#666', fontStyle: 'italic' }}>
+                                            <span className="text-ignored">
                                                 IGNORED
                                             </span>
                                         </td>
