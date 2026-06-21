@@ -272,7 +272,7 @@ export default function SlabAnalyzer() {
                     </div>
                 </div>
 
-                <div className="panel" style={{ marginTop: '16px' }}>
+                <div className="panel mt-16">
                     <h3 className="panel-title">
                         <span className="panel-icon">📐</span>
                         Panels ({panels.length})
@@ -288,7 +288,7 @@ export default function SlabAnalyzer() {
                         <button className="slab-panel-tab add-btn" onClick={addPanel}>+</button>
                     </div>
 
-                    <div style={{ marginTop: '12px' }}>
+                    <div className="mt-12">
                         <div className="control-group">
                             <label>Label</label>
                             <input title="Value" value={p.label}
@@ -390,41 +390,39 @@ export default function SlabAnalyzer() {
                                 onChange={e => updatePanel(activePanel, 'D', +e.target.value)} />
                         </div>
                         
-                        <div style={{ marginTop: '16px', padding: '12px', background: 'var(--bg-card)', borderRadius: '8px', border: '1px solid var(--border)' }}>
-                            <h4 style={{ margin: '0 0 12px 0', fontSize: '0.9rem', color: 'var(--primary)' }}>Auto-Optimize Thickness</h4>
-                            <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
-                                <div style={{ flex: 1 }}>
-                                    <label style={{ fontSize: '0.75rem', display: 'block', marginBottom: '4px' }}>Min (mm)</label>
-                                    <input title="Value" type="number" min="75" step="5" value={minThk} onChange={e => setMinThk(+e.target.value)} style={{ width: '100%', padding: '6px' }} />
+                        <div className="opt-panel">
+                            <h4 className="opt-title">Auto-Optimize Thickness</h4>
+                            <div className="flex-row-gap-8-mb-12">
+                                <div className="flex-1">
+                                    <label className="opt-label">Min (mm)</label>
+                                    <input title="Value" type="number" min="75" step="5" value={minThk} onChange={e => setMinThk(+e.target.value)} className="opt-input" />
                                 </div>
-                                <div style={{ flex: 1 }}>
-                                    <label style={{ fontSize: '0.75rem', display: 'block', marginBottom: '4px' }}>Max (mm)</label>
-                                    <input title="Value" type="number" min="75" step="5" value={maxThk} onChange={e => setMaxThk(+e.target.value)} style={{ width: '100%', padding: '6px' }} />
+                                <div className="flex-1">
+                                    <label className="opt-label">Max (mm)</label>
+                                    <input title="Value" type="number" min="75" step="5" value={maxThk} onChange={e => setMaxThk(+e.target.value)} className="opt-input" />
                                 </div>
-                                <div style={{ flex: 1 }}>
-                                    <label style={{ fontSize: '0.75rem', display: 'block', marginBottom: '4px' }}>Step (mm)</label>
-                                    <input title="Value" type="number" min="5" step="5" value={thkStep} onChange={e => setThkStep(+e.target.value)} style={{ width: '100%', padding: '6px' }} />
+                                <div className="flex-1">
+                                    <label className="opt-label">Step (mm)</label>
+                                    <input title="Value" type="number" min="5" step="5" value={thkStep} onChange={e => setThkStep(+e.target.value)} className="opt-input" />
                                 </div>
                             </div>
                             
                             {isOptimizing ? (
                                 <div>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: '4px' }}>
+                                    <div className="progress-header">
                                         <span>Optimizing...</span>
                                         <span>{Math.round((optProgress.done / optProgress.total) * 100) || 0}%</span>
                                     </div>
-                                    <div style={{ height: '6px', background: 'var(--bg-input)', borderRadius: '3px', overflow: 'hidden', marginBottom: '8px' }}>
-                                        <div style={{ height: '100%', background: 'var(--primary)', width: `${(optProgress.done / optProgress.total) * 100}%`, transition: 'width 0.2s' }}></div>
-                                    </div>
-                                    <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', textAlign: 'center', marginBottom: '8px' }}>
+                                    <progress className="progress-bar-native" value={optProgress.done} max={optProgress.total || 1}></progress>
+                                    <div className="progress-text">
                                         Evaluating {optProgress.done} / {optProgress.total} combinations
                                     </div>
-                                    <button className="btn btn-danger" style={{ width: '100%', padding: '6px' }} onClick={cancelOptimization}>
+                                    <button className="btn btn-danger btn-opt-cancel" onClick={cancelOptimization}>
                                         Cancel Optimization
                                     </button>
                                 </div>
                             ) : (
-                                <button className="btn" style={{ width: '100%', padding: '8px', border: '1px solid var(--primary)', color: 'var(--primary)', background: 'transparent' }} onClick={runOptimization}>
+                                <button className="btn btn-opt-run" onClick={runOptimization}>
                                     ✨ Optimize Current Panel
                                 </button>
                             )}
@@ -432,14 +430,14 @@ export default function SlabAnalyzer() {
                     </div>
 
                     {panels.length > 1 && (
-                        <button className="btn btn-danger" style={{ marginTop: '10px', width: '100%' }}
+                        <button className="btn btn-danger btn-remove-panel"
                             onClick={() => removePanel(activePanel)}>
                             Remove Panel {p.label}
                         </button>
                     )}
                 </div>
 
-                <button id="analyze-btn" className="btn btn-primary" style={{ marginTop: '16px', width: '100%' }}
+                <button id="analyze-btn" className="btn btn-primary btn-analyze-all"
                     onClick={runAnalysis}>
                     ⚡ Analyze All Panels
                 </button>
@@ -447,17 +445,17 @@ export default function SlabAnalyzer() {
 
             {/* ───── MAIN CONTENT ───── */}
             <section className="content">
-                {error && <div className="panel" style={{ borderColor: 'var(--negative)' }}><p style={{ color: 'var(--negative)' }}>{error}</p></div>}
+                {error && <div className="panel panel-error"><p className="text-error">{error}</p></div>}
 
                 {r && (
                     <>
                         {/* ───── SUMMARY AND BUTTONS ───── */}
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '16px', marginBottom: '24px' }}>
-                            <div className={`panel status-banner ${r.overallStatus === 'SAFE' ? 'status-safe' : 'status-fail'}`} style={{ flex: 1, margin: 0 }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '16px' }}>
+                        <div className="status-banner-container">
+                            <div className={`panel status-banner status-banner-inner ${r.overallStatus === 'SAFE' ? 'status-safe' : 'status-fail'}`}>
+                                <div className="status-banner-content">
                                     <div>
-                                        <h2 style={{ margin: '0 0 8px 0', fontSize: '1.4rem' }}>{r.label} — {r.slabType === 'two-way' ? 'Two-Way Restrained' : r.slabType === 'one-way' ? 'One-Way' : 'Cantilever'} Slab</h2>
-                                        <p style={{ margin: '0 0 12px 0', opacity: 0.9 }}>{r.overallStatus === 'SAFE' ? 'All IS 456 checks passed successfully.' : 'One or more IS 456 checks failed.'}</p>
+                                        <h2 className="status-title">{r.label} — {r.slabType === 'two-way' ? 'Two-Way Restrained' : r.slabType === 'one-way' ? 'One-Way' : 'Cantilever'} Slab</h2>
+                                        <p className="status-subtitle">{r.overallStatus === 'SAFE' ? 'All IS 456 checks passed successfully.' : 'One or more IS 456 checks failed.'}</p>
                                         <div className="status-chips">
                                             <span className={`chip ${r.overallStatus === 'SAFE' ? 'chip-safe' : 'chip-fail'}`}>
                                                 {r.overallStatus}
@@ -476,13 +474,11 @@ export default function SlabAnalyzer() {
                                             )}
                                         </div>
                                     </div>
-                                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                                        <button className="btn-primary" onClick={handlePreviewReport}
-                                            style={{ padding: '8px 16px', fontSize: '0.85rem' }}>
+                                    <div className="flex-row-gap-8-wrap">
+                                        <button className="btn-primary btn-preview" onClick={handlePreviewReport}>
                                             <span className="btn-icon">👁</span> Preview PDF
                                         </button>
-                                        <button className="btn-primary" onClick={handleDownloadReport}
-                                            style={{ padding: '8px 16px', fontSize: '0.85rem', background: 'linear-gradient(135deg, #00e5a0 0%, #00b87a 100%)' }}>
+                                        <button className="btn-primary btn-download" onClick={handleDownloadReport}>
                                             <span className="btn-icon">📥</span> Download PDF
                                         </button>
                                     </div>
@@ -700,8 +696,8 @@ export default function SlabAnalyzer() {
                                     </thead>
                                     <tbody>
                                         {results.map((res: any, i: number) => (
-                                            <tr key={i} className={i === activePanel ? 'row-active' : ''}
-                                                onClick={() => setActivePanel(i)} style={{ cursor: 'pointer' }}>
+                                            <tr key={i} className={`cursor-pointer ${i === activePanel ? 'row-active' : ''}`}
+                                                onClick={() => setActivePanel(i)}>
                                                 <td><strong>{res.label}</strong></td>
                                                 <td>{res.slabType}</td>
                                                 <td>{res.Lx}×{res.Ly}</td>
@@ -722,25 +718,18 @@ export default function SlabAnalyzer() {
                                 <div className="pdf-preview-modal" onClick={e => e.stopPropagation()}>
                                     <div className="pdf-preview-header">
                                         <h3>PDF Report Preview</h3>
-                                        <div style={{ display: 'flex', gap: '8px' }}>
-                                            <button className="btn-primary" onClick={handleDownloadReport}
-                                                style={{ padding: '8px 18px', fontSize: '0.82rem', background: 'linear-gradient(135deg, #00e5a0 0%, #00b87a 100%)' }}>
+                                        <div className="flex-row-gap-8">
+                                            <button className="btn-primary btn-download-modal" onClick={handleDownloadReport}>
                                                 📥 Download
                                             </button>
-                                            <button onClick={() => setPdfPreviewUrl(null)}
-                                                style={{
-                                                    padding: '8px 18px', fontSize: '0.82rem', fontWeight: 600,
-                                                    border: '1px solid var(--border)', borderRadius: '6px',
-                                                    background: 'var(--bg-input)', color: 'var(--text-muted)',
-                                                    cursor: 'pointer',
-                                                }}>
+                                            <button className="btn-close-modal" onClick={() => setPdfPreviewUrl(null)}>
                                                 ✕ Close
                                             </button>
                                         </div>
                                     </div>
                                     <iframe
                                         srcDoc={pdfPreviewUrl}
-                                        style={{ width: '100%', height: 'calc(100% - 60px)', border: 'none', borderRadius: '0 0 12px 12px', background: 'white' }}
+                                        className="iframe-modal"
                                         title="PDF Preview"
                                     />
                                 </div>
@@ -750,10 +739,10 @@ export default function SlabAnalyzer() {
                 )}
 
                 {!results && (
-                    <div className="panel" style={{ textAlign: 'center', padding: '60px 20px' }}>
-                        <h2 style={{ color: 'var(--text-muted)', marginBottom: '8px' }}>Slab Designer</h2>
-                        <p style={{ color: 'var(--text-dim)' }}>Configure panels in the sidebar and click <strong>Analyze All Panels</strong></p>
-                        <p style={{ color: 'var(--text-dim)', marginTop: '8px', fontSize: '0.85rem' }}>
+                    <div className="panel modal-empty">
+                        <h2 className="modal-empty-title">Slab Designer</h2>
+                        <p className="modal-empty-subtitle">Configure panels in the sidebar and click <strong>Analyze All Panels</strong></p>
+                        <p className="modal-empty-text">
                             Supports two-way restrained (IS 456 Table 26), one-way, and cantilever slabs
                         </p>
                     </div>
