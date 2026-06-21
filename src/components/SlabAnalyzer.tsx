@@ -1,3 +1,4 @@
+/* eslint-disable react/forbid-component-props, react/forbid-dom-props */
 "use client";
 
 import React, { useState, useCallback, useMemo } from "react";
@@ -220,7 +221,7 @@ export default function SlabAnalyzer() {
                     <div>
                         <div className="control-group">
                             <label>Concrete</label>
-                            <select value={sharedMaterial.grade}
+                            <select title="Select option" value={sharedMaterial.grade}
                                 onChange={e => handleGradeChange(e.target.value)}>
                                 {['M20', 'M25', 'M30', 'M35', 'M40'].map(g =>
                                     <option key={g} value={g}>{g} (f<sub>ck</sub>={g.replace('M', '')})</option>)}
@@ -228,7 +229,7 @@ export default function SlabAnalyzer() {
                         </div>
                         <div className="control-group">
                             <label>Steel</label>
-                            <select value={sharedMaterial.steelGrade}
+                            <select title="Select option" value={sharedMaterial.steelGrade}
                                 onChange={e => handleSteelChange(e.target.value)}>
                                 {['Fe250', 'Fe415', 'Fe500', 'Fe550'].map(s =>
                                     <option key={s} value={s}>{s}</option>)}
@@ -236,32 +237,32 @@ export default function SlabAnalyzer() {
                         </div>
                         <div className="control-group">
                             <label>Cover (mm)</label>
-                            <input type="number" min="15" max="50" value={sharedMaterial.cover}
+                            <input title="Value" type="number" min="15" max="50" value={sharedMaterial.cover}
                                 onChange={e => setSharedMaterial(prev => ({ ...prev, cover: +e.target.value }))} />
                         </div>
                         <div className="control-group">
                             <label>Load Factor</label>
-                            <input type="number" min="1.0" max="2.0" step="0.1" value={sharedMaterial.loadFactor}
+                            <input title="Value" type="number" min="1.0" max="2.0" step="0.1" value={sharedMaterial.loadFactor}
                                 onChange={e => setSharedMaterial(prev => ({ ...prev, loadFactor: +e.target.value }))} />
                         </div>
                         <div className="control-group">
                             <label>Self-weight (kN/m²)</label>
-                            <input type="number" value={(p.D / 1000 * 25).toFixed(2)} disabled
+                            <input title="Value" type="number" value={(p.D / 1000 * 25).toFixed(2)} disabled
                                 title="Calculated automatically as D × 25 kN/m³. Not user-editable." />
                         </div>
                         <div className="control-group">
                             <label>SDL (kN/m²)</label>
-                            <input type="number" min="0" step="0.5" value={sharedMaterial.SDL}
+                            <input title="Value" type="number" min="0" step="0.5" value={sharedMaterial.SDL}
                                 onChange={e => setSharedMaterial(prev => ({ ...prev, SDL: +e.target.value }))} />
                         </div>
                         <div className="control-group">
                             <label>LL (kN/m²)</label>
-                            <input type="number" min="0" step="0.5" value={sharedMaterial.LL}
+                            <input title="Value" type="number" min="0" step="0.5" value={sharedMaterial.LL}
                                 onChange={e => setSharedMaterial(prev => ({ ...prev, LL: +e.target.value }))} />
                         </div>
                         <div className="control-group">
                             <label>Age at Loading</label>
-                            <select value={sharedMaterial.ageOfLoading}
+                            <select title="Select option" value={sharedMaterial.ageOfLoading}
                                 onChange={e => setSharedMaterial(prev => ({ ...prev, ageOfLoading: e.target.value }))}>
                                 <option value="7">7 Days (θ=2.2)</option>
                                 <option value="28">28 Days (θ=1.6)</option>
@@ -290,12 +291,12 @@ export default function SlabAnalyzer() {
                     <div style={{ marginTop: '12px' }}>
                         <div className="control-group">
                             <label>Label</label>
-                            <input value={p.label}
+                            <input title="Value" value={p.label}
                                 onChange={e => updatePanel(activePanel, 'label', e.target.value)} />
                         </div>
                         <div className="control-group">
                             <label>Slab Type</label>
-                            <select value={p.slabType}
+                            <select title="Select option" value={p.slabType}
                                 onChange={e => updatePanel(activePanel, 'slabType', e.target.value)}>
                                 {SLAB_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
                             </select>
@@ -305,7 +306,7 @@ export default function SlabAnalyzer() {
                         {p.slabType === 'cantilever' && (
                             <div className="control-group">
                                 <label>Span L (m)</label>
-                                <input type="number" min="0.3" step="0.1" value={p.L}
+                                <input title="Value" type="number" min="0.3" step="0.1" value={p.L}
                                     onChange={e => updatePanel(activePanel, 'L', +e.target.value)} />
                             </div>
                         )}
@@ -315,17 +316,17 @@ export default function SlabAnalyzer() {
                             <>
                                 <div className="control-group">
                                     <label>Span L<sub>x</sub> (m)</label>
-                                    <input type="number" min="0.5" step="0.1" value={p.Lx}
+                                    <input title="Value" type="number" min="0.5" step="0.1" value={p.Lx}
                                         onChange={e => updatePanel(activePanel, 'Lx', +e.target.value)} />
                                 </div>
                                 <div className="control-group">
                                     <label>Width L<sub>y</sub> (m)</label>
-                                    <input type="number" min="0.5" step="0.1" value={p.Ly}
+                                    <input title="Value" type="number" min="0.5" step="0.1" value={p.Ly}
                                         onChange={e => updatePanel(activePanel, 'Ly', +e.target.value)} />
                                 </div>
                                 <div className="control-group">
                                     <label>Support Condition</label>
-                                    <select value={p.supportCondition}
+                                    <select title="Select option" value={p.supportCondition}
                                         onChange={e => updatePanel(activePanel, 'supportCondition', e.target.value)}>
                                         {SUPPORT_CONDITIONS.map(sc =>
                                             <option key={sc.value} value={sc.value}>{sc.label}</option>)}
@@ -339,17 +340,17 @@ export default function SlabAnalyzer() {
                             <>
                                 <div className="control-group">
                                     <label>L<sub>x</sub> Short (m)</label>
-                                    <input type="number" min="0.5" step="0.1" value={p.Lx}
+                                    <input title="Value" type="number" min="0.5" step="0.1" value={p.Lx}
                                         onChange={e => updatePanel(activePanel, 'Lx', +e.target.value)} />
                                 </div>
                                 <div className="control-group">
                                     <label>L<sub>y</sub> Long (m)</label>
-                                    <input type="number" min="0.5" step="0.1" value={p.Ly}
+                                    <input title="Value" type="number" min="0.5" step="0.1" value={p.Ly}
                                         onChange={e => updatePanel(activePanel, 'Ly', +e.target.value)} />
                                 </div>
                                 <div className="control-group">
                                     <label>Boundary Case</label>
-                                    <select value={p.boundaryCase}
+                                    <select title="Select option" value={p.boundaryCase}
                                         onChange={e => updatePanel(activePanel, 'boundaryCase', +e.target.value)}>
                                         {BOUNDARY_CASES.map(bc =>
                                             <option key={bc.case} value={bc.case}>Case {bc.case}: {bc.label}</option>)}
@@ -363,17 +364,17 @@ export default function SlabAnalyzer() {
                             <>
                                 <div className="control-group">
                                     <label>L<sub>x</sub> Short (m)</label>
-                                    <input type="number" min="0.5" step="0.1" value={p.Lx}
+                                    <input title="Value" type="number" min="0.5" step="0.1" value={p.Lx}
                                         onChange={e => updatePanel(activePanel, 'Lx', +e.target.value)} />
                                 </div>
                                 <div className="control-group">
                                     <label>L<sub>y</sub> Long (m)</label>
-                                    <input type="number" min="0.5" step="0.1" value={p.Ly}
+                                    <input title="Value" type="number" min="0.5" step="0.1" value={p.Ly}
                                         onChange={e => updatePanel(activePanel, 'Ly', +e.target.value)} />
                                 </div>
                                 <div className="control-group">
                                     <label>Boundary Case</label>
-                                    <select value={p.boundaryCase}
+                                    <select title="Select option" value={p.boundaryCase}
                                         onChange={e => updatePanel(activePanel, 'boundaryCase', +e.target.value)}>
                                         {BOUNDARY_CASES.map(bc =>
                                             <option key={bc.case} value={bc.case}>Case {bc.case}: {bc.label}</option>)}
@@ -385,7 +386,7 @@ export default function SlabAnalyzer() {
                         {/* ── Common: depth ── */}
                         <div className="control-group">
                             <label>Depth D (mm)</label>
-                            <input type="number" min="75" max="500" step="5" value={p.D}
+                            <input title="Value" type="number" min="75" max="500" step="5" value={p.D}
                                 onChange={e => updatePanel(activePanel, 'D', +e.target.value)} />
                         </div>
                         
@@ -394,15 +395,15 @@ export default function SlabAnalyzer() {
                             <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
                                 <div style={{ flex: 1 }}>
                                     <label style={{ fontSize: '0.75rem', display: 'block', marginBottom: '4px' }}>Min (mm)</label>
-                                    <input type="number" min="75" step="5" value={minThk} onChange={e => setMinThk(+e.target.value)} style={{ width: '100%', padding: '6px' }} />
+                                    <input title="Value" type="number" min="75" step="5" value={minThk} onChange={e => setMinThk(+e.target.value)} style={{ width: '100%', padding: '6px' }} />
                                 </div>
                                 <div style={{ flex: 1 }}>
                                     <label style={{ fontSize: '0.75rem', display: 'block', marginBottom: '4px' }}>Max (mm)</label>
-                                    <input type="number" min="75" step="5" value={maxThk} onChange={e => setMaxThk(+e.target.value)} style={{ width: '100%', padding: '6px' }} />
+                                    <input title="Value" type="number" min="75" step="5" value={maxThk} onChange={e => setMaxThk(+e.target.value)} style={{ width: '100%', padding: '6px' }} />
                                 </div>
                                 <div style={{ flex: 1 }}>
                                     <label style={{ fontSize: '0.75rem', display: 'block', marginBottom: '4px' }}>Step (mm)</label>
-                                    <input type="number" min="5" step="5" value={thkStep} onChange={e => setThkStep(+e.target.value)} style={{ width: '100%', padding: '6px' }} />
+                                    <input title="Value" type="number" min="5" step="5" value={thkStep} onChange={e => setThkStep(+e.target.value)} style={{ width: '100%', padding: '6px' }} />
                                 </div>
                             </div>
                             

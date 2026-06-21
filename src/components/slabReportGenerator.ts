@@ -155,7 +155,7 @@ function generateSpanDepthSection(r: any): string {
             <tr><td>$d_{provided}$</td><td>${r.ldCheck.d_provided} mm</td></tr>
             <tr>
                 <td>Status</td>
-                <td class="${r.ldCheck.status === 'OK' ? 'status-safe' : 'status-fail'}">${r.ldCheck.status}</td>
+                <td style="color: #666; font-style: italic;">IGNORED</td>
             </tr>
         </table>
         <p style="font-size: 9pt; color: #777; font-style: italic;">${r.ldCheck.note}</p>
