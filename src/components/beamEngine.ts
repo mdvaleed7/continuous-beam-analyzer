@@ -378,23 +378,124 @@ function getTaperedBeamStiffness(d1: number, d2: number, b: number, E: number, L
     const fMM = (6 * L * (d1 + d2)) / (E * b * d1*d1 * d2*d2);
 
     const det = fPP * fMM - fPM * fPM;
-    const kvv =  fMM / det;
-    const kvt = -fPM / det;
-    const ktt1 = fPP / det;
+    const kvv =  fMM / det;   // vertical stiffness at free end
+    const kvt = -fPM / det;   // cross-coupling (moment from vertical, vertical from moment)
+    const ktt = fPP / det;    // rotational stiffness at free end
 
-    const K00 = kvv, K01 = kvt, K10 = kvt, K11 = ktt1;
-    const K20 = -K00, K21 = -K01, K02 = -K00, K12 = -K01, K22 = K00;
-    const K30 = K00 * L - K10, K03 = K30;
-    const K31 = K01 * L - K11, K13 = K31;
-    const K32 = K02 * L - K12, K23 = K32;
-    const K33 = K03 * L - K13;
-    
+    // Build the full 4×4 stiffness matrix from the cantilever flexibility.
+    //
+    // The cantilever is fixed at node 0 (left), free at node 1 (right).
+    // Flexibility: {v₁, θ₁} = [F] {P₁, M₁}
+    // Stiffness at free end: {P₁, M₁} = [K₂ₓ₂] {Δv, Δθ}
+    //   where Δv = v₁ - v₀ - θ₀·L (relative vertical displacement)
+    //         Δθ = θ₁ - θ₀          (relative rotation)
+    //
+    // P₁ = kvv·Δv + kvt·Δθ
+    // M₁ = kvt·Δv + ktt·Δθ
+    // P₀ = -P₁                    (vertical equilibrium)
+    // M₀ = -(M₁ + P₁·L)           (moment equilibrium about node 0)
+    //
+    // Expanding P₀, M₀, P₁, M₁ in terms of [v₀, θ₀, v₁, θ₁] and
+    // collecting coefficients gives the full symmetric 4×4 matrix.
+    // Verified against the standard uniform beam element and rigid body modes.
+
     return [
-        [K00, K01, K02, K03],
-        [K10, K11, K12, K13],
-        [K20, K21, K22, K23],
-        [K30, K31, K32, K33]
+        [      kvv,         kvv*L + kvt,      -kvv,           -kvt          ],
+        [ kvv*L + kvt,  kvv*L*L + 2*kvt*L + ktt, -(kvv*L + kvt), -(ktt + kvt*L) ],
+        [     -kvv,        -(kvv*L + kvt),       kvv,            kvt          ],
+        [     -kvt,        -(ktt + kvt*L),       kvt,            ktt          ]
     ];
+}
+
+/**
+ * Numerically calculates the normalized Fixed-End Moments for a linearly tapered
+ * beam under a distributed load (using Simpson's 1/3 Rule).
+ */
+function getTaperedBeamNormalizedFEM(d1: number, d2: number, alpha: number, wL_val: number, wR_val: number): number[] {
+    if (Math.abs(d2 - d1) < 1e-6) {
+        const fL = -(7 * wL_val + 3 * wR_val) * alpha / 20;
+        const mL = -(3 * wL_val + 2 * wR_val) * alpha * alpha / 60;
+        const fR = -(3 * wL_val + 7 * wR_val) * alpha / 20;
+        const mR = (2 * wL_val + 3 * wR_val) * alpha * alpha / 60;
+        return [fL, mL, fR, mR];
+    }
+
+    const E = 1;
+    const b = 1;
+    const L = alpha;
+
+    const N = 100;
+    const dx = L / N;
+    let v2_sum = 0;
+    let theta2_sum = 0;
+
+    for (let i = 0; i <= N; i++) {
+        const x = i * dx;
+        const B = (wR_val - wL_val) / L;
+        // Cantilever moment at section x (cantilever fixed at left, free at right)
+        // under trapezoidal load wL to wR:
+        //   M(x) = -∫ₓᴸ w(ξ)(ξ-x) dξ = -(wL/2)(L-x)² - (B/6)(2L³ - 3L²x + x³)
+        const M0 = -(wL_val / 2 * Math.pow(L - x, 2) + B / 6 * (2 * L * L * L - 3 * L * L * x + Math.pow(x, 3)));
+
+        const d_x = d1 + (d2 - d1) * (x / L);
+        const I_x = b * Math.pow(d_x, 3) / 12;
+        const EI_x = E * I_x;
+
+        // Flexibility integrals:
+        //   v2 = ∫ M₀(x)·(L-x)/EI(x) dx  (deflection at free end, < 0 for downward load)
+        //   θ2 = ∫ M₀(x)/EI(x) dx        (rotation at free end, < 0 for clockwise rotation)
+        const d_theta = M0 / EI_x;
+        const d_v = M0 * (L - x) / EI_x;
+
+        const mult = (i === 0 || i === N) ? 1 : (i % 2 === 1 ? 4 : 2);
+
+        theta2_sum += mult * d_theta;
+        v2_sum += mult * d_v;
+    }
+
+    const theta2 = (dx / 3) * theta2_sum; // < 0 for downward load
+    const v2 = (dx / 3) * v2_sum;         // < 0 for downward load
+
+    const K = getTaperedBeamStiffness(d1, d2, b, E, L);
+
+    // BUG FIX 1: The displacement correction to bring the free end back to zero
+    // is [-v2, -theta2] (both negative because v2 and theta2 are negative for
+    // downward load, so -v2 > 0 and -theta2 > 0 are the corrections needed).
+    // The previous code used [−v2, theta2] which had the wrong sign on theta2.
+    const d_vec = [0, 0, -v2, -theta2];
+
+    // Restoration forces from the stiffness matrix.
+    // K · d_vec gives the INTERNAL forces (positive = downward) at each node
+    // from the displacement correction. The FEM convention uses NEGATIVE for
+    // upward reactions, so we need -(K · d_vec) to convert.
+    const restoration = [0, 0, 0, 0];
+    for (let i = 0; i < 4; i++) {
+        for (let j = 0; j < 4; j++) {
+            restoration[i] += -K[i][j] * d_vec[j];
+        }
+    }
+
+    // BUG FIX 2: The FEM must include the cantilever reactions (the load itself)
+    // PLUS the restoration forces. The previous code only computed restoration
+    // forces, which sum to zero by stiffness matrix equilibrium — so the total
+    // reaction was always 0, not wL.
+    //
+    // Cantilever reactions (forces the fixed left support exerts on the beam)
+    // for a trapezoidal load wL to wR over length L:
+    //   V_left = -(wL + wR)·L/2  (upward = negative in downward-positive convention)
+    //   M_left = -(2·wL + wR)·L²/6  (counterclockwise at left)
+    //   V_right = 0, M_right = 0
+    const V_cant = -(wL_val + wR_val) * L / 2;
+    const M_cant = -(2 * wL_val + wR_val) * L * L / 6;
+
+    const fem = [
+        V_cant + restoration[0],
+        M_cant + restoration[1],
+        0 + restoration[2],
+        0 + restoration[3],
+    ];
+
+    return fem;
 }
 
 // ───────────────────── Beam Analysis ─────────────────────
@@ -529,58 +630,64 @@ function analyzeBeam(cfg: any): any {
 
         // Fixed-end equivalent nodal loads with span length α_i
         let fem: any[];
-        if (sp === nSpans - 1 && cfg.lastSpanLoadStop > 1e-6) {
-            // Partial load from x=0 to x=a
-            const L_phys = alpha.fl() * (cfg.L_ref_phys || 1);
-            const a_phys = Math.min(cfg.lastSpanLoadStop, L_phys);
-            const a_n = toFrac(a_phys / (cfg.L_ref_phys || 1));
-            
-            const L = alpha;
-            const a2 = a_n.mul(a_n);
-            const a3 = a2.mul(a_n);
-            const a4 = a3.mul(a_n);
-            const a5 = a4.mul(a_n);
-            const L2 = alpha2;
-            const L3 = alpha3;
-
-            // M_AB coefficients
-            const mab_cL = a2.div(new F(2)).sub(a3.div(L)).add(new F(3).mul(a4).div(new F(4).mul(L2))).sub(a5.div(new F(5).mul(L3)));
-            const mab_cR = a3.div(new F(3).mul(L)).sub(a4.div(new F(2).mul(L2))).add(a5.div(new F(5).mul(L3)));
-            const M_AB = mab_cL.mul(wL).add(mab_cR.mul(wR));
-
-            // M_BA coefficients
-            const mba_cL = mab_cR; // identical coefficient
-            const mba_cR = a4.div(new F(4).mul(L2)).sub(a5.div(new F(5).mul(L3)));
-            const M_BA = mba_cL.mul(wL).add(mba_cR.mul(wR));
-
-            // M_W,B coefficients (moment of load about right end)
-            const mwb_cL = L.mul(a_n).sub(a2).add(a3.div(new F(3).mul(L)));
-            const mwb_cR = a2.div(new F(2)).sub(a3.div(new F(3).mul(L)));
-            const M_WB = mwb_cL.mul(wL).add(mwb_cR.mul(wR));
-
-            // Total load W coefficients
-            const w_cL = a_n.sub(a2.div(new F(2).mul(L)));
-            const w_cR = a2.div(new F(2).mul(L));
-            const W_tot = w_cL.mul(wL).add(w_cR.mul(wR));
-
-            // Upward vertical reactions at ends of the fixed-fixed element
-            const V_A = M_WB.add(M_AB).sub(M_BA).div(L);
-            const V_B = W_tot.sub(V_A);
-
-            fem = [
-                V_A.mul(new F(-1)),
-                M_AB.mul(new F(-1)),
-                V_B.mul(new F(-1)),
-                M_BA
-            ];
+        if (cfg.spanTapers && cfg.spanTapers[sp]) {
+            const taper = cfg.spanTapers[sp];
+            const num_fem = getTaperedBeamNormalizedFEM(taper.d1, taper.d2, alpha.fl(), wL.fl(cfg.w1Val, cfg.w2Val), wR.fl(cfg.w1Val, cfg.w2Val));
+            fem = num_fem.map(v => toFrac(v));
         } else {
-            // Full span
-            fem = [
-                new F(-7).mul(wL).add(new F(-3).mul(wR)).mul(alpha).div(new F(20)),      // F left
-                new F(-3).mul(wL).add(new F(-2).mul(wR)).mul(alpha2).div(new F(60)),     // M left
-                new F(-3).mul(wL).add(new F(-7).mul(wR)).mul(alpha).div(new F(20)),      // F right
-                new F(2).mul(wL).add(new F(3).mul(wR)).mul(alpha2).div(new F(60))        // M right
-            ];
+            if (sp === nSpans - 1 && cfg.lastSpanLoadStop > 1e-6) {
+                // Partial load from x=0 to x=a
+                const L_phys = alpha.fl() * (cfg.L_ref_phys || 1);
+                const a_phys = Math.min(cfg.lastSpanLoadStop, L_phys);
+                const a_n = toFrac(a_phys / (cfg.L_ref_phys || 1));
+                
+                const L = alpha;
+                const a2 = a_n.mul(a_n);
+                const a3 = a2.mul(a_n);
+                const a4 = a3.mul(a_n);
+                const a5 = a4.mul(a_n);
+                const L2 = alpha2;
+                const L3 = alpha3;
+
+                // M_AB coefficients
+                const mab_cL = a2.div(new F(2)).sub(a3.div(L)).add(new F(3).mul(a4).div(new F(4).mul(L2))).sub(a5.div(new F(5).mul(L3)));
+                const mab_cR = a3.div(new F(3).mul(L)).sub(a4.div(new F(2).mul(L2))).add(a5.div(new F(5).mul(L3)));
+                const M_AB = mab_cL.mul(wL).add(mab_cR.mul(wR));
+
+                // M_BA coefficients
+                const mba_cL = mab_cR; // identical coefficient
+                const mba_cR = a4.div(new F(4).mul(L2)).sub(a5.div(new F(5).mul(L3)));
+                const M_BA = mba_cL.mul(wL).add(mba_cR.mul(wR));
+
+                // M_W,B coefficients (moment of load about right end)
+                const mwb_cL = L.mul(a_n).sub(a2).add(a3.div(new F(3).mul(L)));
+                const mwb_cR = a2.div(new F(2)).sub(a3.div(new F(3).mul(L)));
+                const M_WB = mwb_cL.mul(wL).add(mwb_cR.mul(wR));
+
+                // Total load W coefficients
+                const w_cL = a_n.sub(a2.div(new F(2).mul(L)));
+                const w_cR = a2.div(new F(2).mul(L));
+                const W_tot = w_cL.mul(wL).add(w_cR.mul(wR));
+
+                // Upward vertical reactions at ends of the fixed-fixed element
+                const V_A = M_WB.add(M_AB).sub(M_BA).div(L);
+                const V_B = W_tot.sub(V_A);
+
+                fem = [
+                    V_A.mul(new F(-1)),
+                    M_AB.mul(new F(-1)),
+                    V_B.mul(new F(-1)),
+                    M_BA
+                ];
+            } else {
+                // Full span
+                fem = [
+                    new F(-7).mul(wL).add(new F(-3).mul(wR)).mul(alpha).div(new F(20)),      // F left
+                    new F(-3).mul(wL).add(new F(-2).mul(wR)).mul(alpha2).div(new F(60)),     // M left
+                    new F(-3).mul(wL).add(new F(-7).mul(wR)).mul(alpha).div(new F(20)),      // F right
+                    new F(2).mul(wL).add(new F(3).mul(wR)).mul(alpha2).div(new F(60))        // M right
+                ];
+            }
         }
         for (let a = 0; a < 4; a++) Feq[dofs[a]] = Feq[dofs[a]].add(fem[a]);
     }
@@ -718,7 +825,13 @@ function analyzeBeam(cfg: any): any {
         spanLengths, spanEIs,
         spanTapers: cfg.spanTapers,
         lastSpanLoadStop: cfg.lastSpanLoadStop,
-        w1Val: cfg.w1Val, w2Val: cfg.w2Val
+        w1Val: cfg.w1Val, w2Val: cfg.w2Val,
+        // Flag: if any span is tapered, the HTML renderers should show
+        // decimal values (3 dp) instead of exact fractions, because the
+        // tapered FEM is computed numerically and the fractions are
+        // approximations of decimals — displaying them as fractions is
+        // misleading.
+        isTapered: cfg.spanTapers ? cfg.spanTapers.some((t: any) => t !== null) : false,
     };
 }
 

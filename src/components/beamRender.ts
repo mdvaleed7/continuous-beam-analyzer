@@ -113,16 +113,49 @@ function drawBeamDiagram(canvas: HTMLCanvasElement | null, result: any, wVal: nu
     ctx.fillStyle = C.beam;
     for (let sp = 0; sp < nSpans; sp++) {
         const x0 = nx(sp), x1 = nx(sp + 1);
-        let d1 = 4, d2 = 4; // base half-depth
+        let dLeft = 4, dRight = 4; // base half-depth (visual scale)
+
         if (spanTapers && spanTapers[sp]) {
-            const ratio = spanTapers[sp].d1 / spanTapers[sp].d2;
-            d2 = d1 / ratio;
+            const taper = spanTapers[sp];
+            // Normalize the taper depths to a visual scale (max ~12px half-depth)
+            const maxD = Math.max(taper.d1, taper.d2);
+            const scale = 12 / maxD;
+            dLeft = taper.d1 * scale;
+            dRight = taper.d2 * scale;
+
+            // For continuity at interior supports: if this span's right end
+            // (d2) doesn't match the next span's left end (d1), blend them
+            // by using the average. This ensures the beam looks continuous
+            // at the support even if the taper ratios are different.
+            if (sp < nSpans - 1 && spanTapers[sp + 1]) {
+                const nextTaper = spanTapers[sp + 1];
+                const nextMaxD = Math.max(nextTaper.d1, nextTaper.d2);
+                const nextScale = 12 / nextMaxD;
+                const nextDLeft = nextTaper.d1 * nextScale;
+                // Use the average for continuity
+                dRight = (dRight + nextDLeft) / 2;
+            }
+            // Also check previous span for left-end continuity
+            if (sp > 0 && spanTapers[sp - 1]) {
+                const prevTaper = spanTapers[sp - 1];
+                const prevMaxD = Math.max(prevTaper.d1, prevTaper.d2);
+                const prevScale = 12 / prevMaxD;
+                const prevDRight = prevTaper.d2 * prevScale;
+                dLeft = (dLeft + prevDRight) / 2;
+            }
+        } else if (sp > 0 && spanTapers && spanTapers[sp - 1]) {
+            // Previous span is tapered but this one isn't
+            const prevTaper = spanTapers[sp - 1];
+            const prevMaxD = Math.max(prevTaper.d1, prevTaper.d2);
+            const prevScale = 12 / prevMaxD;
+            dLeft = prevTaper.d2 * prevScale; // match previous right end
         }
+
         ctx.beginPath();
-        ctx.moveTo(x0, by - d1);
-        ctx.lineTo(x1, by - d2);
-        ctx.lineTo(x1, by + d2);
-        ctx.lineTo(x0, by + d1);
+        ctx.moveTo(x0, by - dLeft);
+        ctx.lineTo(x1, by - dRight);
+        ctx.lineTo(x1, by + dRight);
+        ctx.lineTo(x0, by + dLeft);
         ctx.fill();
     }
 
@@ -332,13 +365,15 @@ function drawDiagramPlot(canvas: HTMLCanvasElement | null, result: any, type: 's
 
         const valLeft = type === 'sfd' ? sp.VLeft_frac : sp.MLeft_frac;
         const valRight = type === 'sfd' ? sp.VRight_frac : sp.MRight_frac;
+        const isTapered = !!(result.spanTapers && result.spanTapers[si]);
 
         if (!valLeft.isZero() || si === 0) {
             const vL = valLeft.fl(result.w1Val, result.w2Val);
             const yL = type === 'bmd' ? zeroY + vL * scale : zeroY - vL * scale;
             let yOff = yL < zeroY ? -6 : 14;
             if (Math.abs(yL - zeroY) < 1e-5) yOff = -6;
-            drawOutlinedText(valLeft.str(true) + unit, x0 + 4, yL + yOff, 'left', textColor);
+            const strL = isTapered ? vL.toFixed(3) : valLeft.str(true);
+            drawOutlinedText(strL + unit, x0 + 4, yL + yOff, 'left', textColor);
         }
 
         const printRight = type === 'sfd' ? (!valRight.isZero() || si === nSpans - 1) : (si === nSpans - 1);
@@ -347,7 +382,8 @@ function drawDiagramPlot(canvas: HTMLCanvasElement | null, result: any, type: 's
             const yR = type === 'bmd' ? zeroY + vR * scale : zeroY - vR * scale;
             let yOff = yR < zeroY ? -6 : 14;
             if (Math.abs(yR - zeroY) < 1e-5) yOff = -6;
-            drawOutlinedText(valRight.str(true) + unit, x0 + spanPW - 4, yR + yOff, 'right', textColor);
+            const strR = isTapered ? vR.toFixed(3) : valRight.str(true);
+            drawOutlinedText(strR + unit, x0 + spanPW - 4, yR + yOff, 'right', textColor);
         }
 
         // Mark max moment / zero shear
@@ -364,7 +400,9 @@ function drawDiagramPlot(canvas: HTMLCanvasElement | null, result: any, type: 's
 
             ctx.font = '10px "JetBrains Mono"';
             let label = '';
-            if (sp.maxMExact) {
+            if (isTapered) {
+                label = sp.maxM.toFixed(3) + unitBmd;
+            } else if (sp.maxMExact) {
                 label = sp.maxMExact.isText ? sp.maxMExact.str() : sp.maxMExact.str(true) + unitBmd;
             } else if (sp.maxM !== null) {
                 label = isComb ? "Depends on w₁/w₂" : toFrac(Math.round(sp.maxM * 1e8) / 1e8).str() + unitBmd;

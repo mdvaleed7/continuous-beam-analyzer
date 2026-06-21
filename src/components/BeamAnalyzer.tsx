@@ -92,15 +92,12 @@ export default function BeamAnalyzer() {
                     const r = parseFloat(String(spanTaperRatios[i])) || 1;
 
                     let d1, d2;
-                    if (r >= 1) {
-                        // d2 is the smaller end
-                        d2 = depthFromEI(refEI);
-                        d1 = d2 * r;
-                    } else {
-                        // d1 is the smaller end
-                        d1 = depthFromEI(refEI);
-                        d2 = d1 / r;
-                    }
+                    // Always normalize w.r.t. d₂: d₂ has EI = refEI (the reference),
+                    // d₁ = d₂ × ratio. This means:
+                    //   ratio = 2 → d₁ = 2·d₂ (left deeper, stiffer)
+                    //   ratio = 0.5 → d₁ = 0.5·d₂ (right deeper, stiffer)
+                    d2 = depthFromEI(refEI);
+                    d1 = d2 * r;
 
                     spanTapers.push({ d1, d2, b: TAPER_B, E: TAPER_E, L });
                 } else {
@@ -340,15 +337,18 @@ export default function BeamAnalyzer() {
                                                 )}
                                             </div>
                                         </div>
-                                        <div style={{ display: 'flex', alignItems: 'center', paddingLeft: '85px', gap: '16px', marginTop: '12px', marginBottom: '8px' }}>
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '10px', marginBottom: '4px', paddingLeft: '0' }}>
                                             <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--text-muted)', cursor: 'pointer' }}>
                                                 <input type="checkbox" checked={spanIsTapered[i]} onChange={(e) => handleSpanChange(i, 'taperChecked', e.target.checked)} style={{ width: '14px', height: '14px', accentColor: 'var(--accent)' }} />
                                                 Tapered (Linear)
                                             </label>
                                             {spanIsTapered[i] && (
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', background: 'rgba(0,0,0,0.2)', padding: '4px 10px', borderRadius: '4px' }}>
-                                                    <span style={{ color: 'var(--text-muted)' }}>Depth Ratio <span style={{ fontStyle: 'italic', color: 'var(--accent)' }}>d₁/d₂</span>:</span>
-                                                    <input type="number" className="span-prop-input" value={spanTaperRatios[i]} min="0.001" step="0.1" style={{ width: '60px', padding: '4px 8px' }} onChange={(e) => handleSpanChange(i, 'taperRatio', e.target.value)} />
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', flexWrap: 'wrap' }}>
+                                                    <span style={{ color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>Depth Ratio <span style={{ fontStyle: 'italic', color: 'var(--accent)' }}>d₁/d₂</span>:</span>
+                                                    <input type="number" className="span-prop-input" value={spanTaperRatios[i]} min="0.01" step="0.1" style={{ width: '60px', padding: '4px 8px' }} onChange={(e) => handleSpanChange(i, 'taperRatio', e.target.value)} />
+                                                    <span style={{ color: 'var(--text-dim)', fontSize: '11px' }}>
+                                                        {spanTaperRatios[i] >= 1 ? `d₁ > d₂ (left deeper)` : `d₁ < d₂ (right deeper)`}
+                                                    </span>
                                                 </div>
                                             )}
                                         </div>
