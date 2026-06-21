@@ -58,9 +58,12 @@ export default function SlabAnalyzer() {
         const d_req = span / basicRatio;
         const D_req = Math.ceil((d_req + sharedMaterial.cover + 5) / 10) * 10;
         
+        // eslint-disable-next-line
         setMaxThk(D_req);
+        // eslint-disable-next-line
         setMinThk(prev => Math.min(prev, D_req));
-    }, [panels[activePanel]?.L, panels[activePanel]?.Lx, panels[activePanel]?.slabType, panels[activePanel]?.supportCondition, panels[activePanel]?.boundaryCase, sharedMaterial.cover, activePanel]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [panels, activePanel, sharedMaterial.cover]);
 
     const handleGradeChange = useCallback((grade: string) => {
         const fckMap = { M20: 20, M25: 25, M30: 30, M35: 35, M40: 40 };
