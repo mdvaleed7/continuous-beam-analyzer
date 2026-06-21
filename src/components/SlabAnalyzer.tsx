@@ -32,11 +32,35 @@ export default function SlabAnalyzer() {
     const [thkStep, setThkStep] = useState(10);
     const workerRef = React.useRef<Worker | null>(null);
 
+
     // Shared material across all panels
     const [sharedMaterial, setSharedMaterial] = useState({
         grade: 'M25', fck: 25, steelGrade: 'Fe500', fy: 500, cover: 20,
         LL: 3, SDL: 1.5, loadFactor: 1.5, ageOfLoading: '28',
     });
+
+    // Dynamically update maxThk based on required depth by L/d ratio
+    React.useEffect(() => {
+        const p = panels[activePanel];
+        if (!p) return;
+        
+        const span = (p.slabType === 'cantilever' ? p.L : p.Lx) * 1000;
+        let basicRatio = 20;
+        
+        if (p.slabType === 'cantilever') {
+            basicRatio = 7;
+        } else if (p.slabType === 'one-way') {
+            basicRatio = p.supportCondition === 'continuous' ? 26 : 20;
+        } else if (p.slabType === 'two-way' || p.slabType === 'auto') {
+            basicRatio = p.boundaryCase === 1 ? 26 : (p.boundaryCase === 9 ? 20 : 23);
+        }
+        
+        const d_req = span / basicRatio;
+        const D_req = Math.ceil((d_req + sharedMaterial.cover + 5) / 10) * 10;
+        
+        setMaxThk(D_req);
+        setMinThk(prev => Math.min(prev, D_req));
+    }, [panels[activePanel]?.L, panels[activePanel]?.Lx, panels[activePanel]?.slabType, panels[activePanel]?.supportCondition, panels[activePanel]?.boundaryCase, sharedMaterial.cover, activePanel]);
 
     const handleGradeChange = useCallback((grade: string) => {
         const fckMap = { M20: 20, M25: 25, M30: 30, M35: 35, M40: 40 };
