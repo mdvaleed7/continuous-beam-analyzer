@@ -24,6 +24,7 @@ import {
     type ConcreteGrade,
     type SteelGrade,
 } from '../lib/is456';
+import { computeCostIndex } from './economicOptimization';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -454,6 +455,7 @@ export interface OptimumFootingDesign {
     B: number;
     D: number;
     volume: number;
+    costIndex: number;
     result: FootingAnalysisResult;
 }
 
@@ -462,6 +464,7 @@ export interface FootingOptimizeResult {
     feasibleCount: number;
     topDesigns: OptimumFootingDesign[];
     optimum: OptimumFootingDesign | null;
+    costRatioUsed: number;
 }
 
 export type FootingProgressCallback = (done: number, total: number, feasible: number) => void;
@@ -473,6 +476,7 @@ export type FootingProgressCallback = (done: number, total: number, feasible: nu
 export function optimizeFooting(
     config: FootingConfig,
     params: FootingOptimizeParams,
+    costRatio: number = 90,
     onProgress?: FootingProgressCallback
 ): FootingOptimizeResult {
     const results: OptimumFootingDesign[] = [];
@@ -517,8 +521,14 @@ export function optimizeFooting(
                             volume = L * B * D1_m + (D - D1_m) / 3 * (A1 + A2 + Math.sqrt(A1 * A2));
                         }
 
+                        // Calculate steel weight (using required area since actual bars aren't selected here)
+                        // Ast_req is mm² per meter width.
+                        const steelWeight = ((result.flexureX.Ast_req + result.flexureZ.Ast_req) * L * B * 7850) / 1e6;
+                        
+                        const costIndex = computeCostIndex(volume, steelWeight, costRatio);
+
                         results.push({
-                            L, B, D, volume, result
+                            L, B, D, volume, costIndex, result
                         });
                     }
                 } catch (e) {
@@ -532,14 +542,15 @@ export function optimizeFooting(
         }
     }
 
-    // Sort by volume ascending
-    results.sort((a, b) => a.volume - b.volume);
+    // Sort by cost index ascending
+    results.sort((a, b) => a.costIndex - b.costIndex);
 
     return {
         totalTrials: total,
         feasibleCount: results.length,
         topDesigns: results.slice(0, 10),
         optimum: results.length > 0 ? results[0] : null,
+        costRatioUsed: costRatio,
     };
 }
 

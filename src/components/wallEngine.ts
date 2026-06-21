@@ -16,9 +16,9 @@ import {
     type ConcreteGrade,
     type SteelGrade,
 } from '../lib/is456';
+import { computeCostIndex } from './economicOptimization';
 
-
-// ─── Public types ────────────────────────────────────────────────────────────
+// ───────────────────── Types ────────────────────────────────────────────────────────────
 
 export type WaterMode = 'dry' | 'partial' | 'submerged';
 export type ShearStatus = 'minimum' | 'design' | 'FAIL';
@@ -199,6 +199,7 @@ export interface OptimumDesign {
     concreteVol: number;
     steelWeight: number;
     maxUtilization: number;
+    costIndex: number;
     result: WallAnalysisResult;
 }
 
@@ -209,6 +210,7 @@ export interface OptimizeResult {
     method: 'full-enumeration' | 'sequential-greedy';
     topDesigns: OptimumDesign[];
     optimum: OptimumDesign | null;
+    costRatioUsed: number;
 }
 
 /**
@@ -923,7 +925,7 @@ export function analyzeWall(config: WallConfig): WallAnalysisResult {
  * @param config     wall configuration (zones, soil, material, optimization bounds)
  * @param onProgress optional callback invoked every ~500 combos with progress info
  */
-export function optimizeWall(config: WallConfig, onProgress?: ProgressCallback): OptimizeResult {
+export function optimizeWall(config: WallConfig, costRatio: number = 90, onProgress?: ProgressCallback): OptimizeResult {
     const { zones, minThk, maxThk, thkStep, ...restConfig } = config;
     
     // Generate thickness options
@@ -963,7 +965,7 @@ export function optimizeWall(config: WallConfig, onProgress?: ProgressCallback):
 
     if (totalCombos > maxCombos) {
         // Fall back to greedy sequential optimization (approximate, not exhaustive)
-        return optimizeSequential(config, thicknesses, sharedMesh, onProgress);
+        return optimizeSequential(config, thicknesses, sharedMesh, costRatio, onProgress);
     }
     
     for (let combo = 0; combo < totalCombos; combo++) {
@@ -991,6 +993,7 @@ export function optimizeWall(config: WallConfig, onProgress?: ProgressCallback):
             } as WallConfig);
             
             if (result.feasible) {
+                const costIndex = computeCostIndex(result.totalConcreteVol, result.totalSteelWeight, costRatio);
                 results.push({
                     thicknesses: config.isTapered 
                         ? indices.map((idx: number) => thicknesses[idx])
@@ -998,6 +1001,7 @@ export function optimizeWall(config: WallConfig, onProgress?: ProgressCallback):
                     concreteVol: result.totalConcreteVol,
                     steelWeight: result.totalSteelWeight,
                     maxUtilization: result.maxUtilization,
+                    costIndex,
                     result,
                 });
             }
@@ -1027,11 +1031,11 @@ export function optimizeWall(config: WallConfig, onProgress?: ProgressCallback):
         }
     }
     
-    // Sort by concrete volume (primary), then steel weight (secondary)
+    // Sort by cost index (primary), then max utilization (secondary tie-breaker)
     results.sort((a, b) => {
-        const dv = a.concreteVol - b.concreteVol;
-        if (Math.abs(dv) > 0.001) return dv;
-        return a.steelWeight - b.steelWeight;
+        const dCI = a.costIndex - b.costIndex;
+        if (Math.abs(dCI) > 0.001) return dCI;
+        return a.maxUtilization - b.maxUtilization;
     });
     
     return {
@@ -1044,11 +1048,12 @@ export function optimizeWall(config: WallConfig, onProgress?: ProgressCallback):
         method: 'full-enumeration',
         topDesigns: results.slice(0, 10),
         optimum: results.length > 0 ? results[0] : null,
+        costRatioUsed: costRatio,
     };
 }
 
 /** Sequential single-zone optimization (for large search spaces) */
-function optimizeSequential(config: WallConfig, thicknesses: number[], sharedMesh: PressureMesh | null, onProgress?: ProgressCallback): OptimizeResult {
+function optimizeSequential(config: WallConfig, thicknesses: number[], sharedMesh: PressureMesh | null, costRatio: number, onProgress?: ProgressCallback): OptimizeResult {
     const { zones, ...restConfig } = config;
     // PERF-004: reuse the caller's pre-computed pressure mesh; build one only if a
     // caller invoked this path directly without supplying it.
@@ -1084,7 +1089,7 @@ function optimizeSequential(config: WallConfig, thicknesses: number[], sharedMes
         for (let v = 0; v < nVars; v++) {
             const origThk = currentVars[v];
             let bestThk = origThk;
-            let bestVol = Infinity;
+            let bestCostIndex = Infinity;
             
             for (const t of thicknesses) {
                 currentVars[v] = t;
@@ -1092,9 +1097,12 @@ function optimizeSequential(config: WallConfig, thicknesses: number[], sharedMes
                 try {
                     const trialZones = applyVars(currentVars);
                     const result = analyzeWall({ ...restConfig, zones: trialZones, _mesh: mesh } as WallConfig);
-                    if (result.feasible && result.totalConcreteVol < bestVol) {
-                        bestVol = result.totalConcreteVol;
-                        bestThk = t;
+                    if (result.feasible) {
+                        const ci = computeCostIndex(result.totalConcreteVol, result.totalSteelWeight, costRatio);
+                        if (ci < bestCostIndex) {
+                            bestCostIndex = ci;
+                            bestThk = t;
+                        }
                     }
                 } catch (e) { /* skip */ }
                 // Report progress periodically
@@ -1122,11 +1130,13 @@ function optimizeSequential(config: WallConfig, thicknesses: number[], sharedMes
     // defined` on EVERY sequential-fallback run, so any optimization over a large search
     // space crashed instead of returning a result. Use `currentVars` directly, and share
     // a single design object between `topDesigns[0]` and `optimum` so they cannot diverge.
+    const finalCI = computeCostIndex(finalResult.totalConcreteVol, finalResult.totalSteelWeight, costRatio);
     const best: OptimumDesign = {
         thicknesses: [...currentVars],
         concreteVol: finalResult.totalConcreteVol,
         steelWeight: finalResult.totalSteelWeight,
         maxUtilization: finalResult.maxUtilization,
+        costIndex: finalCI,
         result: finalResult,
     };
     const feasible = finalResult.feasible;
@@ -1144,6 +1154,7 @@ function optimizeSequential(config: WallConfig, thicknesses: number[], sharedMes
         method: 'sequential-greedy',
         topDesigns: feasible ? [best] : [],
         optimum: feasible ? best : null,
+        costRatioUsed: costRatio,
     };
 }
 

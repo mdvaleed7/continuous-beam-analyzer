@@ -19,6 +19,7 @@ import {
     type ConcreteGrade,
     type SteelGrade,
 } from '../lib/is456';
+import { computeCostIndex } from './economicOptimization';
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -994,6 +995,7 @@ export const SUPPORT_CONDITIONS: readonly SupportConditionOption[] = [
 // ═══════════════════════════════════════════════════════════════
 export interface OptimumSlabDesign {
     thickness: number;
+    costIndex: number;
     result: SlabAnalysisResult;
 }
 
@@ -1002,6 +1004,7 @@ export interface SlabOptimizeResult {
     feasibleCount: number;
     topDesigns: OptimumSlabDesign[];
     optimum: OptimumSlabDesign | null;
+    costRatioUsed: number;
 }
 
 export type SlabProgressCallback = (done: number, total: number, feasible: number) => void;
@@ -1010,7 +1013,7 @@ export type SlabProgressCallback = (done: number, total: number, feasible: numbe
  * Optimize slab thickness by sweeping a range of thicknesses and finding the
  * minimum one that satisfies all design criteria.
  */
-export function optimizeSlab(config: SlabConfig, thicknesses: number[], onProgress?: SlabProgressCallback): SlabOptimizeResult {
+export function optimizeSlab(config: SlabConfig, thicknesses: number[], costRatio: number = 90, onProgress?: SlabProgressCallback): SlabOptimizeResult {
     const results: OptimumSlabDesign[] = [];
     let done = 0;
     const total = thicknesses.length;
@@ -1022,8 +1025,14 @@ export function optimizeSlab(config: SlabConfig, thicknesses: number[], onProgre
             const result = analyzeSlab(trialConfig);
 
             if (result.overallStatus === 'SAFE') {
+                const concreteVol = (D / 1000) * result.Lx * result.Ly;
+                const steelWeight = ((result.bars_x_bot.Ast_provided + result.bars_x_top.Ast_provided + 
+                                      result.bars_y_bot.Ast_provided + result.bars_y_top.Ast_provided) * 
+                                     result.Lx * result.Ly * 7850) / 1e6;
+                const costIndex = computeCostIndex(concreteVol, steelWeight, costRatio);
                 results.push({
                     thickness: D,
+                    costIndex,
                     result,
                 });
             }
@@ -1036,13 +1045,14 @@ export function optimizeSlab(config: SlabConfig, thicknesses: number[], onProgre
         }
     }
 
-    // Sort by thickness (volume) ascending
-    results.sort((a, b) => a.thickness - b.thickness);
+    // Sort by cost index ascending
+    results.sort((a, b) => a.costIndex - b.costIndex);
 
     return {
         totalTrials: total,
         feasibleCount: results.length,
         topDesigns: results.slice(0, 5),
         optimum: results.length > 0 ? results[0] : null,
+        costRatioUsed: costRatio,
     };
 }
