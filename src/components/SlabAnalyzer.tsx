@@ -643,8 +643,8 @@ export default function SlabAnalyzer() {
                                     <tr>
                                         <td>Status</td>
                                         <td>
-                                            <span className={`chip ${r.ldCheck.status === 'OK' ? 'chip-safe' : 'chip-fail'}`}>
-                                                {r.ldCheck.status}
+                                            <span style={{ color: '#666', fontStyle: 'italic' }}>
+                                                IGNORED
                                             </span>
                                         </td>
                                     </tr>
