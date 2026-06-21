@@ -247,7 +247,7 @@ export default function SlabAnalyzer() {
                         </div>
                         <div className="control-group">
                             <label>Self-weight (kN/m²)</label>
-                            <input title="Value" type="number" value={(p.D / 1000 * 25).toFixed(2)} disabled
+                            <input type="number" value={(p.D / 1000 * 25).toFixed(2)} disabled
                                 title="Calculated automatically as D × 25 kN/m³. Not user-editable." />
                         </div>
                         <div className="control-group">
