@@ -24,6 +24,13 @@ export default function SlabAnalyzer() {
     const [error, setError] = useState<string | null>(null);
     const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
 
+    const [isOptimizing, setIsOptimizing] = useState(false);
+    const [optProgress, setOptProgress] = useState({ done: 0, total: 0, feasible: 0 });
+    const [minThk, setMinThk] = useState(100);
+    const [maxThk, setMaxThk] = useState(300);
+    const [thkStep, setThkStep] = useState(10);
+    const workerRef = React.useRef<Worker | null>(null);
+
     // Shared material across all panels
     const [sharedMaterial, setSharedMaterial] = useState({
         grade: 'M25', fck: 25, steelGrade: 'Fe500', fy: 500, cover: 20,
@@ -88,6 +95,88 @@ export default function SlabAnalyzer() {
             setResults(null);
         }
     }, [panels, sharedMaterial]);
+
+    const runOptimization = useCallback(() => {
+        if (workerRef.current) {
+            workerRef.current.terminate();
+        }
+        
+        setError(null);
+        setIsOptimizing(true);
+        setOptProgress({ done: 0, total: 0, feasible: 0 });
+
+        const worker = new Worker(new URL('../workers/slabOptimizer.worker', import.meta.url), { type: 'module' });
+        workerRef.current = worker;
+
+        const p = panels[activePanel];
+        const config = {
+            ...p,
+            fck: sharedMaterial.fck,
+            fy: sharedMaterial.fy,
+            grade: sharedMaterial.grade,
+            steelGrade: sharedMaterial.steelGrade,
+            cover: sharedMaterial.cover,
+            LL: sharedMaterial.LL,
+            SDL: sharedMaterial.SDL,
+            loadFactor: sharedMaterial.loadFactor,
+            ageOfLoading: sharedMaterial.ageOfLoading,
+        };
+
+        const thicknesses = [];
+        for (let t = minThk; t <= maxThk; t += thkStep) thicknesses.push(t);
+
+        worker.onmessage = (e) => {
+            const msg = e.data;
+            if (msg.type === 'progress') {
+                setOptProgress({ done: msg.done, total: msg.total, feasible: msg.feasible });
+            } else if (msg.type === 'done') {
+                setIsOptimizing(false);
+                if (msg.result.optimum) {
+                    // Update active panel thickness
+                    updatePanel(activePanel, 'D', msg.result.optimum.thickness);
+                    // We must wait for state update before analyzing, so we let the effect of updatePanel trigger a re-analysis if we wanted to,
+                    // but it's simpler to just set a timeout or rely on the user clicking "Analyze All" (or we manually re-construct panels array).
+                    // Actually, runAnalysis relies on `panels` from scope, which is stale here. We can just analyze the optimum immediately:
+                    const newPanels = [...panels];
+                    newPanels[activePanel] = { ...newPanels[activePanel], D: msg.result.optimum.thickness };
+                    setPanels(newPanels);
+                    
+                    // Small delay to allow state to settle, then run analysis (runAnalysis uses state, so it might still be stale. Better to analyze directly or rely on user).
+                    // We'll let the panel update happen, then the user can analyze. But auto-analyzing is better.
+                    setTimeout(() => {
+                        const btn = document.getElementById('analyze-btn');
+                        if (btn) btn.click();
+                    }, 50);
+                } else {
+                    setError('No feasible thickness found in the given range.');
+                }
+                worker.terminate();
+                workerRef.current = null;
+            } else if (msg.type === 'error') {
+                setIsOptimizing(false);
+                setError(msg.error);
+                worker.terminate();
+                workerRef.current = null;
+            }
+        };
+
+        worker.postMessage({ type: 'optimize', config, thicknesses });
+    }, [panels, activePanel, sharedMaterial, minThk, maxThk, thkStep, updatePanel]);
+
+    const cancelOptimization = useCallback(() => {
+        if (workerRef.current) {
+            workerRef.current.terminate();
+            workerRef.current = null;
+            setIsOptimizing(false);
+        }
+    }, []);
+    
+    // cleanup worker on unmount
+    React.useEffect(() => {
+        return () => {
+            if (workerRef.current) workerRef.current.terminate();
+        };
+    }, []);
 
     const handlePreviewReport = useCallback(async () => {
         if (!results) return;
@@ -299,6 +388,46 @@ export default function SlabAnalyzer() {
                             <input type="number" min="75" max="500" step="5" value={p.D}
                                 onChange={e => updatePanel(activePanel, 'D', +e.target.value)} />
                         </div>
+                        
+                        <div style={{ marginTop: '16px', padding: '12px', background: 'var(--bg-card)', borderRadius: '8px', border: '1px solid var(--border)' }}>
+                            <h4 style={{ margin: '0 0 12px 0', fontSize: '0.9rem', color: 'var(--primary)' }}>Auto-Optimize Thickness</h4>
+                            <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
+                                <div style={{ flex: 1 }}>
+                                    <label style={{ fontSize: '0.75rem', display: 'block', marginBottom: '4px' }}>Min (mm)</label>
+                                    <input type="number" min="75" step="5" value={minThk} onChange={e => setMinThk(+e.target.value)} style={{ width: '100%', padding: '6px' }} />
+                                </div>
+                                <div style={{ flex: 1 }}>
+                                    <label style={{ fontSize: '0.75rem', display: 'block', marginBottom: '4px' }}>Max (mm)</label>
+                                    <input type="number" min="75" step="5" value={maxThk} onChange={e => setMaxThk(+e.target.value)} style={{ width: '100%', padding: '6px' }} />
+                                </div>
+                                <div style={{ flex: 1 }}>
+                                    <label style={{ fontSize: '0.75rem', display: 'block', marginBottom: '4px' }}>Step (mm)</label>
+                                    <input type="number" min="5" step="5" value={thkStep} onChange={e => setThkStep(+e.target.value)} style={{ width: '100%', padding: '6px' }} />
+                                </div>
+                            </div>
+                            
+                            {isOptimizing ? (
+                                <div>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: '4px' }}>
+                                        <span>Optimizing...</span>
+                                        <span>{Math.round((optProgress.done / optProgress.total) * 100) || 0}%</span>
+                                    </div>
+                                    <div style={{ height: '6px', background: 'var(--bg-input)', borderRadius: '3px', overflow: 'hidden', marginBottom: '8px' }}>
+                                        <div style={{ height: '100%', background: 'var(--primary)', width: `${(optProgress.done / optProgress.total) * 100}%`, transition: 'width 0.2s' }}></div>
+                                    </div>
+                                    <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', textAlign: 'center', marginBottom: '8px' }}>
+                                        Evaluating {optProgress.done} / {optProgress.total} combinations
+                                    </div>
+                                    <button className="btn btn-danger" style={{ width: '100%', padding: '6px' }} onClick={cancelOptimization}>
+                                        Cancel Optimization
+                                    </button>
+                                </div>
+                            ) : (
+                                <button className="btn" style={{ width: '100%', padding: '8px', border: '1px solid var(--primary)', color: 'var(--primary)', background: 'transparent' }} onClick={runOptimization}>
+                                    ✨ Optimize Current Panel
+                                </button>
+                            )}
+                        </div>
                     </div>
 
                     {panels.length > 1 && (
@@ -309,7 +438,7 @@ export default function SlabAnalyzer() {
                     )}
                 </div>
 
-                <button className="btn btn-primary" style={{ marginTop: '16px', width: '100%' }}
+                <button id="analyze-btn" className="btn btn-primary" style={{ marginTop: '16px', width: '100%' }}
                     onClick={runAnalysis}>
                     ⚡ Analyze All Panels
                 </button>

@@ -439,3 +439,107 @@ export const FOOTING_TYPES: readonly FootingTypeOption[] = [
     { value: 'flat', label: 'Flat Footing', desc: 'Uniform thickness throughout' },
     { value: 'slope', label: 'Slope Footing', desc: 'Sloped top with flat base (pedestal at column)' },
 ];
+
+// ═══════════════════════════════════════════════════════════════
+//  OPTIMIZER
+// ═══════════════════════════════════════════════════════════════
+export interface FootingOptimizeParams {
+    minL: number; maxL: number; stepL: number;
+    minB: number; maxB: number; stepB: number;
+    minD: number; maxD: number; stepD: number;
+}
+
+export interface OptimumFootingDesign {
+    L: number;
+    B: number;
+    D: number;
+    volume: number;
+    result: FootingAnalysisResult;
+}
+
+export interface FootingOptimizeResult {
+    totalTrials: number;
+    feasibleCount: number;
+    topDesigns: OptimumFootingDesign[];
+    optimum: OptimumFootingDesign | null;
+}
+
+export type FootingProgressCallback = (done: number, total: number, feasible: number) => void;
+
+/**
+ * Optimize footing dimensions by sweeping a range of L, B, and D to find
+ * the combination with the minimum concrete volume that satisfies all checks.
+ */
+export function optimizeFooting(
+    config: FootingConfig,
+    params: FootingOptimizeParams,
+    onProgress?: FootingProgressCallback
+): FootingOptimizeResult {
+    const results: OptimumFootingDesign[] = [];
+    const { minL, maxL, stepL, minB, maxB, stepB, minD, maxD, stepD } = params;
+
+    // Calculate total combinations
+    const numL = Math.max(1, Math.floor((maxL - minL) / stepL) + 1);
+    const numB = Math.max(1, Math.floor((maxB - minB) / stepB) + 1);
+    const numD = Math.max(1, Math.floor((maxD - minD) / stepD) + 1);
+    const total = numL * numB * numD;
+    
+    let done = 0;
+
+    for (let L = minL; L <= maxL; L += stepL) {
+        for (let B = minB; B <= maxB; B += stepB) {
+            for (let D = minD; D <= maxD; D += stepD) {
+                done++;
+                try {
+                    const trialConfig = { ...config, L, B, D };
+                    // For slope footings, assume D1 is fixed or linearly related,
+                    // but for optimization we just use D as the pedestal depth.
+                    // If D1 is specified, we leave it as is, provided it's <= D.
+                    if (trialConfig.footingType === 'slope' && trialConfig.D1 !== undefined) {
+                        trialConfig.D1 = Math.min(trialConfig.D1, D * 1000); // ensure D1 <= D_mm
+                    }
+                    
+                    const result = analyzeFooting(trialConfig);
+
+                    if (result.overallStatus === 'SAFE') {
+                        // Calculate volume for sorting. 
+                        // Flat footing volume: L * B * D
+                        // Slope footing volume: complex, but roughly we can just use L*B*D as an upper bound or compute exact.
+                        // For simplicity in optimization ranking, L * B * D is sufficient.
+                        let volume = L * B * D;
+                        if (trialConfig.footingType === 'slope') {
+                            const pedA = trialConfig.pedestal_a > 0 ? trialConfig.pedestal_a / 1000 : trialConfig.col_a / 1000;
+                            const pedB = trialConfig.pedestal_b > 0 ? trialConfig.pedestal_b / 1000 : trialConfig.col_b / 1000;
+                            const D1_m = (trialConfig.D1 ?? (D * 1000)) / 1000;
+                            const A1 = pedA * pedB;
+                            const A2 = L * B;
+                            // Frustum volume + base volume
+                            volume = L * B * D1_m + (D - D1_m) / 3 * (A1 + A2 + Math.sqrt(A1 * A2));
+                        }
+
+                        results.push({
+                            L, B, D, volume, result
+                        });
+                    }
+                } catch (e) {
+                    // Skip invalid
+                }
+
+                if (onProgress && (done % 50 === 0 || done === total)) {
+                    onProgress(done, total, results.length);
+                }
+            }
+        }
+    }
+
+    // Sort by volume ascending
+    results.sort((a, b) => a.volume - b.volume);
+
+    return {
+        totalTrials: total,
+        feasibleCount: results.length,
+        topDesigns: results.slice(0, 10),
+        optimum: results.length > 0 ? results[0] : null,
+    };
+}
+

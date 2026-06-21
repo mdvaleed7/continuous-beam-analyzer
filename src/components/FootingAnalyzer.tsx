@@ -42,6 +42,23 @@ export default function FootingAnalyzer() {
     const [error, setError] = useState<string | null>(null);
     const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null);
 
+    const [isOptimizing, setIsOptimizing] = useState(false);
+    const [optProgress, setOptProgress] = useState({ done: 0, total: 0, feasible: 0 });
+    
+    const [minL, setMinL] = useState(1.0);
+    const [maxL, setMaxL] = useState(4.0);
+    const [stepL, setStepL] = useState(0.1);
+    
+    const [minB, setMinB] = useState(1.0);
+    const [maxB, setMaxB] = useState(4.0);
+    const [stepB, setStepB] = useState(0.1);
+    
+    const [minD, setMinD] = useState(0.3);
+    const [maxD, setMaxD] = useState(1.0);
+    const [stepD, setStepD] = useState(0.05);
+
+    const workerRef = React.useRef<Worker | null>(null);
+
     const [sharedMaterial, setSharedMaterial] = useState({
         grade: 'M25', fck: 25, steelGrade: 'Fe500', fy: 500, cover: 50,
         gammaFill: 18, gammaConcrete: 25, addnWtPercent: 10, shearStrength: 0.3,
@@ -106,6 +123,85 @@ export default function FootingAnalyzer() {
             setResults(null);
         }
     }, [footings, sharedMaterial]);
+
+    const runOptimization = useCallback(() => {
+        if (workerRef.current) {
+            workerRef.current.terminate();
+        }
+        
+        setError(null);
+        setIsOptimizing(true);
+        setOptProgress({ done: 0, total: 0, feasible: 0 });
+
+        const worker = new Worker(new URL('../workers/footingOptimizer.worker', import.meta.url), { type: 'module' });
+        workerRef.current = worker;
+
+        const f = footings[activeFooting];
+        const config = {
+            ...f,
+            fck: sharedMaterial.fck,
+            fy: sharedMaterial.fy,
+            grade: sharedMaterial.grade,
+            steelGrade: sharedMaterial.steelGrade,
+            cover: sharedMaterial.cover,
+            gammaFill: sharedMaterial.gammaFill,
+            gammaConcrete: sharedMaterial.gammaConcrete,
+            addnWtPercent: sharedMaterial.addnWtPercent,
+            shearStrength: sharedMaterial.shearStrength,
+            depthFill: sharedMaterial.depthFill,
+        };
+
+        const params = { minL, maxL, stepL, minB, maxB, stepB, minD, maxD, stepD };
+
+        worker.onmessage = (e) => {
+            const msg = e.data;
+            if (msg.type === 'progress') {
+                setOptProgress({ done: msg.done, total: msg.total, feasible: msg.feasible });
+            } else if (msg.type === 'done') {
+                setIsOptimizing(false);
+                if (msg.result.optimum) {
+                    const newFootings = [...footings];
+                    newFootings[activeFooting] = {
+                        ...newFootings[activeFooting],
+                        L: msg.result.optimum.L,
+                        B: msg.result.optimum.B,
+                        D: msg.result.optimum.D
+                    };
+                    setFootings(newFootings);
+                    
+                    setTimeout(() => {
+                        const btn = document.getElementById('analyze-btn');
+                        if (btn) btn.click();
+                    }, 50);
+                } else {
+                    setError('No feasible dimension combination found in the given range.');
+                }
+                worker.terminate();
+                workerRef.current = null;
+            } else if (msg.type === 'error') {
+                setIsOptimizing(false);
+                setError(msg.error);
+                worker.terminate();
+                workerRef.current = null;
+            }
+        };
+
+        worker.postMessage({ type: 'optimize', config, params });
+    }, [footings, activeFooting, sharedMaterial, minL, maxL, stepL, minB, maxB, stepB, minD, maxD, stepD]);
+
+    const cancelOptimization = useCallback(() => {
+        if (workerRef.current) {
+            workerRef.current.terminate();
+            workerRef.current = null;
+            setIsOptimizing(false);
+        }
+    }, []);
+    
+    React.useEffect(() => {
+        return () => {
+            if (workerRef.current) workerRef.current.terminate();
+        };
+    }, []);
 
     const handlePreviewReport = useCallback(async () => {
         if (!results) return;
@@ -273,6 +369,62 @@ export default function FootingAnalyzer() {
                             <input type="number" min="0.2" step="0.05" value={f.D}
                                 onChange={e => updateFooting(activeFooting, 'D', +e.target.value)} />
                         </div>
+                        
+                        <div style={{ marginTop: '16px', padding: '12px', background: 'var(--bg-card)', borderRadius: '8px', border: '1px solid var(--border)' }}>
+                            <h4 style={{ margin: '0 0 12px 0', fontSize: '0.9rem', color: 'var(--primary)' }}>Auto-Optimize Dimensions</h4>
+                            
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px', marginBottom: '8px' }}>
+                                <label style={{ fontSize: '0.75rem', color: 'var(--text-dim)', alignSelf: 'end' }}>L (m)</label>
+                                <div>
+                                    <input type="number" min="0.5" step="0.1" value={minL} onChange={e => setMinL(+e.target.value)} style={{ width: '100%', padding: '4px' }} title="Min L" placeholder="Min" />
+                                </div>
+                                <div>
+                                    <input type="number" min="0.5" step="0.1" value={maxL} onChange={e => setMaxL(+e.target.value)} style={{ width: '100%', padding: '4px' }} title="Max L" placeholder="Max" />
+                                </div>
+                            </div>
+                            
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px', marginBottom: '8px' }}>
+                                <label style={{ fontSize: '0.75rem', color: 'var(--text-dim)', alignSelf: 'end' }}>B (m)</label>
+                                <div>
+                                    <input type="number" min="0.5" step="0.1" value={minB} onChange={e => setMinB(+e.target.value)} style={{ width: '100%', padding: '4px' }} title="Min B" placeholder="Min" />
+                                </div>
+                                <div>
+                                    <input type="number" min="0.5" step="0.1" value={maxB} onChange={e => setMaxB(+e.target.value)} style={{ width: '100%', padding: '4px' }} title="Max B" placeholder="Max" />
+                                </div>
+                            </div>
+                            
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px', marginBottom: '12px' }}>
+                                <label style={{ fontSize: '0.75rem', color: 'var(--text-dim)', alignSelf: 'end' }}>D (m)</label>
+                                <div>
+                                    <input type="number" min="0.1" step="0.05" value={minD} onChange={e => setMinD(+e.target.value)} style={{ width: '100%', padding: '4px' }} title="Min D" placeholder="Min" />
+                                </div>
+                                <div>
+                                    <input type="number" min="0.1" step="0.05" value={maxD} onChange={e => setMaxD(+e.target.value)} style={{ width: '100%', padding: '4px' }} title="Max D" placeholder="Max" />
+                                </div>
+                            </div>
+
+                            {isOptimizing ? (
+                                <div>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: '4px' }}>
+                                        <span>Optimizing...</span>
+                                        <span>{Math.round((optProgress.done / optProgress.total) * 100) || 0}%</span>
+                                    </div>
+                                    <div style={{ height: '6px', background: 'var(--bg-input)', borderRadius: '3px', overflow: 'hidden', marginBottom: '8px' }}>
+                                        <div style={{ height: '100%', background: 'var(--primary)', width: `${(optProgress.done / optProgress.total) * 100}%`, transition: 'width 0.2s' }}></div>
+                                    </div>
+                                    <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', textAlign: 'center', marginBottom: '8px' }}>
+                                        Evaluating {optProgress.done} / {optProgress.total} combinations
+                                    </div>
+                                    <button className="btn btn-danger" style={{ width: '100%', padding: '6px' }} onClick={cancelOptimization}>
+                                        Cancel Optimization
+                                    </button>
+                                </div>
+                            ) : (
+                                <button className="btn" style={{ width: '100%', padding: '8px', border: '1px solid var(--primary)', color: 'var(--primary)', background: 'transparent' }} onClick={runOptimization}>
+                                    ✨ Optimize Current Footing
+                                </button>
+                            )}
+                        </div>
 
                         {/* Slope footing: D1 */}
                         {f.footingType === 'slope' && (
@@ -327,7 +479,7 @@ export default function FootingAnalyzer() {
                     )}
                 </div>
 
-                <button className="btn btn-primary" style={{ marginTop: '16px', width: '100%' }}
+                <button id="analyze-btn" className="btn btn-primary" style={{ marginTop: '16px', width: '100%' }}
                     onClick={runAnalysis}>
                     ⚡ Analyze All Footings
                 </button>

@@ -505,8 +505,17 @@ function analyzeBeam(cfg: any): any {
         } else if (loadCase === 'udl+uvl') {
             const alphaL = cumAlphas[sp].div(totalLoadedAlpha);
             const alphaR = cumAlphas[sp + 1].div(totalLoadedAlpha);
-            wL = new LinExpr(ONE.sub(alphaL), alphaL);
-            wR = new LinExpr(ONE.sub(alphaR), alphaR);
+            let wl_expr = new LinExpr(ONE.sub(alphaL), alphaL);
+            let wr_expr = new LinExpr(ONE.sub(alphaR), alphaR);
+            
+            // User requested w1 to be substituted in terms of w2 using the ratio w1/w2.
+            if (cfg.w2Val !== undefined && cfg.w2Val !== 0 && cfg.w1Val !== undefined) {
+                const k = toFrac(cfg.w1Val / cfg.w2Val);
+                wl_expr = new LinExpr(ZERO, wl_expr.c1.mul(k).add(wl_expr.c2));
+                wr_expr = new LinExpr(ZERO, wr_expr.c1.mul(k).add(wr_expr.c2));
+            }
+            wL = wl_expr;
+            wR = wr_expr;
         } else if (loadCase === 'uvl-global') {
             wL = ONE.sub(cumAlphas[sp].div(totalLoadedAlpha));
             wR = ONE.sub(cumAlphas[sp + 1].div(totalLoadedAlpha));

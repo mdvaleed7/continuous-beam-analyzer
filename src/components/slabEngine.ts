@@ -988,3 +988,61 @@ export const SUPPORT_CONDITIONS: readonly SupportConditionOption[] = [
     { value: 'one_end', label: 'One-End Continuous', desc: 'One end continuous, one simply supported — M+ = wL²/10, M- = wL²/10' },
     { value: 'continuous', label: 'Both Ends Continuous', desc: 'Both ends continuous — M+ = wL²/12, M- = wL²/10' },
 ];
+
+// ═══════════════════════════════════════════════════════════════
+//  OPTIMIZER
+// ═══════════════════════════════════════════════════════════════
+export interface OptimumSlabDesign {
+    thickness: number;
+    result: SlabAnalysisResult;
+}
+
+export interface SlabOptimizeResult {
+    totalTrials: number;
+    feasibleCount: number;
+    topDesigns: OptimumSlabDesign[];
+    optimum: OptimumSlabDesign | null;
+}
+
+export type SlabProgressCallback = (done: number, total: number, feasible: number) => void;
+
+/**
+ * Optimize slab thickness by sweeping a range of thicknesses and finding the
+ * minimum one that satisfies all design criteria.
+ */
+export function optimizeSlab(config: SlabConfig, thicknesses: number[], onProgress?: SlabProgressCallback): SlabOptimizeResult {
+    const results: OptimumSlabDesign[] = [];
+    let done = 0;
+    const total = thicknesses.length;
+
+    for (const D of thicknesses) {
+        done++;
+        try {
+            const trialConfig = { ...config, D };
+            const result = analyzeSlab(trialConfig);
+
+            if (result.overallStatus === 'SAFE') {
+                results.push({
+                    thickness: D,
+                    result,
+                });
+            }
+        } catch (e) {
+            // skip invalid thickness
+        }
+
+        if (onProgress && (done % 5 === 0 || done === total)) {
+            onProgress(done, total, results.length);
+        }
+    }
+
+    // Sort by thickness (volume) ascending
+    results.sort((a, b) => a.thickness - b.thickness);
+
+    return {
+        totalTrials: total,
+        feasibleCount: results.length,
+        topDesigns: results.slice(0, 5),
+        optimum: results.length > 0 ? results[0] : null,
+    };
+}
