@@ -440,7 +440,7 @@ body {
     padding: 10px 14px;
     border-bottom: 1px solid var(--border);
     vertical-align: middle;
-    white-space: nowrap;
+    white-space: normal;
 }
 .table-wrap tbody tr {
     transition: background var(--transition);
@@ -719,6 +719,8 @@ body {
     border-radius: 12px;
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
     overflow: hidden;
+    display: flex;
+    flex-direction: column;
 }
 .pdf-preview-header {
     display: flex;
@@ -733,6 +735,12 @@ body {
     font-weight: 700;
     color: var(--text);
     margin: 0;
+}
+.iframe-modal {
+    flex: 1;
+    width: 100%;
+    border: none;
+    background: white;
 }
 
 /* ---------- Zone Geometry Grid Cell ---------- */
