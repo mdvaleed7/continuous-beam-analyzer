@@ -46,7 +46,7 @@ for preliminary design use.
 The following test suites run in CI (`npm test`):
 
 | Suite | Coverage |
-|---|---|
+| --- | --- |
 | `beamEngine.setA.test.js` | Beam solver regression — 4 closed-form cases (pinned-pinned, fixed-fixed, fixed-pinned, 2-span continuous) |
 | `wallEngine.setB.test.js` | Wall engine regression — 3 propped-cantilever cases (dry, submerged, 2-zone) |
 | `wallEngine.endcond.test.js` | Wall end-condition is hardcoded `fixed-right` (CALC-003 / GUI-002) |

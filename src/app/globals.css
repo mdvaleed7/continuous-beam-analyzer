@@ -905,3 +905,32 @@ body {
 .mono {
     font-family: var(--mono);
 }
+
+
+/* Taper UI classes added for BeamAnalyzer */
+.hidden { display: none !important; }
+.taper-span-row { display: flex; flex-direction: column; gap: 8px; padding: 12px 0; }
+.taper-span-row.border-bottom { border-bottom: 1px solid rgba(255,255,255,0.04); }
+.taper-span-header { display: flex; gap: 10px; align-items: center; }
+.taper-span-label { flex: 0 0 75px; font-size: 13px; }
+.taper-input-group { display: flex; flex: 1; gap: 6px; align-items: center; }
+.taper-input-label { font-size: 11px; color: var(--text-muted); }
+.taper-input-label.l-label { width: 12px; }
+.taper-input-label.ei-label { width: 16px; }
+.taper-auto-box { flex: 1; padding: 6px 8px; font-size: 12px; color: var(--text-muted); font-style: italic; background: rgba(255,255,255,0.02); border-radius: 4px; border: 1px solid rgba(255,255,255,0.05); }
+.taper-options-group { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; margin-bottom: 4px; padding-left: 0; }
+.taper-checkbox-label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted); cursor: pointer; }
+.taper-checkbox { width: 14px; height: 14px; accent-color: var(--accent); }
+.taper-ratio-group { display: flex; align-items: center; gap: 8px; font-size: 12px; flex-wrap: wrap; }
+.taper-ratio-label { color: var(--text-muted); white-space: nowrap; }
+.taper-ratio-symbol { font-style: italic; color: var(--accent); }
+.taper-ratio-input { width: 60px; padding: 4px 8px; }
+.taper-ratio-hint { color: var(--text-dim); font-size: 11px; }
+.error-text { color: #e11d48; }
+
+
+.taper-input-group input.span-prop-input { flex: 1; padding: 6px 8px; }
+
+
+.input-hint-text { font-size: 11px; color: #666; margin-bottom: 5px; }
+

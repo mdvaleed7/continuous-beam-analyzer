@@ -309,44 +309,44 @@ export default function BeamAnalyzer() {
 
                         <div className="control-group">
                             <label htmlFor="last-span-stop">Last Span Load Stop Dist (a)</label>
-                            <div style={{fontSize: '11px', color: '#666', marginBottom: '5px'}}>0 means full span loaded</div>
+                            <div className="input-hint-text">0 means full span loaded</div>
                             <input type="number" id="last-span-stop" value={lastSpanLoadStop} step="0.1" min="0" onChange={(e) => setLastSpanLoadStop(parseNumber(e.target.value, 0, 0))} />
                         </div>
 
                         <div className="span-props-section">
                             <div className="span-props-title">Span Properties</div>
-                            <div className="span-props-table" style={{ display: 'flex', flexDirection: 'column' }}>
+                            <div className="span-props-table">
                                 {Array.from({ length: nSpans }).map((_, i) => (
-                                    <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '12px 0', borderBottom: i < nSpans - 1 ? '1px solid rgba(255,255,255,0.04)' : 'none' }}>
-                                        <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-                                            <span className="span-prop-cell span-prop-label" style={{ flex: '0 0 75px', fontSize: '13px' }}>
+                                    <div key={i} className={`taper-span-row ${i < nSpans - 1 ? 'border-bottom' : ''}`}>
+                                        <div className="taper-span-header">
+                                            <span className="span-prop-cell span-prop-label taper-span-label">
                                                 {i + 1} ({String.fromCharCode(65 + i)}→{String.fromCharCode(66 + i)})
                                             </span>
-                                            <div style={{ display: 'flex', flex: 1, gap: '6px', alignItems: 'center' }}>
-                                                <span style={{ fontSize: '11px', color: 'var(--text-muted)', width: '12px' }}>L:</span>
-                                                <input type="number" className="span-prop-input" style={{ flex: 1, padding: '6px 8px' }} value={spanLengths[i]} min="0.001" step="0.1" onChange={(e) => handleSpanChange(i, 'l', e.target.value)} />
+                                            <div className="taper-input-group">
+                                                <span className="taper-input-label l-label">L:</span>
+                                                <input type="number" aria-label={`Span ${i + 1} Length`} className="span-prop-input" value={spanLengths[i]} min="0.001" step="0.1" onChange={(e) => handleSpanChange(i, 'l', e.target.value)} />
                                             </div>
-                                            <div style={{ display: 'flex', flex: 1, gap: '6px', alignItems: 'center' }}>
-                                                <span style={{ fontSize: '11px', color: 'var(--text-muted)', width: '16px' }}>EI:</span>
+                                            <div className="taper-input-group">
+                                                <span className="taper-input-label ei-label">EI:</span>
                                                 {spanIsTapered[i] ? (
-                                                    <div style={{ flex: 1, padding: '6px 8px', fontSize: '12px', color: 'var(--text-muted)', fontStyle: 'italic', background: 'rgba(255,255,255,0.02)', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.05)' }}>
+                                                    <div className="taper-auto-box">
                                                         Auto (Tapered)
                                                     </div>
                                                 ) : (
-                                                    <input type="number" className="span-prop-input" style={{ flex: 1, padding: '6px 8px' }} value={spanEIs[i]} min="0.001" step="0.1" onChange={(e) => handleSpanChange(i, 'ei', e.target.value)} />
+                                                    <input type="number" aria-label={`Span ${i + 1} EI`} className="span-prop-input" value={spanEIs[i]} min="0.001" step="0.1" onChange={(e) => handleSpanChange(i, 'ei', e.target.value)} />
                                                 )}
                                             </div>
                                         </div>
-                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '10px', marginBottom: '4px', paddingLeft: '0' }}>
-                                            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--text-muted)', cursor: 'pointer' }}>
-                                                <input type="checkbox" checked={spanIsTapered[i]} onChange={(e) => handleSpanChange(i, 'taperChecked', e.target.checked)} style={{ width: '14px', height: '14px', accentColor: 'var(--accent)' }} />
+                                        <div className="taper-options-group">
+                                            <label className="taper-checkbox-label">
+                                                <input type="checkbox" aria-label={`Span ${i + 1} Tapered`} checked={spanIsTapered[i]} onChange={(e) => handleSpanChange(i, 'taperChecked', e.target.checked)} className="taper-checkbox" />
                                                 Tapered (Linear)
                                             </label>
                                             {spanIsTapered[i] && (
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', flexWrap: 'wrap' }}>
-                                                    <span style={{ color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>Depth Ratio <span style={{ fontStyle: 'italic', color: 'var(--accent)' }}>d₁/d₂</span>:</span>
-                                                    <input type="number" className="span-prop-input" value={spanTaperRatios[i]} min="0.01" step="0.1" style={{ width: '60px', padding: '4px 8px' }} onChange={(e) => handleSpanChange(i, 'taperRatio', e.target.value)} />
-                                                    <span style={{ color: 'var(--text-dim)', fontSize: '11px' }}>
+                                                <div className="taper-ratio-group">
+                                                    <span className="taper-ratio-label">Depth Ratio <span className="taper-ratio-symbol">d₁/d₂</span>:</span>
+                                                    <input type="number" aria-label={`Span ${i + 1} Taper Ratio`} className="span-prop-input taper-ratio-input" value={spanTaperRatios[i]} min="0.01" step="0.1" onChange={(e) => handleSpanChange(i, 'taperRatio', e.target.value)} />
+                                                    <span className="taper-ratio-hint">
                                                         {spanTaperRatios[i] >= 1 ? `d₁ > d₂ (left deeper)` : `d₁ < d₂ (right deeper)`}
                                                     </span>
                                                 </div>
@@ -359,13 +359,13 @@ export default function BeamAnalyzer() {
                             <div className="norm-ref-row">
                                 <div className="control-group">
                                     <label>Reference Span (L)</label>
-                                    <select value={refSpanL} onChange={(e) => setRefSpanL(parseInt(e.target.value))}>
+                                    <select aria-label="Reference Span L" value={refSpanL} onChange={(e) => setRefSpanL(parseInt(e.target.value))}>
                                         {Array.from({ length: nSpans }).map((_, i) => <option key={`l${i}`} value={i}>Span {i + 1}</option>)}
                                     </select>
                                 </div>
                                 <div className="control-group">
                                     <label>Reference Span (EI)</label>
-                                    <select value={refSpanEI} onChange={(e) => setRefSpanEI(parseInt(e.target.value))}>
+                                    <select aria-label="Reference Span EI" value={refSpanEI} onChange={(e) => setRefSpanEI(parseInt(e.target.value))}>
                                         {Array.from({ length: nSpans }).map((_, i) => <option key={`ei${i}`} value={i}>Span {i + 1}</option>)}
                                     </select>
                                 </div>
@@ -376,47 +376,47 @@ export default function BeamAnalyzer() {
 
                 <main className="content">
                     <div className="desc-box">
-                        {error ? <span style={{color: 'red'}}>Error: {error}</span> : getDescription()}
+                        {error ? <span className="error-text">Error: {error}</span> : getDescription()}
                     </div>
 
-                    <section className="panel" style={{ display: resultData && !error ? 'block' : 'none' }}>
+                    <section className={`panel ${resultData && !error ? '' : 'hidden'}`}>
                         <h2 className="panel-title"><span className="panel-icon">&#128208;</span>Beam Schematic</h2>
                         <div className="canvas-wrapper schematic-wrapper">
                             <canvas ref={beamCanvasRef}></canvas>
                         </div>
                     </section>
 
-                    <section className="panel" style={{ display: resultData && !error ? 'block' : 'none' }}>
+                    <section className={`panel ${resultData && !error ? '' : 'hidden'}`}>
                         <h2 className="panel-title"><span className="panel-icon">&#9878;</span>Support Reactions</h2>
                         {resultData && <div dangerouslySetInnerHTML={{ __html: resultData.reactionsHtml }} />}
                         {resultData && <div dangerouslySetInnerHTML={{ __html: resultData.eqHtml }} />}
                     </section>
 
-                    <section className="panel" style={{ display: resultData && !error ? 'block' : 'none' }}>
+                    <section className={`panel ${resultData && !error ? '' : 'hidden'}`}>
                         <h2 className="panel-title"><span className="panel-icon">&#128203;</span>Span Analysis (Exact Expressions)</h2>
                         {resultData && <div className="span-cards-grid" dangerouslySetInnerHTML={{ __html: resultData.spansHtml }} />}
                     </section>
 
-                    <section className="panel" style={{ display: resultData && !error ? 'block' : 'none' }}>
+                    <section className={`panel ${resultData && !error ? '' : 'hidden'}`}>
                         <h2 className="panel-title"><span className="panel-icon">&#128200;</span>Shear Force Diagram (SFD)</h2>
                         <div className="canvas-wrapper">
                             <canvas ref={sfdCanvasRef}></canvas>
                         </div>
                     </section>
 
-                    <section className="panel" style={{ display: resultData && !error ? 'block' : 'none' }}>
+                    <section className={`panel ${resultData && !error ? '' : 'hidden'}`}>
                         <h2 className="panel-title"><span className="panel-icon">&#128201;</span>Bending Moment Diagram (BMD)</h2>
                         <div className="canvas-wrapper">
                             <canvas ref={bmdCanvasRef}></canvas>
                         </div>
                     </section>
 
-                    <section className="panel" style={{ display: resultData && !error ? 'block' : 'none' }}>
+                    <section className={`panel ${resultData && !error ? '' : 'hidden'}`}>
                         <h2 className="panel-title"><span className="panel-icon">&#128202;</span>Actual Numeric Results</h2>
                         {resultData && <div className="table-wrap" dangerouslySetInnerHTML={{ __html: resultData.numericHtml }} />}
                     </section>
 
-                    <section className="panel" style={{ display: resultData && !error ? 'block' : 'none' }}>
+                    <section className={`panel ${resultData && !error ? '' : 'hidden'}`}>
                         <h2 className="panel-title"><span className="panel-icon">&#10003;</span>Validation Summary</h2>
                         {resultData && <div dangerouslySetInnerHTML={{ __html: resultData.validHtml }} />}
                     </section>
