@@ -17,7 +17,6 @@ const DEFAULT_PANEL = {
     slabType: 'auto',
     isCantilever: false,
     ageOfLoading: '28',
-    camber: 0,
 };
 
 export default function SlabAnalyzer() {
@@ -419,12 +418,6 @@ export default function SlabAnalyzer() {
                             <label>Depth D (mm)</label>
                             <input title="Value" type="number" min="75" max="500" step="5" value={p.D}
                                 onChange={e => updatePanel(activePanel, 'D', +e.target.value)} />
-                        </div>
-
-                        <div className="control-group">
-                            <label>Camber (mm)</label>
-                            <input title="Value" type="number" min="0" max="100" step="1" value={p.camber || 0}
-                                onChange={e => updatePanel(activePanel, 'camber', +e.target.value)} />
                         </div>
                         
                         <div className="opt-panel">

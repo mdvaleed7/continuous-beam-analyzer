@@ -52,7 +52,6 @@ export interface SlabConfig {
     supportCondition?: SupportCondition; // one-way explicit support condition
     slabType?: SlabTypeInput;
     ageOfLoading?: string;  // '7' | '28' | '365'
-    camber?: number;        // (mm) initial upward camber to offset deflection
 }
 
 // ponytail: FlexuralDesign and BarSelection are now FlexuralResult and BarResult from is456
@@ -320,7 +319,6 @@ interface AnnexCConfig {
     fy: number;
     Es?: number;
     ageOfLoading?: string;
-    camber?: number;
 }
 
 interface AnnexCDesign {
@@ -333,7 +331,7 @@ interface AnnexCDesign {
 }
 
 function annexCDeflection(config: AnnexCConfig, design: AnnexCDesign): DeflectionResult {
-    const { Lx, D, cover, fck, fy, Es = 200000, ageOfLoading = '28', camber = 0 } = config;
+    const { Lx, D, cover, fck, fy, Es = 200000, ageOfLoading = '28' } = config;
     const { barDia_x_bot, Ast_x_bot, Asc_x_top = 0, M_service, M_perm, supportCondition } = design;
 
     const b = 1000; // mm, unit strip
@@ -464,13 +462,26 @@ function annexCDeflection(config: AnnexCConfig, design: AnnexCDesign): Deflectio
     const a_total_raw = ai + Math.max(0, a_creep) + a_shrinkage;
     const a_post_raw = Math.max(0, a_creep) + a_shrinkage;
 
-    // Apply camber offset
-    const a_total = Math.max(0, a_total_raw - camber);
-    const a_post_construction = Math.max(0, a_post_raw - camber);
-
     // ─── Limits ───
     const limit_total = L / 250;
     const limit_post = Math.min(L / 350, 20);
+
+    // ─── Auto-Calculate Camber ───
+    let camber = 0;
+    const required_total = a_total_raw - limit_total;
+    const required_post = a_post_raw - limit_post;
+    const required_camber = Math.max(0, required_total, required_post);
+
+    if (required_camber > 0) {
+        const raw_camber = Math.ceil(required_camber / 5) * 5;
+        // camber should never be more than post construction deflection calculated
+        const max_camber = Math.floor(a_post_raw / 5) * 5;
+        camber = Math.min(raw_camber, max_camber);
+    }
+
+    // Apply camber offset
+    const a_total = Math.max(0, a_total_raw - camber);
+    const a_post_construction = Math.max(0, a_post_raw - camber);
 
     return {
         L, D, d, b, Ec, Es, m, m_lt, theta, Ece,
@@ -768,7 +779,7 @@ export function analyzeSlab(config: SlabConfig): SlabAnalysisResult {
     const supportCondDefl: SupportCondition = effectiveSupportCond;
 
     const deflection = annexCDeflection(
-        { Lx, D, cover, fck, fy, ageOfLoading, camber: config.camber || 0 },
+        { Lx, D, cover, fck, fy, ageOfLoading },
         {
             barDia_x_bot: bars_tension.dia,
             Ast_x_bot: bars_tension.Ast_provided,
