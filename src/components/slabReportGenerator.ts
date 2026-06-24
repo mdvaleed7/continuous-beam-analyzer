@@ -262,6 +262,7 @@ function shearSection(r: any, directions: {label: string, dir: any}[]): string {
 // ═══════════════════════════════════════════════════════════════
 
 function flexuralDepthSection(r: any): string {
+    if (!r.flexDepthCheck) return '';
     return `
     <div class="section-box avoid-break">
         <div class="section-header">Flexural Depth &mdash; IS 456 Annex G</div>

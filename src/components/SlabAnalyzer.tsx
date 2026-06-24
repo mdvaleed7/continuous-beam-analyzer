@@ -662,6 +662,7 @@ export default function SlabAnalyzer() {
                         </div>
 
                         {/* Flexural Depth */}
+                        {r.flexDepthCheck && (
                         <div className="panel">
                             <h3 className="panel-title">
                                 <span className="panel-icon">📐</span>
@@ -684,6 +685,7 @@ export default function SlabAnalyzer() {
                                 </tbody>
                             </table>
                         </div>
+                        )}
 
                         {/* Shear Check */}
                         <div className="panel">
