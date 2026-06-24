@@ -1,9 +1,18 @@
+import katex from 'katex';
 import { logger } from '../lib/logger';
-import { REPORT_CSS as SLAB_REPORT_CSS, calcRow, inputTable } from './reportCss';
+import { inputTable } from './reportCss';
 
 // ═══════════════════════════════════════════════════════════════
-//  SLAB REPORT GENERATOR — two-column book layout with HTML symbols
+//  SLAB REPORT GENERATOR — Detailed Mathematical Textbook Layout
 // ═══════════════════════════════════════════════════════════════
+
+const kx = (expr: string): string => katex.renderToString(expr, { throwOnError: false, displayMode: true });
+const kxInline = (expr: string): string => katex.renderToString(expr, { throwOnError: false, displayMode: false });
+
+function statusChip(status: string): string {
+    const cls = (status === 'OK' || status === 'SAFE') ? '#10b981' : '#ef4444';
+    return `<span style="color: ${cls}; font-weight: bold;">${status}</span>`;
+}
 
 export async function generateSlabReport(config: any, results: any[], isPreview: boolean = false): Promise<string | null> {
     const panelSections = results.map((r: any) => {
@@ -18,13 +27,36 @@ export async function generateSlabReport(config: any, results: any[], isPreview:
         <head>
             <meta charset="utf-8">
             <title>Slab Design Report</title>
-            ${SLAB_REPORT_CSS}
+            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css" />
+            <style>
+                @page { margin: 15mm; size: A4 portrait; }
+                body {
+                    -webkit-print-color-adjust: exact;
+                    print-color-adjust: exact;
+                    background: white;
+                    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+                    color: #111;
+                    margin: 0;
+                    line-height: 1.5;
+                }
+                .report-container { max-width: 800px; margin: 0 auto; padding: 20px 30px; }
+                .section-box { margin-bottom: 30px; }
+                .section-header { color: #0f172a; border-bottom: 1px solid #cbd5e1; padding-bottom: 4px; font-size: 18px; font-weight: bold; margin-bottom: 15px; }
+                .avoid-break { page-break-inside: avoid; }
+                .info-note { background: #f8fafc; border-left: 3px solid #0ea5e9; padding: 10px; font-size: 13px; color: #475569; margin-bottom: 15px; }
+                table.result-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 15px; }
+                table.result-table th { background: #f1f5f9; padding: 8px; text-align: left; border: 1px solid #e2e8f0; }
+                table.result-table td { padding: 8px; border: 1px solid #e2e8f0; }
+                @media print {
+                    .report-container { max-width: 100%; margin: 0; padding: 0; }
+                }
+            </style>
         </head>
         <body>
             <div class="report-container">
-                <div class="report-header">
-                    <h1>IS 456 Slab Design Report</h1>
-                    <p>Design Code: IS 456:2000 | Generated: ${new Date().toLocaleString()}</p>
+                <div style="text-align: center; margin-bottom: 30px;">
+                    <h1 style="color: #0f172a; border-bottom: 2px solid #0f172a; padding-bottom: 10px; margin-bottom: 5px; font-size: 28px;">IS 456 Slab Design Report</h1>
+                    <p style="color: #475569; margin: 0; font-size: 13px;">Design Code: IS 456:2000 | Generated: ${new Date().toLocaleString()}</p>
                 </div>
                 ${panelSections}
             </div>
@@ -33,124 +65,190 @@ export async function generateSlabReport(config: any, results: any[], isPreview:
     `;
 
     if (isPreview) {
-        return htmlContent;
+        const dataUrl = 'data:text/html;charset=utf-8,' + encodeURIComponent(htmlContent);
+        return Promise.resolve(dataUrl);
     } else {
-        const win = window.open('', '_blank')!;
-        win.document.write(htmlContent);
-        win.document.close();
-        setTimeout(() => { win.print(); }, 500);
-        return null;
+        const blob = new Blob([htmlContent], { type: 'text/html' });
+        const blobUrl = URL.createObjectURL(blob);
+        return new Promise<null>((resolve) => {
+            let settled = false;
+            const cleanup = (frame: any) => {
+                if (settled) return;
+                settled = true;
+                try { if (frame && frame.parentNode) document.body.removeChild(frame); } catch { /* noop */ }
+                try { URL.revokeObjectURL(blobUrl); } catch { /* noop */ }
+                resolve(null);
+            };
+
+            const iframe = document.createElement('iframe');
+            iframe.style.position = 'absolute';
+            iframe.style.width = '0';
+            iframe.style.height = '0';
+            iframe.style.border = 'none';
+
+            iframe.onload = () => {
+                try {
+                    iframe.contentWindow?.focus();
+                    iframe.contentWindow?.print();
+                } catch (e) {
+                    logger.error('Slab print failed, falling back to new tab', e);
+                    window.open(blobUrl, '_blank');
+                }
+                setTimeout(() => cleanup(iframe), 2000);
+            };
+
+            document.body.appendChild(iframe);
+            iframe.src = blobUrl;
+            setTimeout(() => { if (!settled) cleanup(iframe); }, 5000);
+        });
     }
 }
 
+// ─── Mathematical Formatting Blocks ────────────────────────────────────────
 
-// ponytail: calcRow + inputTable imported from ./reportCss
-
-
-function statusChip(status: string): string {
-    const cls = (status === 'OK' || status === 'SAFE') ? 'status-safe' : 'status-fail';
-    return `<span class="${cls}">${status}</span>`;
-}
-
-/** Flexure calc block for one direction */
-function flexBlock(label: string, Mu: number, AstReq: number, barsLabel: string, AstProv: number, isDoubly: boolean, governs: string): string {
+function flexBlock(label: string, Mu: number, AstReq: number, barsLabel: string, AstProv: number, isDoubly: boolean, governs: string, fck: number, fy: number, d: number): string {
     return `
-        <h4>${label}</h4>
-        ${calcRow('M<sub>u</sub>', Mu, 'kN&middot;m/m')}
-        ${calcRow('A<sub>st,req</sub>', AstReq, 'mm&sup2;/m')}
-        ${calcRow('Governs', governs)}
-        <div class="provided-box">
-            <strong>Provided:</strong> ${barsLabel}<br/>
-            A<sub>st,prov</sub> = ${AstProv} mm&sup2;/m &nbsp; ${statusChip(isDoubly ? 'REVISE' : 'SAFE')}
+        <div style="margin-bottom: 20px;">
+            <h4 style="margin: 0 0 10px 0; color: #334155;">${label}</h4>
+            ${kx(`M_u = ${Mu} \\text{ kN}\\cdot\\text{m/m}`)}
+            ${governs === 'design' ? 
+                kx(`A_{st,req} = \\frac{0.5 f_{ck}}{f_y} \\left[ 1 - \\sqrt{1 - \\frac{4.6 M_u}{f_{ck} b d^2}} \\right] bd = ${AstReq} \\text{ mm}^2\\text{/m}`) : 
+                kx(`A_{st,req} = ${AstReq} \\text{ mm}^2\\text{/m} \\quad (\\text{Min. governs})`)
+            }
+            <div style="margin-top: 10px; padding: 6px; background: #f8fafc; border-left: 3px solid #0ea5e9;">
+                <strong>Provided:</strong> ${barsLabel} <br/>
+                <span style="color: #64748b; font-size: 12px;">(${kxInline(`A_{st,prov} = ${AstProv} \\text{ mm}^2\\text{/m}`)})</span>
+            </div>
+            <div style="margin-top: 6px;">
+                ${statusChip(isDoubly ? 'REVISE (Doubly Reinforced)' : 'SAFE (Singly Reinforced)')}
+            </div>
         </div>
     `;
 }
 
-/** Deflection section in two-column layout */
 function deflectionSection(r: any): string {
     return `
-    <div class="section-box">
+    <div class="section-box avoid-break">
         <div class="section-header">Deflection Check &mdash; IS 456 Annex C</div>
         <div class="section-body">
-            <div class="two-col">
-                <div class="col col-left">
-                    <h4>A. Short-Term Deflection</h4>
-                    ${calcRow('I<sub>gr</sub>', (r.deflection.Igr / 1e6).toFixed(2), '&times;10&sup3; mm<sup>4</sup>')}
-                    ${calcRow('M<sub>cr</sub>', r.deflection.Mcr, 'kN&middot;m')}
-                    ${calcRow('I<sub>cr</sub>', (r.deflection.Icr / 1e6).toFixed(2), '&times;10&sup3; mm<sup>4</sup>')}
-                    ${calcRow('I<sub>eff</sub>', (r.deflection.Ieff / 1e6).toFixed(2), '&times;10&sup3; mm<sup>4</sup>')}
-                    ${calcRow('a<sub>i</sub> (short-term)', r.deflection.ai, 'mm')}
+            <p style="margin-top:0; color:#475569; font-size:13px;">
+                <strong>Variables:</strong><br/>
+                ${kxInline(`I_{gr}`)}: Gross moment of inertia<br/>
+                ${kxInline(`M_{cr}`)}: Cracking moment<br/>
+                ${kxInline(`I_{cr}`)}: Cracked moment of inertia<br/>
+                ${kxInline(`I_{eff}`)}: Effective moment of inertia<br/>
+                ${kxInline(`E_{ce}`)}: Effective modulus of elasticity of concrete
+            </p>
+            <div style="display: flex; gap: 20px;">
+                <div style="flex: 1;">
+                    <h4 style="margin-top:0;">A. Short-Term Deflection</h4>
+                    ${kx(`I_{gr} = ${(r.deflection.Igr/1e6).toFixed(2)} \\times 10^6 \\text{ mm}^4`)}
+                    ${kx(`M_{cr} = ${r.deflection.Mcr} \\text{ kN}\\cdot\\text{m}`)}
+                    ${kx(`I_{cr} = ${(r.deflection.Icr/1e6).toFixed(2)} \\times 10^6 \\text{ mm}^4`)}
+                    ${kx(`I_{eff} = ${(r.deflection.Ieff/1e6).toFixed(2)} \\times 10^6 \\text{ mm}^4`)}
+                    ${kx(`a_i = ${r.deflection.ai} \\text{ mm} \\quad (\\text{short-term})`)}
 
-                    <h4>B. Shrinkage</h4>
-                    ${calcRow('k<sub>3</sub>', r.deflection.k3)}
-                    ${calcRow('&psi;<sub>cs</sub>', r.deflection.psi_cs.toExponential(2))}
-                    ${calcRow('a<sub>shrinkage</sub>', r.deflection.a_shrinkage, 'mm')}
+                    <h4 style="margin-top:15px;">B. Shrinkage</h4>
+                    ${kx(`k_3 = ${r.deflection.k3}`)}
+                    ${kx(`\\psi_{cs} = ${r.deflection.psi_cs.toExponential(2)}`)}
+                    ${kx(`a_{cs} = ${r.deflection.a_shrinkage} \\text{ mm}`)}
                 </div>
-                <div class="col">
-                    <h4>C. Creep</h4>
-                    ${calcRow('&theta;', r.deflection.theta)}
-                    ${calcRow('E<sub>ce</sub>', Math.round(r.deflection.Ece), 'N/mm&sup2;')}
-                    ${calcRow('I<sub>cr,lt</sub>', (r.deflection.Icr_lt / 1e6).toFixed(2), '&times;10&sup3; mm<sup>4</sup>')}
-                    ${calcRow('a<sub>creep</sub>', r.deflection.a_creep, 'mm')}
+                <div style="flex: 1;">
+                    <h4 style="margin-top:0;">C. Creep</h4>
+                    ${kx(`\\theta = ${r.deflection.theta}`)}
+                    ${kx(`E_{ce} = \\frac{E_c}{1 + \\theta} = ${Math.round(r.deflection.Ece)} \\text{ N/mm}^2`)}
+                    ${kx(`I_{cr,lt} = ${(r.deflection.Icr_lt/1e6).toFixed(2)} \\times 10^6 \\text{ mm}^4`)}
+                    ${kx(`a_{cc} = ${r.deflection.a_creep} \\text{ mm}`)}
 
-                    <h4>D. Summary</h4>
-                    ${r.deflection.camber > 0 ? calcRow('Initial Upward Camber', r.deflection.camber, 'mm') : ''}
-                    ${calcRow(r.deflection.camber > 0 ? 'Net Total' : 'Total (a<sub>i</sub> + a<sub>cc</sub> + a<sub>cs</sub>)', r.deflection.a_total, 'mm')}
-                    ${calcRow('Limit (L/250)', r.deflection.limit_total, 'mm')}
-                    ${calcRow('Status', statusChip(r.deflection.status_total))}
-                    <div style="margin-top:4px;"></div>
-                    ${calcRow(r.deflection.camber > 0 ? 'Net Post-construction' : 'Post-construction', r.deflection.a_post_construction, 'mm')}
-                    ${calcRow('Limit (L/350 or 20)', r.deflection.limit_post, 'mm')}
-                    ${calcRow('Status', statusChip(r.deflection.status_post))}
+                    <h4 style="margin-top:15px;">D. Summary</h4>
+                    ${r.deflection.camber > 0 ? kx(`a_{camber} = ${r.deflection.camber} \\text{ mm (upward)}`) : ''}
+                    
+                    ${r.deflection.camber > 0 ? 
+                        kx(`a_{total} = a_i + a_{cc} + a_{cs} - a_{camber} = ${r.deflection.a_total} \\text{ mm}`) : 
+                        kx(`a_{total} = a_i + a_{cc} + a_{cs} = ${r.deflection.a_total} \\text{ mm}`)
+                    }
+                    <div style="font-weight: bold; color: ${r.deflection.status_total === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: center;">
+                        Result: ${kxInline(`a_{total} ${r.deflection.status_total === 'OK' ? '\\le' : '>'} ${r.deflection.limit_total} \\text{ mm}`)} &rarr; ${r.deflection.status_total}
+                    </div>
+
+                    <div style="margin-top:15px;"></div>
+                    ${r.deflection.camber > 0 ? 
+                        kx(`a_{post} = a_{cc} + a_{cs} - a_{camber} = ${r.deflection.a_post_construction} \\text{ mm}`) : 
+                        kx(`a_{post} = a_{cc} + a_{cs} = ${r.deflection.a_post_construction} \\text{ mm}`)
+                    }
+                    <div style="font-weight: bold; color: ${r.deflection.status_post === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: center;">
+                        Result: ${kxInline(`a_{post} ${r.deflection.status_post === 'OK' ? '\\le' : '>'} ${r.deflection.limit_post} \\text{ mm}`)} &rarr; ${r.deflection.status_post}
+                    </div>
                 </div>
             </div>
         </div>
     </div>`;
 }
 
-/** Span/depth ratio section */
 function spanDepthSection(r: any): string {
     return `
-    <div class="section-box">
+    <div class="section-box avoid-break">
         <div class="section-header">Span/Depth Ratio &mdash; IS 456 Cl. 23.2</div>
         <div class="section-body">
-            <div class="two-col">
-                <div class="col col-left">
-                    ${calcRow('Basic l/d', r.ldCheck.basicRatio)}
-                    ${calcRow('f<sub>s</sub>', r.ldCheck.fs, 'N/mm&sup2;')}
-                    ${calcRow('Modification Factor', r.ldCheck.mf)}
+            <p style="margin-top:0; color:#475569; font-size:13px;">
+                <strong>Variables:</strong><br/>
+                ${kxInline(`f_s`)}: Estimated steel stress under service load
+            </p>
+            <div style="display: flex; gap: 20px;">
+                <div style="flex: 1;">
+                    ${kx(`\\text{Basic } (l/d) = ${r.ldCheck.basicRatio}`)}
+                    ${kx(`f_s = 0.58 f_y \\frac{A_{st,req}}{A_{st,prov}} = ${r.ldCheck.fs} \\text{ N/mm}^2`)}
+                    ${kx(`\\text{Modification Factor (MF)} = ${r.ldCheck.mf}`)}
                 </div>
-                <div class="col">
-                    ${calcRow('Modified l/d', r.ldCheck.modifiedRatio)}
-                    ${calcRow('d<sub>req</sub>', r.ldCheck.d_req, 'mm')}
-                    ${calcRow('d<sub>provided</sub>', r.ldCheck.d_provided, 'mm')}
-                    ${calcRow('Status', '<span style="color:#666;font-style:italic;">IGNORED</span>')}
+                <div style="flex: 1;">
+                    ${kx(`\\text{Modified } (l/d) = \\text{Basic} \\times \\text{MF} = ${r.ldCheck.modifiedRatio}`)}
+                    ${kx(`d_{req} = \\frac{l}{\\text{Modified } (l/d)} = ${r.ldCheck.d_req} \\text{ mm}`)}
+                    ${kx(`d_{prov} = ${r.ldCheck.d_provided} \\text{ mm}`)}
+                    <p style="margin-top: 10px; color: #64748b; font-style: italic; text-align: center;">
+                        Note: Empirical span/depth ratio is a preliminary check. Rigorous deflection calculation governs.
+                    </p>
                 </div>
             </div>
         </div>
     </div>`;
 }
 
-/** Shear check table */
 function shearSection(r: any, directions: {label: string, dir: any}[]): string {
-    const headerRow = '<tr><th>Dir</th><th>V<sub>u</sub> (kN)</th><th>&tau;<sub>v</sub> (N/mm&sup2;)</th><th>&tau;<sub>c</sub> (N/mm&sup2;)</th><th>k</th><th>k&middot;&tau;<sub>c</sub></th><th>Status</th></tr>';
-    const dataRows = directions.map(({label, dir}) => `
-        <tr>
-            <td>${label}</td><td>${dir.Vu}</td><td>${dir.tau_v}</td>
-            <td>${dir.tau_c}</td><td>${dir.k}</td><td>${dir.allowable}</td>
-            <td>${statusChip(dir.status)}</td>
-        </tr>
+    const shearBlocks = directions.map(({label, dir}) => `
+        <div style="margin-bottom: 15px; padding-bottom: 15px; border-bottom: 1px dashed #e2e8f0;">
+            <h4 style="margin-top: 0;">${label} Direction</h4>
+            <div style="display: flex; gap: 20px;">
+                <div style="flex: 1;">
+                    ${kx(`V_u = ${dir.Vu} \\text{ kN}`)}
+                    ${kx(`\\tau_v = \\frac{V_u}{bd} = ${dir.tau_v} \\text{ N/mm}^2`)}
+                    ${kx(`\\tau_c = ${dir.tau_c} \\text{ N/mm}^2 \\quad (p_t = ${dir.pt}\\%)`)}
+                </div>
+                <div style="flex: 1;">
+                    ${kx(`k = ${dir.k} \\quad (\\text{depth factor})`)}
+                    ${kx(`k \\cdot \\tau_c = ${dir.allowable} \\text{ N/mm}^2`)}
+                    <div style="margin: 10px 0; font-weight: bold; color: ${dir.status === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: center;">
+                        Result: ${kxInline(`\\tau_v ${dir.status === 'OK' ? '\\le' : '>'} k \\tau_c`)} &rarr; ${dir.status}
+                    </div>
+                </div>
+            </div>
+        </div>
     `).join('');
 
     return `
-    <div class="section-box">
+    <div class="section-box avoid-break">
         <div class="section-header">Shear Check &mdash; IS 456 Cl. 40</div>
         <div class="section-body">
-            <table class="result-table">${headerRow}${dataRows}</table>
+            <p style="margin-top:0; color:#475569; font-size:13px;">
+                <strong>Variables:</strong><br/>
+                ${kxInline(`V_u`)}: Factored shear force<br/>
+                ${kxInline(`\\tau_v`)}: Nominal shear stress<br/>
+                ${kxInline(`\\tau_c`)}: Design shear strength of concrete<br/>
+                ${kxInline(`k`)}: Depth factor for solid slabs
+            </p>
+            ${shearBlocks}
         </div>
     </div>`;
 }
-
 
 // ═══════════════════════════════════════════════════════════════
 //  TWO-WAY SLAB
@@ -158,7 +256,7 @@ function shearSection(r: any, directions: {label: string, dir: any}[]): string {
 
 function generateTwoWaySection(r: any): string {
     return `
-        <h2>Panel ${r.label} &mdash; Two-Way Restrained Slab</h2>
+        <h2 style="color: #0f172a; margin-top: 30px;">Panel ${r.label} &mdash; Two-Way Restrained Slab</h2>
 
         <div class="section-box">
             <div class="section-header">1. Input Parameters</div>
@@ -174,21 +272,26 @@ function generateTwoWaySection(r: any): string {
             </div>
         </div>
 
-        <div class="section-box">
-            <div class="section-header">2. Moment Coefficients &mdash; IS 456 Table 26</div>
+        <div class="section-box avoid-break">
+            <div class="section-header">2. Design Moments &mdash; IS 456 Table 26</div>
             <div class="section-body">
-                <div style="font-size:10px;margin-bottom:6px;">For L<sub>y</sub>/L<sub>x</sub> = ${r.lyLx}, Boundary Case ${r.boundaryCase}:</div>
-                <table class="result-table">
+                <p style="margin-top:0; color:#475569; font-size:13px;">
+                    <strong>Variables:</strong><br/>
+                    ${kxInline(`\\alpha`)}: Bending moment coefficient<br/>
+                    ${kxInline(`w_u`)}: Factored uniform load
+                </p>
+                <div style="margin-bottom:10px; font-weight: 500;">For ${kxInline(`L_y/L_x = ${r.lyLx}`)}, Boundary Case ${r.boundaryCase}:</div>
+                <table class="result-table" style="margin-bottom:15px;">
                     <tr><th>Direction</th><th>Positive &alpha;<sup>+</sup> (Mid-span)</th><th>Negative &alpha;<sup>&minus;</sup> (Support)</th></tr>
                     <tr><td>Short Span (X)</td><td>${r.ax_pos ?? '&mdash;'}</td><td>${r.ax_neg ?? '&mdash;'}</td></tr>
                     <tr><td>Long Span (Y)</td><td>${r.ay_pos ?? '&mdash;'}</td><td>${r.ay_neg ?? '&mdash;'}</td></tr>
                 </table>
-                <div class="calc-block">
-                    M<sub>u</sub> = &alpha; &times; w<sub>u</sub> &times; L<sub>x</sub>&sup2;<br/>
-                    M<sub>x,pos</sub> = ${r.ax_pos} &times; ${r.wFactored} &times; ${r.Lx}&sup2; = <strong>${r.Mx_pos} kN&middot;m/m</strong><br/>
-                    M<sub>y,pos</sub> = ${r.ay_pos} &times; ${r.wFactored} &times; ${r.Lx}&sup2; = <strong>${r.My_pos} kN&middot;m/m</strong>
-                    ${r.Mx_neg > 0 ? `<br/>M<sub>x,neg</sub> = ${r.ax_neg} &times; ${r.wFactored} &times; ${r.Lx}&sup2; = <strong>${r.Mx_neg} kN&middot;m/m</strong>` : ''}
-                    ${r.My_neg > 0 ? `<br/>M<sub>y,neg</sub> = ${r.ay_neg} &times; ${r.wFactored} &times; ${r.Lx}&sup2; = <strong>${r.My_neg} kN&middot;m/m</strong>` : ''}
+                <div style="background: #f8fafc; padding: 15px; border-radius: 8px; border: 1px solid #e2e8f0;">
+                    ${kx(`M_u = \\alpha \\cdot w_u \\cdot L_x^2`)}
+                    ${kx(`M_{x,pos} = ${r.ax_pos} \\times ${r.wFactored} \\times ${r.Lx}^2 = ${r.Mx_pos} \\text{ kN}\\cdot\\text{m/m}`)}
+                    ${kx(`M_{y,pos} = ${r.ay_pos} \\times ${r.wFactored} \\times ${r.Lx}^2 = ${r.My_pos} \\text{ kN}\\cdot\\text{m/m}`)}
+                    ${r.Mx_neg > 0 ? kx(`M_{x,neg} = ${r.ax_neg} \\times ${r.wFactored} \\times ${r.Lx}^2 = ${r.Mx_neg} \\text{ kN}\\cdot\\text{m/m}`) : ''}
+                    ${r.My_neg > 0 ? kx(`M_{y,neg} = ${r.ay_neg} \\times ${r.wFactored} \\times ${r.Lx}^2 = ${r.My_neg} \\text{ kN}\\cdot\\text{m/m}`) : ''}
                 </div>
             </div>
         </div>
@@ -196,15 +299,20 @@ function generateTwoWaySection(r: any): string {
         <div class="section-box">
             <div class="section-header">3. Flexural Reinforcement &mdash; IS 456 Cl. 38.1</div>
             <div class="section-body">
-                <div style="font-size:10px;margin-bottom:8px;">Effective depths: d<sub>x</sub> = ${r.dx} mm, d<sub>y</sub> = ${r.dy} mm</div>
-                <div class="two-col">
-                    <div class="col col-left">
-                        ${flexBlock('X-Bot (Mid-span +ve)', r.Mx_pos, r.flex_x_bot.Ast_req, r.bars_x_bot.label, r.bars_x_bot.Ast_provided, r.flex_x_bot.isDoubly, r.flex_x_bot.governs)}
-                        ${r.Mx_neg > 0 ? flexBlock('X-Top (Support &minus;ve)', r.Mx_neg, r.flex_x_top.Ast_req, r.bars_x_top.label, r.bars_x_top.Ast_provided, r.flex_x_top.isDoubly, r.flex_x_top.governs) : ''}
+                <p style="margin-top:0; color:#475569; font-size:13px;">
+                    <strong>Variables:</strong><br/>
+                    ${kxInline(`A_{st,req}`)}: Required area of steel<br/>
+                    ${kxInline(`A_{st,prov}`)}: Provided area of steel<br/>
+                    ${kxInline(`d`)}: Effective depth (${kxInline(`d_x = ${r.dx} \\text{ mm}, d_y = ${r.dy} \\text{ mm}`)})
+                </p>
+                <div style="display: flex; gap: 20px;">
+                    <div style="flex: 1;">
+                        ${flexBlock('X-Bot (Mid-span +ve)', r.Mx_pos, r.flex_x_bot.Ast_req, r.bars_x_bot.label, r.bars_x_bot.Ast_provided, r.flex_x_bot.isDoubly, r.flex_x_bot.governs, r.fck, r.fy, r.dx)}
+                        ${r.Mx_neg > 0 ? flexBlock('X-Top (Support &minus;ve)', r.Mx_neg, r.flex_x_top.Ast_req, r.bars_x_top.label, r.bars_x_top.Ast_provided, r.flex_x_top.isDoubly, r.flex_x_top.governs, r.fck, r.fy, r.dx) : ''}
                     </div>
-                    <div class="col">
-                        ${flexBlock('Y-Bot (Mid-span +ve)', r.My_pos, r.flex_y_bot.Ast_req, r.bars_y_bot.label, r.bars_y_bot.Ast_provided, r.flex_y_bot.isDoubly, r.flex_y_bot.governs)}
-                        ${r.My_neg > 0 ? flexBlock('Y-Top (Support &minus;ve)', r.My_neg, r.flex_y_top.Ast_req, r.bars_y_top.label, r.bars_y_top.Ast_provided, r.flex_y_top.isDoubly, r.flex_y_top.governs) : ''}
+                    <div style="flex: 1;">
+                        ${flexBlock('Y-Bot (Mid-span +ve)', r.My_pos, r.flex_y_bot.Ast_req, r.bars_y_bot.label, r.bars_y_bot.Ast_provided, r.flex_y_bot.isDoubly, r.flex_y_bot.governs, r.fck, r.fy, r.dy)}
+                        ${r.My_neg > 0 ? flexBlock('Y-Top (Support &minus;ve)', r.My_neg, r.flex_y_top.Ast_req, r.bars_y_top.label, r.bars_y_top.Ast_provided, r.flex_y_top.isDoubly, r.flex_y_top.governs, r.fck, r.fy, r.dy) : ''}
                     </div>
                 </div>
             </div>
@@ -213,8 +321,8 @@ function generateTwoWaySection(r: any): string {
         ${deflectionSection(r)}
         ${spanDepthSection(r)}
         ${shearSection(r, [
-            {label: 'Short (L<sub>x</sub>)', dir: r.shear.shortDir},
-            {label: 'Long (L<sub>y</sub>)', dir: r.shear.longDir},
+            {label: 'Short (L_x)', dir: r.shear.shortDir},
+            {label: 'Long (L_y)', dir: r.shear.longDir},
         ])}
     `;
 }
@@ -232,7 +340,7 @@ function generateOneWaySection(r: any): string {
     const supportLabel = supportLabels[r.supportCondition] ?? r.supportCondition;
 
     return `
-        <h2>Panel ${r.label} &mdash; One-Way Slab</h2>
+        <h2 style="color: #0f172a; margin-top: 30px;">Panel ${r.label} &mdash; One-Way Slab</h2>
 
         <div class="section-box">
             <div class="section-header">1. Input Parameters</div>
@@ -248,18 +356,18 @@ function generateOneWaySection(r: any): string {
             </div>
         </div>
 
-        <div class="section-box">
+        <div class="section-box avoid-break">
             <div class="section-header">2. Design Moments</div>
             <div class="section-body">
                 <div class="info-note">
                     <strong>One-way slab:</strong> Bending in L<sub>x</sub> direction only.
-                    ${r.supportCondition === 'simply' ? 'M = wL&sup2;/8 (simply supported)' : ''}
-                    ${r.supportCondition === 'one_end' ? 'M<sup>+</sup> = wL&sup2;/10, M<sup>&minus;</sup> = wL&sup2;/10 (one-end continuous)' : ''}
-                    ${r.supportCondition === 'continuous' ? 'M<sup>+</sup> = wL&sup2;/12, M<sup>&minus;</sup> = wL&sup2;/10 (both ends continuous)' : ''}
+                    ${r.supportCondition === 'simply' ? kxInline('M = w_u L_x^2/8 \\quad (\\text{simply supported})') : ''}
+                    ${r.supportCondition === 'one_end' ? kxInline('M^+ = w_u L_x^2/10, M^- = w_u L_x^2/10 \\quad (\\text{one-end continuous})') : ''}
+                    ${r.supportCondition === 'continuous' ? kxInline('M^+ = w_u L_x^2/12, M^- = w_u L_x^2/10 \\quad (\\text{both ends continuous})') : ''}
                 </div>
-                <div class="calc-block">
-                    M<sub>x,pos</sub> = ${r.ax_pos} &times; ${r.wFactored} &times; ${r.Lx}&sup2; = <strong>${r.Mx_pos} kN&middot;m/m</strong>
-                    ${r.Mx_neg > 0 ? `<br/>M<sub>x,neg</sub> = ${r.ax_neg} &times; ${r.wFactored} &times; ${r.Lx}&sup2; = <strong>${r.Mx_neg} kN&middot;m/m</strong>` : ''}
+                <div style="background: #f8fafc; padding: 15px; border-radius: 8px; border: 1px solid #e2e8f0;">
+                    ${kx(`M_{x,pos} = ${r.ax_pos} \\times ${r.wFactored} \\times ${r.Lx}^2 = ${r.Mx_pos} \\text{ kN}\\cdot\\text{m/m}`)}
+                    ${r.Mx_neg > 0 ? kx(`M_{x,neg} = ${r.ax_neg} \\times ${r.wFactored} \\times ${r.Lx}^2 = ${r.Mx_neg} \\text{ kN}\\cdot\\text{m/m}`) : ''}
                 </div>
             </div>
         </div>
@@ -267,17 +375,25 @@ function generateOneWaySection(r: any): string {
         <div class="section-box">
             <div class="section-header">3. Flexural Reinforcement &mdash; IS 456 Cl. 38.1</div>
             <div class="section-body">
-                <div style="font-size:10px;margin:6px 0;">Effective depth: d<sub>x</sub> = ${r.dx} mm</div>
-                <div class="two-col">
-                    <div class="col col-left">
-                        ${flexBlock('X-Bot (Mid-span +ve)', r.Mx_pos, r.flex_x_bot.Ast_req, r.bars_x_bot.label, r.bars_x_bot.Ast_provided, r.flex_x_bot.isDoubly, r.flex_x_bot.governs)}
-                        ${r.Mx_neg > 0 ? flexBlock('X-Top (Support &minus;ve)', r.Mx_neg, r.flex_x_top.Ast_req, r.bars_x_top.label, r.bars_x_top.Ast_provided, r.flex_x_top.isDoubly, r.flex_x_top.governs) : ''}
+                <p style="margin-top:0; color:#475569; font-size:13px;">
+                    <strong>Variables:</strong><br/>
+                    ${kxInline(`A_{st,req}`)}: Required area of steel<br/>
+                    ${kxInline(`A_{st,prov}`)}: Provided area of steel<br/>
+                    ${kxInline(`d`)}: Effective depth (${kxInline(`d_x = ${r.dx} \\text{ mm}`)})
+                </p>
+                <div style="display: flex; gap: 20px;">
+                    <div style="flex: 1;">
+                        ${flexBlock('X-Bot (Mid-span +ve)', r.Mx_pos, r.flex_x_bot.Ast_req, r.bars_x_bot.label, r.bars_x_bot.Ast_provided, r.flex_x_bot.isDoubly, r.flex_x_bot.governs, r.fck, r.fy, r.dx)}
+                        ${r.Mx_neg > 0 ? flexBlock('X-Top (Support &minus;ve)', r.Mx_neg, r.flex_x_top.Ast_req, r.bars_x_top.label, r.bars_x_top.Ast_provided, r.flex_x_top.isDoubly, r.flex_x_top.governs, r.fck, r.fy, r.dx) : ''}
                     </div>
-                    <div class="col">
-                        <h4>Distribution Steel (Y-dir)</h4>
-                        <div class="provided-box">
-                            <strong>Provided:</strong> ${r.bars_y_bot.label}<br/>
-                            A<sub>st,prov</sub> = ${r.bars_y_bot.Ast_provided} mm&sup2;/m (min. steel per IS 456 Cl. 26.5.2.1)
+                    <div style="flex: 1;">
+                        <div style="margin-bottom: 20px;">
+                            <h4 style="margin: 0 0 10px 0; color: #334155;">Distribution Steel (Y-dir)</h4>
+                            <div style="margin-top: 10px; padding: 6px; background: #f8fafc; border-left: 3px solid #0ea5e9;">
+                                <strong>Provided:</strong> ${r.bars_y_bot.label}<br/>
+                                <span style="color: #64748b; font-size: 12px;">(${kxInline(`A_{st,prov} = ${r.bars_y_bot.Ast_provided} \\text{ mm}^2\\text{/m}`)})</span><br/>
+                                <span style="color: #64748b; font-size: 11px;">Min. steel per IS 456 Cl. 26.5.2.1</span>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -287,7 +403,7 @@ function generateOneWaySection(r: any): string {
         ${deflectionSection(r)}
         ${spanDepthSection(r)}
         ${shearSection(r, [
-            {label: 'Span (L<sub>x</sub>)', dir: r.shear.shortDir},
+            {label: 'Span (L_x)', dir: r.shear.shortDir},
         ])}
     `;
 }
@@ -298,7 +414,7 @@ function generateOneWaySection(r: any): string {
 
 function generateCantileverSection(r: any): string {
     return `
-        <h2>Panel ${r.label} &mdash; Cantilever Slab</h2>
+        <h2 style="color: #0f172a; margin-top: 30px;">Panel ${r.label} &mdash; Cantilever Slab</h2>
 
         <div class="section-box">
             <div class="section-header">1. Input Parameters</div>
@@ -313,14 +429,14 @@ function generateCantileverSection(r: any): string {
             </div>
         </div>
 
-        <div class="section-box">
+        <div class="section-box avoid-break">
             <div class="section-header">2. Design Moment</div>
             <div class="section-body">
                 <div class="info-note">
-                    <strong>Cantilever slab:</strong> Fixed at support, free at tip. Governing moment is hogging at support: M = wL&sup2;/2.
+                    <strong>Cantilever slab:</strong> Fixed at support, free at tip. Governing moment is hogging at support: ${kxInline('M = w_u L^2/2')}
                 </div>
-                <div class="calc-block">
-                    M<sub>x,neg</sub> = w<sub>u</sub> &times; L&sup2; / 2 = ${r.wFactored} &times; ${r.Lx}&sup2; / 2 = <strong>${r.Mx_neg} kN&middot;m/m</strong>
+                <div style="background: #f8fafc; padding: 15px; border-radius: 8px; border: 1px solid #e2e8f0;">
+                    ${kx(`M_{x,neg} = \\frac{w_u \\cdot L^2}{2} = \\frac{${r.wFactored} \\times ${r.Lx}^2}{2} = ${r.Mx_neg} \\text{ kN}\\cdot\\text{m/m}`)}
                 </div>
             </div>
         </div>
@@ -328,13 +444,18 @@ function generateCantileverSection(r: any): string {
         <div class="section-box">
             <div class="section-header">3. Flexural Reinforcement &mdash; IS 456 Cl. 38.1</div>
             <div class="section-body">
-                <div style="font-size:10px;margin:6px 0;">Effective depth: d = ${r.dx} mm</div>
-                <div class="two-col">
-                    <div class="col col-left">
-                        ${flexBlock('Top (Support &mdash; Hogging)', r.Mx_neg, r.flex_x_top.Ast_req, r.bars_x_top.label, r.bars_x_top.Ast_provided, r.flex_x_top.isDoubly, r.flex_x_top.governs)}
+                <p style="margin-top:0; color:#475569; font-size:13px;">
+                    <strong>Variables:</strong><br/>
+                    ${kxInline(`A_{st,req}`)}: Required area of steel<br/>
+                    ${kxInline(`A_{st,prov}`)}: Provided area of steel<br/>
+                    ${kxInline(`d`)}: Effective depth (${kxInline(`d = ${r.dx} \\text{ mm}`)})
+                </p>
+                <div style="display: flex; gap: 20px;">
+                    <div style="flex: 1;">
+                        ${flexBlock('Top (Support &mdash; Hogging)', r.Mx_neg, r.flex_x_top.Ast_req, r.bars_x_top.label, r.bars_x_top.Ast_provided, r.flex_x_top.isDoubly, r.flex_x_top.governs, r.fck, r.fy, r.dx)}
                     </div>
-                    <div class="col">
-                        ${flexBlock('Bottom (Distribution)', 0, r.flex_x_bot.Ast_req, r.bars_x_bot.label, r.bars_x_bot.Ast_provided, r.flex_x_bot.isDoubly, r.flex_x_bot.governs)}
+                    <div style="flex: 1;">
+                        ${flexBlock('Bottom (Distribution)', 0, r.flex_x_bot.Ast_req, r.bars_x_bot.label, r.bars_x_bot.Ast_provided, r.flex_x_bot.isDoubly, r.flex_x_bot.governs, r.fck, r.fy, r.dx)}
                     </div>
                 </div>
             </div>
@@ -343,7 +464,7 @@ function generateCantileverSection(r: any): string {
         ${deflectionSection(r)}
         ${spanDepthSection(r)}
         ${shearSection(r, [
-            {label: 'Support (L)', dir: r.shear.shortDir},
+            {label: 'Support (L_x)', dir: r.shear.shortDir},
         ])}
     `;
 }

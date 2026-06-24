@@ -1,14 +1,17 @@
+import katex from 'katex';
 import { logger } from '../lib/logger';
 import { REPORT_CSS as FOOTING_REPORT_CSS, calcRow, inputTable } from './reportCss';
 
 // ═══════════════════════════════════════════════════════════════
-//  FOOTING REPORT GENERATOR — two-column book layout with HTML symbols
+//  FOOTING REPORT GENERATOR — Detailed Mathematical Textbook Layout
 // ═══════════════════════════════════════════════════════════════
 
+const kx = (expr: string): string => katex.renderToString(expr, { throwOnError: false, displayMode: true });
+const kxInline = (expr: string): string => katex.renderToString(expr, { throwOnError: false, displayMode: false });
 
 function statusChip(status: string): string {
-    const cls = (status === 'OK' || status === 'SAFE') ? 'status-safe' : 'status-fail';
-    return `<span class="${cls}">${status}</span>`;
+    const cls = (status === 'OK' || status === 'SAFE') ? '#10b981' : '#ef4444';
+    return `<span style="color: ${cls}; font-weight: bold;">${status}</span>`;
 }
 
 export async function generateFootingReport(config: any, results: any[], isPreview: boolean = false): Promise<string | null> {
@@ -24,13 +27,36 @@ export async function generateFootingReport(config: any, results: any[], isPrevi
         <head>
             <meta charset="utf-8">
             <title>Isolated Footing Design Report</title>
-            ${FOOTING_REPORT_CSS}
+            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css" />
+            <style>
+                @page { margin: 15mm; size: A4 portrait; }
+                body {
+                    -webkit-print-color-adjust: exact;
+                    print-color-adjust: exact;
+                    background: white;
+                    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+                    color: #111;
+                    margin: 0;
+                    line-height: 1.5;
+                }
+                .report-container { max-width: 800px; margin: 0 auto; padding: 20px 30px; }
+                .section-box { margin-bottom: 30px; }
+                .section-header { color: #0f172a; border-bottom: 1px solid #cbd5e1; padding-bottom: 4px; font-size: 18px; font-weight: bold; margin-bottom: 15px; }
+                .avoid-break { page-break-inside: avoid; }
+                .info-note { background: #f8fafc; border-left: 3px solid #0ea5e9; padding: 10px; font-size: 13px; color: #475569; margin-bottom: 15px; }
+                table.result-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 15px; }
+                table.result-table th { background: #f1f5f9; padding: 8px; text-align: left; border: 1px solid #e2e8f0; }
+                table.result-table td { padding: 8px; border: 1px solid #e2e8f0; }
+                @media print {
+                    .report-container { max-width: 100%; margin: 0; padding: 0; }
+                }
+            </style>
         </head>
         <body>
             <div class="report-container">
-                <div class="report-header">
-                    <h1>IS 456 Isolated Footing Design Report</h1>
-                    <p>Design Code: IS 456:2000 | Generated: ${new Date().toLocaleString()}</p>
+                <div style="text-align: center; margin-bottom: 30px;">
+                    <h1 style="color: #0f172a; border-bottom: 2px solid #0f172a; padding-bottom: 10px; margin-bottom: 5px; font-size: 28px;">IS 456 Isolated Footing Design Report</h1>
+                    <p style="color: #475569; margin: 0; font-size: 13px;">Design Code: IS 456:2000 | Generated: ${new Date().toLocaleString()}</p>
                 </div>
                 ${footingSections}
             </div>
@@ -39,19 +65,91 @@ export async function generateFootingReport(config: any, results: any[], isPrevi
     `;
 
     if (isPreview) {
-        return htmlContent;
+        const dataUrl = 'data:text/html;charset=utf-8,' + encodeURIComponent(htmlContent);
+        return Promise.resolve(dataUrl);
     } else {
-        const win = window.open('', '_blank')!;
-        win.document.write(htmlContent);
-        win.document.close();
-        setTimeout(() => { win.print(); }, 500);
-        return null;
+        const blob = new Blob([htmlContent], { type: 'text/html' });
+        const blobUrl = URL.createObjectURL(blob);
+        return new Promise<null>((resolve) => {
+            let settled = false;
+            const cleanup = (frame: any) => {
+                if (settled) return;
+                settled = true;
+                try { if (frame && frame.parentNode) document.body.removeChild(frame); } catch { /* noop */ }
+                try { URL.revokeObjectURL(blobUrl); } catch { /* noop */ }
+                resolve(null);
+            };
+
+            const iframe = document.createElement('iframe');
+            iframe.style.position = 'absolute';
+            iframe.style.width = '0';
+            iframe.style.height = '0';
+            iframe.style.border = 'none';
+
+            iframe.onload = () => {
+                try {
+                    iframe.contentWindow?.focus();
+                    iframe.contentWindow?.print();
+                } catch (e) {
+                    logger.error('Footing print failed, falling back to new tab', e);
+                    window.open(blobUrl, '_blank');
+                }
+                setTimeout(() => cleanup(iframe), 2000);
+            };
+
+            document.body.appendChild(iframe);
+            iframe.src = blobUrl;
+            setTimeout(() => { if (!settled) cleanup(iframe); }, 5000);
+        });
     }
 }
 
+// ─── Formatting Helpers ─────────────────────────────────────────────────────────
+
+function flexBlock(label: string, Mu: number, AstReq: number, AstMin: number, pt: number, governs: string, status: string, fck: number, fy: number, d: number): string {
+    return `
+        <div style="margin-bottom: 20px;">
+            <h4 style="margin: 0 0 10px 0; color: #334155;">${label}</h4>
+            ${kx(`M_u = ${Mu.toFixed(2)} \\text{ kN}\\cdot\\text{m}`)}
+            ${governs === 'design' ? 
+                kx(`A_{st,req} = \\frac{0.5 f_{ck}}{f_y} \\left[ 1 - \\sqrt{1 - \\frac{4.6 M_u}{f_{ck} b d^2}} \\right] bd = ${AstReq} \\text{ mm}^2\\text{/m}`) : 
+                kx(`A_{st,req} = ${AstReq} \\text{ mm}^2\\text{/m} \\quad (\\text{Min. governs: } ${AstMin})`)
+            }
+            ${kx(`p_t = ${pt}\\% `)}
+            <div style="margin-top: 6px;">
+                Status: ${statusChip(status)}
+            </div>
+        </div>
+    `;
+}
+
+function oneWayShearBlock(label: string, rDir: any): string {
+    return `
+        <div style="margin-bottom: 15px; padding-bottom: 15px; border-bottom: 1px dashed #e2e8f0;">
+            <h4 style="margin-top: 0;">${label}</h4>
+            <div style="display: flex; gap: 20px;">
+                <div style="flex: 1;">
+                    ${kx(`V_u = ${rDir.Vu} \\text{ kN}`)}
+                    ${kx(`\\tau_v = \\frac{V_u}{bd} = ${rDir.tau_v} \\text{ N/mm}^2`)}
+                </div>
+                <div style="flex: 1;">
+                    ${kx(`\\tau_c = ${rDir.tau_c} \\text{ N/mm}^2`)}
+                    <div style="margin: 10px 0; font-weight: bold; color: ${rDir.status === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: center;">
+                        Result: ${kxInline(`\\tau_v ${rDir.status === 'OK' ? '\\le' : '>'} \\tau_c`)} &rarr; ${rDir.status}
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  FLAT FOOTING
+// ═══════════════════════════════════════════════════════════════
+
 function generateFlatFootingSection(r: any, mat: any): string {
     return `
-        <h2>Footing ${r.label} &mdash; Flat Footing</h2>
+        <h2 style="color: #0f172a; margin-top: 30px;">Footing ${r.label} &mdash; Flat Footing</h2>
 
         <div class="section-box">
             <div class="section-header">1. Input Parameters</div>
@@ -67,20 +165,25 @@ function generateFlatFootingSection(r: any, mat: any): string {
             </div>
         </div>
 
-        <div class="section-box">
+        <div class="section-box avoid-break">
             <div class="section-header">2. Base Area &amp; Soil Pressure</div>
             <div class="section-body">
-                <div class="two-col">
-                    <div class="col col-left">
-                        <div class="calc-block">
-                            A<sub>req</sub> = F<sub>y</sub> + W<sub>self</sub> / q<sub>net</sub> = <strong>${r.areaReq} m&sup2;</strong><br/>
-                            A<sub>prov</sub> = L &times; B = ${r.L} &times; ${r.B} = <strong>${r.areaProv} m&sup2;</strong><br/>
-                            p<sub>avg</sub> = P<sub>total</sub> / A = ${r.totalLoad} / ${r.areaProv} = <strong>${r.soilPressure.p_avg} kN/m&sup2;</strong>
-                            ${r.Mx !== 0 || r.Mz !== 0 ? `<br/>p<sub>max</sub> = <strong>${r.soilPressure.p_max} kN/m&sup2;</strong> &le; ${r.sbc * r.soilPressure.sbcCheckFactor} kN/m&sup2;` : ''}
-                        </div>
+                <p style="margin-top:0; color:#475569; font-size:13px;">
+                    <strong>Variables:</strong><br/>
+                    ${kxInline(`A_{req}`)}: Required area of footing<br/>
+                    ${kxInline(`A_{prov}`)}: Provided area (${kxInline(`L \\times B`)})<br/>
+                    ${kxInline(`p_{avg}`)}: Average soil pressure<br/>
+                    ${kxInline(`p_{max}, p_{min}`)}: Maximum and minimum soil pressure
+                </p>
+                <div style="display: flex; gap: 20px; align-items: center;">
+                    <div style="flex: 1; background: #f8fafc; padding: 15px; border-radius: 8px; border: 1px solid #e2e8f0;">
+                        ${kx(`A_{req} = \\frac{F_y + W_{self}}{q_{net}} = ${r.areaReq} \\text{ m}^2`)}
+                        ${kx(`A_{prov} = L \\times B = ${r.L} \\times ${r.B} = ${r.areaProv} \\text{ m}^2`)}
+                        ${kx(`p_{avg} = \\frac{P_{total}}{A} = \\frac{${r.totalLoad}}{${r.areaProv}} = ${r.soilPressure.p_avg} \\text{ kN/m}^2`)}
+                        ${r.Mx !== 0 || r.Mz !== 0 ? kx(`p_{max} = ${r.soilPressure.p_max} \\text{ kN/m}^2 \\le ${r.sbc * r.soilPressure.sbcCheckFactor} \\text{ kN/m}^2`) : ''}
                     </div>
-                    <div class="col">
-                        <table class="result-table">
+                    <div style="flex: 1;">
+                        <table class="result-table" style="margin: 0;">
                             <tr><th>A<sub>req</sub> (m&sup2;)</th><th>A<sub>prov</sub> (m&sup2;)</th><th>P<sub>total</sub> (kN)</th></tr>
                             <tr><td>${r.areaReq}</td><td>${r.areaProv}</td><td>${r.totalLoad}</td></tr>
                             <tr><th>p<sub>min</sub> (kN/m&sup2;)</th><th>p<sub>max</sub> (kN/m&sup2;)</th><th>SBC Check</th></tr>
@@ -91,69 +194,56 @@ function generateFlatFootingSection(r: any, mat: any): string {
             </div>
         </div>
 
-        <div class="section-box">
+        <div class="section-box avoid-break">
             <div class="section-header">3. Shear Checks</div>
             <div class="section-body">
-                <div class="two-col">
-                    <div class="col col-left">
-                        <h4>A. Punching Shear (Two-Way)</h4>
-                        <div class="calc-block">
-                            V<sub>u</sub> = p<sub>max</sub> &times; (A<sub>prov</sub> &minus; A<sub>punched</sub>) = <strong>${r.punchingShear.Vu} kN</strong><br/>
-                            Perimeter u = <strong>${r.punchingShear.perimeter_u} mm</strong><br/>
-                            &tau;<sub>v</sub> = V<sub>u</sub> / (u &times; d) = <strong>${r.punchingShear.tau_v} N/mm&sup2;</strong><br/>
-                            &tau;<sub>c</sub> = 0.25&radic;f<sub>ck</sub> = <strong>${r.punchingShear.tau_c} N/mm&sup2;</strong><br/>
-                            &tau;<sub>v</sub> ${r.punchingShear.tau_v <= r.punchingShear.tau_c ? '&le;' : '&gt;'} &tau;<sub>c</sub> &rarr; ${statusChip(r.punchingShear.status)}
+                <p style="margin-top:0; color:#475569; font-size:13px;">
+                    <strong>Variables:</strong><br/>
+                    ${kxInline(`V_u`)}: Factored shear force<br/>
+                    ${kxInline(`\\tau_v`)}: Nominal shear stress<br/>
+                    ${kxInline(`\\tau_c`)}: Design shear strength of concrete
+                </p>
+                <div style="display: flex; gap: 20px;">
+                    <div style="flex: 1; border-right: 1px solid #e2e8f0; padding-right: 20px;">
+                        <h4 style="margin-top: 0;">A. Punching Shear (Two-Way)</h4>
+                        ${kx(`V_u = p_{max} \\times (A_{prov} - A_{punched}) = ${r.punchingShear.Vu} \\text{ kN}`)}
+                        ${kx(`u = ${r.punchingShear.perimeter_u} \\text{ mm} \\quad (\\text{perimeter})`)}
+                        ${kx(`\\tau_v = \\frac{V_u}{u \\times d} = ${r.punchingShear.tau_v} \\text{ N/mm}^2`)}
+                        ${kx(`\\tau_c = 0.25\\sqrt{f_{ck}} = ${r.punchingShear.tau_c} \\text{ N/mm}^2`)}
+                        <div style="margin-top: 15px; font-weight: bold; color: ${r.punchingShear.status === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: center;">
+                            Result: ${kxInline(`\\tau_v ${r.punchingShear.tau_v <= r.punchingShear.tau_c ? '\\le' : '>'} \\tau_c`)} &rarr; ${r.punchingShear.status}
                         </div>
                     </div>
-                    <div class="col">
-                        <h4>B. One-Way Shear</h4>
-                        <table class="result-table">
-                            <tr><th>Dir</th><th>V<sub>u</sub> (kN)</th><th>&tau;<sub>v</sub> (N/mm&sup2;)</th><th>&tau;<sub>c</sub> (N/mm&sup2;)</th><th>Status</th></tr>
-                            <tr>
-                                <td>X (along L)</td><td>${r.oneWayShearX.Vu}</td><td>${r.oneWayShearX.tau_v}</td><td>${r.oneWayShearX.tau_c}</td>
-                                <td>${statusChip(r.oneWayShearX.status)}</td>
-                            </tr>
-                            <tr>
-                                <td>Z (along B)</td><td>${r.oneWayShearZ.Vu}</td><td>${r.oneWayShearZ.tau_v}</td><td>${r.oneWayShearZ.tau_c}</td>
-                                <td>${statusChip(r.oneWayShearZ.status)}</td>
-                            </tr>
-                        </table>
+                    <div style="flex: 1;">
+                        <h4 style="margin-top: 0;">B. One-Way Shear</h4>
+                        ${oneWayShearBlock('X (along L)', r.oneWayShearX)}
+                        ${oneWayShearBlock('Z (along B)', r.oneWayShearZ)}
                     </div>
                 </div>
             </div>
         </div>
 
-        <div class="section-box">
+        <div class="section-box avoid-break">
             <div class="section-header">4. Flexural Reinforcement &mdash; IS 456 Cl. 38.1</div>
             <div class="section-body">
-                <div style="font-size:10px;margin-bottom:6px;">Effective depths: d<sub>x</sub> = ${r.dEffX} mm, d<sub>z</sub> = ${r.dEffZ} mm</div>
-                <div class="two-col">
-                    <div class="col col-left">
-                        <h4>X-Direction (parallel L)</h4>
-                        ${calcRow('M<sub>u</sub>', r.flexureX.Mu.toFixed(2), 'kN&middot;m')}
-                        ${calcRow('A<sub>st,req</sub>', r.flexureX.Ast_req, 'mm&sup2;/m')}
-                        ${calcRow('A<sub>st,min</sub>', r.flexureX.Ast_min, 'mm&sup2;/m')}
-                        ${calcRow('p<sub>t</sub>', r.flexureX.pt, '%')}
-                        ${calcRow('Governs', r.flexureX.governs)}
-                        ${calcRow('Status', statusChip(r.flexureX.status))}
+                <p style="margin-top:0; color:#475569; font-size:13px;">
+                    Effective depths: ${kxInline(`d_x = ${r.dEffX} \\text{ mm}`)}, ${kxInline(`d_z = ${r.dEffZ} \\text{ mm}`)}
+                </p>
+                <div style="display: flex; gap: 20px;">
+                    <div style="flex: 1;">
+                        ${flexBlock('X-Direction (parallel L)', r.flexureX.Mu, r.flexureX.Ast_req, r.flexureX.Ast_min, r.flexureX.pt, r.flexureX.governs, r.flexureX.status, r.fck, r.fy, r.dEffX)}
                     </div>
-                    <div class="col">
-                        <h4>Z-Direction (parallel B)</h4>
-                        ${calcRow('M<sub>u</sub>', r.flexureZ.Mu.toFixed(2), 'kN&middot;m')}
-                        ${calcRow('A<sub>st,req</sub>', r.flexureZ.Ast_req, 'mm&sup2;/m')}
-                        ${calcRow('A<sub>st,min</sub>', r.flexureZ.Ast_min, 'mm&sup2;/m')}
-                        ${calcRow('p<sub>t</sub>', r.flexureZ.pt, '%')}
-                        ${calcRow('Governs', r.flexureZ.governs)}
-                        ${calcRow('Status', statusChip(r.flexureZ.status))}
+                    <div style="flex: 1;">
+                        ${flexBlock('Z-Direction (parallel B)', r.flexureZ.Mu, r.flexureZ.Ast_req, r.flexureZ.Ast_min, r.flexureZ.pt, r.flexureZ.governs, r.flexureZ.status, r.fck, r.fy, r.dEffZ)}
                     </div>
                 </div>
             </div>
         </div>
 
-        <div class="section-box">
+        <div class="section-box avoid-break">
             <div class="section-header">5. Overall Status</div>
             <div class="section-body">
-                <table class="result-table">
+                <table class="result-table" style="margin: 0;">
                     <tr><th>Check</th><th>Result</th><th>Check</th><th>Result</th></tr>
                     <tr>
                         <td>SBC</td><td>${statusChip(r.soilPressure.sbcCheck ? 'OK' : 'FAIL')}</td>
@@ -176,9 +266,13 @@ function generateFlatFootingSection(r: any, mat: any): string {
     `;
 }
 
+// ═══════════════════════════════════════════════════════════════
+//  SLOPE FOOTING
+// ═══════════════════════════════════════════════════════════════
+
 function generateSlopeFootingSection(r: any, mat: any): string {
     return `
-        <h2>Footing ${r.label} &mdash; Slope Footing</h2>
+        <h2 style="color: #0f172a; margin-top: 30px;">Footing ${r.label} &mdash; Slope Footing</h2>
 
         <div class="section-box">
             <div class="section-header">1. Input Parameters</div>
@@ -198,19 +292,17 @@ function generateSlopeFootingSection(r: any, mat: any): string {
             </div>
         </div>
 
-        <div class="section-box">
+        <div class="section-box avoid-break">
             <div class="section-header">2. Base Area &amp; Soil Pressure</div>
             <div class="section-body">
-                <div class="two-col">
-                    <div class="col col-left">
-                        <div class="calc-block">
-                            A<sub>req</sub> = <strong>${r.areaReq} m&sup2;</strong><br/>
-                            A<sub>prov</sub> = <strong>${r.areaProv} m&sup2;</strong><br/>
-                            p<sub>max</sub> = <strong>${r.soilPressure.p_max} kN/m&sup2;</strong>
-                        </div>
+                <div style="display: flex; gap: 20px; align-items: center;">
+                    <div style="flex: 1; background: #f8fafc; padding: 15px; border-radius: 8px; border: 1px solid #e2e8f0;">
+                        ${kx(`A_{req} = ${r.areaReq} \\text{ m}^2`)}
+                        ${kx(`A_{prov} = ${r.areaProv} \\text{ m}^2`)}
+                        ${kx(`p_{max} = ${r.soilPressure.p_max} \\text{ kN/m}^2`)}
                     </div>
-                    <div class="col">
-                        <table class="result-table">
+                    <div style="flex: 1;">
+                        <table class="result-table" style="margin: 0;">
                             <tr><th>A<sub>req</sub></th><th>A<sub>prov</sub></th><th>P<sub>total</sub></th></tr>
                             <tr><td>${r.areaReq} m&sup2;</td><td>${r.areaProv} m&sup2;</td><td>${r.totalLoad} kN</td></tr>
                             <tr><th>p<sub>min</sub></th><th>p<sub>max</sub></th><th>SBC Check</th></tr>
@@ -221,81 +313,67 @@ function generateSlopeFootingSection(r: any, mat: any): string {
             </div>
         </div>
 
-        <div class="section-box">
+        <div class="section-box avoid-break">
             <div class="section-header">3. Shear Checks</div>
             <div class="section-body">
-                <div class="two-col">
-                    <div class="col col-left">
-                        <h4>A. Punching Shear (Two-Way)</h4>
-                        <table class="result-table">
-                            <tr><th>Perimeter</th><th>V<sub>u</sub></th><th>&tau;<sub>v</sub></th><th>&tau;<sub>c</sub></th><th>Status</th></tr>
-                            <tr>
-                                <td>${r.punchingShear.perimeter_u} mm</td><td>${r.punchingShear.Vu} kN</td>
-                                <td>${r.punchingShear.tau_v} N/mm&sup2;</td><td>${r.punchingShear.tau_c} N/mm&sup2;</td>
-                                <td>${statusChip(r.punchingShear.status)}</td>
-                            </tr>
-                        </table>
+                <div style="display: flex; gap: 20px;">
+                    <div style="flex: 1; border-right: 1px solid #e2e8f0; padding-right: 20px;">
+                        <h4 style="margin-top: 0;">A. Punching Shear (Two-Way)</h4>
+                        ${kx(`V_u = ${r.punchingShear.Vu} \\text{ kN}`)}
+                        ${kx(`u = ${r.punchingShear.perimeter_u} \\text{ mm}`)}
+                        ${kx(`\\tau_v = ${r.punchingShear.tau_v} \\text{ N/mm}^2`)}
+                        ${kx(`\\tau_c = ${r.punchingShear.tau_c} \\text{ N/mm}^2`)}
+                        <div style="margin-top: 15px; font-weight: bold; color: ${r.punchingShear.status === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: center;">
+                            Result: ${kxInline(`\\tau_v ${r.punchingShear.tau_v <= r.punchingShear.tau_c ? '\\le' : '>'} \\tau_c`)} &rarr; ${r.punchingShear.status}
+                        </div>
                     </div>
-                    <div class="col">
-                        <h4>B. One-Way Shear</h4>
-                        <table class="result-table">
-                            <tr><th>Dir</th><th>V<sub>u</sub></th><th>&tau;<sub>v</sub></th><th>&tau;<sub>c</sub></th><th>Status</th></tr>
-                            <tr>
-                                <td>X</td><td>${r.oneWayShearX.Vu} kN</td><td>${r.oneWayShearX.tau_v}</td><td>${r.oneWayShearX.tau_c}</td>
-                                <td>${statusChip(r.oneWayShearX.status)}</td>
-                            </tr>
-                            <tr>
-                                <td>Z</td><td>${r.oneWayShearZ.Vu} kN</td><td>${r.oneWayShearZ.tau_v}</td><td>${r.oneWayShearZ.tau_c}</td>
-                                <td>${statusChip(r.oneWayShearZ.status)}</td>
-                            </tr>
-                        </table>
+                    <div style="flex: 1;">
+                        <h4 style="margin-top: 0;">B. One-Way Shear</h4>
+                        ${oneWayShearBlock('X', r.oneWayShearX)}
+                        ${oneWayShearBlock('Z', r.oneWayShearZ)}
                     </div>
                 </div>
             </div>
         </div>
 
-        <div class="section-box">
+        <div class="section-box avoid-break">
             <div class="section-header">4. Flexural Reinforcement</div>
             <div class="section-body">
-                <div style="font-size:10px;margin-bottom:6px;">Effective depths at pedestal: d<sub>x</sub> = ${r.dEffX} mm, d<sub>z</sub> = ${r.dEffZ} mm</div>
-                <div class="two-col">
-                    <div class="col col-left">
-                        <h4>X-Direction</h4>
-                        ${calcRow('M<sub>u</sub>', r.flexureX.Mu.toFixed(2), 'kN&middot;m')}
-                        ${calcRow('A<sub>st,req</sub>', r.flexureX.Ast_req, 'mm&sup2;/m')}
-                        ${calcRow('p<sub>t</sub>', r.flexureX.pt, '%')}
-                        ${calcRow('Status', statusChip(r.flexureX.status))}
+                <p style="margin-top:0; color:#475569; font-size:13px;">
+                    Effective depths at pedestal: ${kxInline(`d_x = ${r.dEffX} \\text{ mm}`)}, ${kxInline(`d_z = ${r.dEffZ} \\text{ mm}`)}
+                </p>
+                <div style="display: flex; gap: 20px;">
+                    <div style="flex: 1;">
+                        ${flexBlock('X-Direction', r.flexureX.Mu, r.flexureX.Ast_req, r.flexureX.Ast_min, r.flexureX.pt, r.flexureX.governs, r.flexureX.status, r.fck, r.fy, r.dEffX)}
                     </div>
-                    <div class="col">
-                        <h4>Z-Direction</h4>
-                        ${calcRow('M<sub>u</sub>', r.flexureZ.Mu.toFixed(2), 'kN&middot;m')}
-                        ${calcRow('A<sub>st,req</sub>', r.flexureZ.Ast_req, 'mm&sup2;/m')}
-                        ${calcRow('p<sub>t</sub>', r.flexureZ.pt, '%')}
-                        ${calcRow('Status', statusChip(r.flexureZ.status))}
+                    <div style="flex: 1;">
+                        ${flexBlock('Z-Direction', r.flexureZ.Mu, r.flexureZ.Ast_req, r.flexureZ.Ast_min, r.flexureZ.pt, r.flexureZ.governs, r.flexureZ.status, r.fck, r.fy, r.dEffZ)}
                     </div>
                 </div>
             </div>
         </div>
 
-        <div class="section-box">
+        <div class="section-box avoid-break">
             <div class="section-header">5. Slope Adequacy Check</div>
             <div class="section-body">
-                <div class="two-col">
-                    <div class="col col-left">
-                        ${calcRow('Slope Angle', (r.slopeCheck?.slopeAngleDeg ?? '&mdash;'), '&deg;')}
-                        ${calcRow('Adequacy', statusChip(r.slopeCheck?.isAdequate ? 'OK' : 'FAIL'))}
+                <div style="display: flex; gap: 20px; align-items: center;">
+                    <div style="flex: 1;">
+                        <table class="result-table" style="margin: 0;">
+                            <tr><th>Slope Angle</th><td>${r.slopeCheck?.slopeAngleDeg ?? '&mdash;'} &deg;</td></tr>
+                            <tr><th>Adequacy</th><td>${statusChip(r.slopeCheck?.isAdequate ? 'OK' : 'FAIL')}</td></tr>
+                        </table>
                     </div>
-                    <div class="col">
-                        ${calcRow('Note', r.slopeCheck?.note ?? '')}
+                    <div style="flex: 1; color: #475569; font-size: 13px;">
+                        <strong>Note:</strong> ${r.slopeCheck?.note ?? ''}
                     </div>
                 </div>
             </div>
         </div>
 
-        <div class="section-box">
+        <div class="section-box avoid-break">
             <div class="section-header">6. Overall Status</div>
             <div class="section-body">
-                <table class="result-table">
+                <table class="result-table" style="margin: 0;">
                     <tr><th>Check</th><th>Result</th><th>Check</th><th>Result</th></tr>
                     <tr>
                         <td>SBC</td><td>${statusChip(r.soilPressure.sbcCheck ? 'OK' : 'FAIL')}</td>
