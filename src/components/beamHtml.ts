@@ -27,7 +27,7 @@ export function renderReactionsHTML(result: any, wVal: number, LVal: any): { rea
     const fmtStr = (v: any) => v.fl(result.w1Val, result.w2Val).toFixed(3);
 
     const headerLabel = 'Reaction (Numeric)';
-    let html = `<div style="overflow-x: auto;"><table><thead><tr><th>Support</th><th>Type</th><th>${headerLabel}</th><th>Expression</th></tr></thead><tbody>`;
+    let html = `<div class="table-wrap"><table style="width:100%;border-collapse:collapse;"><thead><tr><th style="min-width:80px;">Support</th><th style="min-width:70px;">Type</th><th style="min-width:140px;">${headerLabel}</th><th style="min-width:100px;">Expression</th></tr></thead><tbody>`;
     for (let i = 0; i < reactions.length; i++) {
         const r = reactions[i];
         const isFixedLeft = i === 0 && (endCond === 'fixed' || endCond === 'fixed-fixed');
