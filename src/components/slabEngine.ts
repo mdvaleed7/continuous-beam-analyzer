@@ -529,26 +529,26 @@ interface ShearConfig {
 
 interface ShearDesign {
     wTotal: number;
-    barDia_x_bot: number;
-    Ast_x_bot: number;
-    Ast_y_bot: number;
+    barDia_x: number;
+    Ast_x: number;
+    Ast_y: number;
     grade: string;
 }
 
 function shearCheck(config: ShearConfig, design: ShearDesign): ShearResult {
     const { Lx, Ly, D, cover } = config;
-    const { wTotal, barDia_x_bot, Ast_x_bot, Ast_y_bot, grade } = design;
+    const { wTotal, barDia_x, Ast_x, Ast_y, grade } = design;
 
     const b = 1000;
-    const dx = D - cover - (barDia_x_bot || 10) / 2;
-    const dy = dx - (barDia_x_bot || 10);
+    const dx = D - cover - (barDia_x || 10) / 2;
+    const dy = dx - (barDia_x || 10);
 
     const isTwoWay = config.slabType === 'two-way';
     const Vu_x = wTotal * (Lx / 1000) / 2;
     const Vu_y = isTwoWay ? wTotal * (Ly / 1000) / 2 : 0;
 
-    const pt_x = 100 * Ast_x_bot / (b * dx);
-    const pt_y = 100 * Ast_y_bot / (b * dy);
+    const pt_x = 100 * Ast_x / (b * dx);
+    const pt_y = 100 * Ast_y / (b * dy);
 
     const tau_v_x = (Vu_x * 1000) / (b * dx);
     const tau_v_y = (Vu_y * 1000) / (b * dy);
@@ -796,9 +796,9 @@ export function analyzeSlab(config: SlabConfig): SlabAnalysisResult {
         { Lx, Ly, D, cover, fck, loadFactor, slabType: actualSlabType },
         {
             wTotal: wFactored,
-            barDia_x_bot: bars_x_bot.dia,
-            Ast_x_bot: bars_x_bot.Ast_provided,
-            Ast_y_bot: bars_y_bot.Ast_provided,
+            barDia_x: bars_x_top.dia || bars_x_bot.dia,
+            Ast_x: Math.max(bars_x_top.Ast_provided, bars_x_bot.Ast_provided),
+            Ast_y: Math.max(bars_y_top.Ast_provided, bars_y_bot.Ast_provided),
             grade,
         },
     );
