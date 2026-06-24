@@ -94,11 +94,12 @@ function deflectionSection(r: any): string {
                     ${calcRow('a<sub>creep</sub>', r.deflection.a_creep, 'mm')}
 
                     <h4>D. Summary</h4>
-                    ${calcRow('Total (a<sub>i</sub> + a<sub>cc</sub> + a<sub>cs</sub>)', r.deflection.a_total, 'mm')}
+                    ${r.deflection.camber > 0 ? calcRow('Initial Upward Camber', r.deflection.camber, 'mm') : ''}
+                    ${calcRow(r.deflection.camber > 0 ? 'Net Total' : 'Total (a<sub>i</sub> + a<sub>cc</sub> + a<sub>cs</sub>)', r.deflection.a_total, 'mm')}
                     ${calcRow('Limit (L/250)', r.deflection.limit_total, 'mm')}
                     ${calcRow('Status', statusChip(r.deflection.status_total))}
                     <div style="margin-top:4px;"></div>
-                    ${calcRow('Post-construction', r.deflection.a_post_construction, 'mm')}
+                    ${calcRow(r.deflection.camber > 0 ? 'Net Post-construction' : 'Post-construction', r.deflection.a_post_construction, 'mm')}
                     ${calcRow('Limit (L/350 or 20)', r.deflection.limit_post, 'mm')}
                     ${calcRow('Status', statusChip(r.deflection.status_post))}
                 </div>

@@ -52,6 +52,7 @@ export interface SlabConfig {
     supportCondition?: SupportCondition; // one-way explicit support condition
     slabType?: SlabTypeInput;
     ageOfLoading?: string;  // '7' | '28' | '365'
+    camber?: number;        // (mm) initial upward camber to offset deflection
 }
 
 // ponytail: FlexuralDesign and BarSelection are now FlexuralResult and BarResult from is456
@@ -127,6 +128,7 @@ export interface DeflectionResult {
     limit_post: number;
     status_total: 'OK' | 'FAIL';
     status_post: 'OK' | 'FAIL';
+    camber: number;
     supportCondition: SupportCondition;
 }
 
@@ -318,6 +320,7 @@ interface AnnexCConfig {
     fy: number;
     Es?: number;
     ageOfLoading?: string;
+    camber?: number;
 }
 
 interface AnnexCDesign {
@@ -330,7 +333,7 @@ interface AnnexCDesign {
 }
 
 function annexCDeflection(config: AnnexCConfig, design: AnnexCDesign): DeflectionResult {
-    const { Lx, D, cover, fck, fy, Es = 200000, ageOfLoading = '28' } = config;
+    const { Lx, D, cover, fck, fy, Es = 200000, ageOfLoading = '28', camber = 0 } = config;
     const { barDia_x_bot, Ast_x_bot, Asc_x_top = 0, M_service, M_perm, supportCondition } = design;
 
     const b = 1000; // mm, unit strip
@@ -458,8 +461,12 @@ function annexCDeflection(config: AnnexCConfig, design: AnnexCDesign): Deflectio
     const a_creep = a1_perm - ai_perm;
 
     // ─── Total Deflections ───
-    const a_total = ai + Math.max(0, a_creep) + a_shrinkage;
-    const a_post_construction = Math.max(0, a_creep) + a_shrinkage;
+    const a_total_raw = ai + Math.max(0, a_creep) + a_shrinkage;
+    const a_post_raw = Math.max(0, a_creep) + a_shrinkage;
+
+    // Apply camber offset
+    const a_total = Math.max(0, a_total_raw - camber);
+    const a_post_construction = Math.max(0, a_post_raw - camber);
 
     // ─── Limits ───
     const limit_total = L / 250;
@@ -492,6 +499,7 @@ function annexCDeflection(config: AnnexCConfig, design: AnnexCDesign): Deflectio
         status_total: a_total <= limit_total ? 'OK' : 'FAIL',
         status_post: a_post_construction <= limit_post ? 'OK' : 'FAIL',
         supportCondition,
+        camber: Math.round(camber * 100) / 100,
     };
 }
 
@@ -760,7 +768,7 @@ export function analyzeSlab(config: SlabConfig): SlabAnalysisResult {
     const supportCondDefl: SupportCondition = effectiveSupportCond;
 
     const deflection = annexCDeflection(
-        { Lx, D, cover, fck, fy, ageOfLoading },
+        { Lx, D, cover, fck, fy, ageOfLoading, camber: config.camber || 0 },
         {
             barDia_x_bot: bars_tension.dia,
             Ast_x_bot: bars_tension.Ast_provided,

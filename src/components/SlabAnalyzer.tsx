@@ -17,6 +17,7 @@ const DEFAULT_PANEL = {
     slabType: 'auto',
     isCantilever: false,
     ageOfLoading: '28',
+    camber: 0,
 };
 
 export default function SlabAnalyzer() {
@@ -414,11 +415,16 @@ export default function SlabAnalyzer() {
                             </>
                         )}
 
-                        {/* ── Common: depth ── */}
                         <div className="control-group">
                             <label>Depth D (mm)</label>
                             <input title="Value" type="number" min="75" max="500" step="5" value={p.D}
                                 onChange={e => updatePanel(activePanel, 'D', +e.target.value)} />
+                        </div>
+
+                        <div className="control-group">
+                            <label>Camber (mm)</label>
+                            <input title="Value" type="number" min="0" max="100" step="1" value={p.camber || 0}
+                                onChange={e => updatePanel(activePanel, 'camber', +e.target.value)} />
                         </div>
                         
                         <div className="opt-panel">
@@ -613,15 +619,21 @@ export default function SlabAnalyzer() {
                                 </div>
                             </div>
                             <div className="defl-summary">
+                                {r.deflection.camber > 0 && (
+                                    <div className="defl-result defl-ok" style={{ marginBottom: '8px', background: 'var(--bg-card)', border: '1px dashed var(--border-color)' }}>
+                                        <span>Initial Upward Camber: <strong>{r.deflection.camber} mm</strong></span>
+                                        <span>Offsets downward deflection</span>
+                                    </div>
+                                )}
                                 <div className={`defl-result ${r.deflection.status_total === 'OK' ? 'defl-ok' : 'defl-fail'}`}>
-                                    <span>Total: {r.deflection.a_total} mm</span>
+                                    <span>{r.deflection.camber > 0 ? 'Net Total' : 'Total'}: {r.deflection.a_total} mm</span>
                                     <span>Limit (L/250): {r.deflection.limit_total} mm</span>
                                     <span className={`chip ${r.deflection.status_total === 'OK' ? 'chip-safe' : 'chip-fail'}`}>
                                         {r.deflection.status_total}
                                     </span>
                                 </div>
                                 <div className={`defl-result ${r.deflection.status_post === 'OK' ? 'defl-ok' : 'defl-fail'}`}>
-                                    <span>Post-construction: {r.deflection.a_post_construction} mm</span>
+                                    <span>{r.deflection.camber > 0 ? 'Net Post-construction' : 'Post-construction'}: {r.deflection.a_post_construction} mm</span>
                                     <span>Limit (L/350 or 20mm): {r.deflection.limit_post} mm</span>
                                     <span className={`chip ${r.deflection.status_post === 'OK' ? 'chip-safe' : 'chip-fail'}`}>
                                         {r.deflection.status_post}
