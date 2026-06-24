@@ -125,3 +125,180 @@ export function getMinSteelRatio(fyOrGrade: number | string): number {
 export function getEc(fck: number): number {
     return 5000 * Math.sqrt(fck);
 }
+
+// ─── Shared types ──────────────────────────────────────────────────────────
+
+export type Governs = 'design' | 'minimum' | 'maximum';
+export type ShearStatus = 'minimum' | 'design' | 'FAIL';
+
+export interface FlexuralResult {
+    Ast_req: number;
+    Ast_min?: number;
+    Ast_max?: number;
+    Mu_lim: number;
+    Mu_applied?: number;
+    isDoubly: boolean;
+    governs: Governs;
+    utilization: number;
+    pt?: number;
+    status?: string;
+}
+
+export interface BarResult {
+    dia: number;
+    spacing: number;
+    Ast_provided: number;
+    label: string;
+    nBars?: number;
+}
+
+export interface ShearLinkResult {
+    dia: number;
+    spacing: number;
+    label: string;
+    Asv_sv_provided: number;
+}
+
+export interface ShearResult {
+    tau_v: number;
+    tau_c: number;
+    tau_c_max: number;
+    pt: number;
+    status: ShearStatus;
+    Asv_sv: number | null;
+    links: ShearLinkResult | null;
+    Vu_applied: number;
+}
+
+// ─── Flexural design — IS 456 Cl. 38.1 ────────────────────────────────────
+// Single source of truth for singly-reinforced rectangular section design.
+// The wall, slab, and footing engines all call this instead of their own copy.
+//
+// @param Mu_kNm   - factored bending moment (kN·m)
+// @param b_mm     - width of section (mm), typically 1000 for 1m strip
+// @param d_mm     - effective depth (mm)
+// @param fck      - characteristic compressive strength of concrete (MPa)
+// @param fy       - yield strength of steel (MPa)
+// @param D_mm     - optional gross thickness (mm); used for min/max steel calc.
+//                   If omitted, defaults to d_mm + 50 for footings or d_mm + 25 for slabs.
+// @param splitFace - if true, min steel is halved (wall: each face gets half)
+
+export function flexuralDesign(
+    Mu_kNm: number, b_mm: number, d_mm: number,
+    fck: number, fy: number,
+    D_mm?: number, splitFace: boolean = false,
+): FlexuralResult {
+    const Mu = Math.abs(Mu_kNm) * 1e6;
+    const coeff = MU_LIM_COEFF[`Fe${fy}` as SteelGrade] ?? 0.138;
+    const Mu_lim = coeff * fck * b_mm * d_mm * d_mm;
+    const t_mm = D_mm || (d_mm + 50);
+    const minR = MIN_STEEL_RATIO[`Fe${fy}` as SteelGrade] ?? 0.0012;
+    const Ast_min_total = minR * b_mm * t_mm;
+    const Ast_min = splitFace ? Ast_min_total / 2 : Ast_min_total;
+    const Ast_max = MAX_STEEL_RATIO * b_mm * t_mm;
+
+    if (Mu <= 0.001) {
+        return {
+            Ast_req: Math.ceil(Ast_min), Ast_min: Math.ceil(Ast_min), Ast_max: Math.floor(Ast_max),
+            Mu_lim: Mu_lim / 1e6, Mu_applied: 0, isDoubly: false, governs: 'minimum', utilization: 0,
+        };
+    }
+
+    const isDoubly = Mu > Mu_lim;
+    const ratio = 4.6 * Mu / (fck * b_mm * d_mm * d_mm);
+    const sqrtTerm = Math.sqrt(Math.max(0, 1 - ratio));
+    let Ast_req = (0.5 * fck / fy) * (1 - sqrtTerm) * b_mm * d_mm;
+
+    let governs: Governs = 'design';
+    if (Ast_req < Ast_min) { Ast_req = Ast_min; governs = 'minimum'; }
+    else if (Ast_req > Ast_max) { Ast_req = Ast_max; governs = 'maximum'; }
+
+    const pt = 100 * Ast_req / (b_mm * d_mm);
+    return {
+        Ast_req: Math.ceil(Ast_req), Ast_min: Math.ceil(Ast_min), Ast_max: Math.floor(Ast_max),
+        Mu_lim: Mu_lim / 1e6, Mu_applied: Math.abs(Mu_kNm), isDoubly, governs,
+        utilization: Mu / Mu_lim, pt: Math.round(pt * 1000) / 1000,
+        status: isDoubly ? 'REVISE' : 'SAFE',
+    };
+}
+
+// ─── Bar selection for 1m strip ────────────────────────────────────────────
+
+export function selectBars(
+    Ast_req: number,
+    barDias: readonly number[] = STANDARD_BAR_DIAS,
+    spacings: readonly number[] = STANDARD_SPACINGS,
+    b: number = 1000,
+): BarResult {
+    let best: BarResult | null = null;
+    for (const dia of barDias) {
+        const Abar = Math.PI * dia * dia / 4;
+        for (const sp of spacings) {
+            const Ast = Abar * (b / sp);
+            if (Ast >= Ast_req && (!best || Ast < best.Ast_provided)) {
+                best = { dia, spacing: sp, Ast_provided: Math.round(Ast), label: `${dia}mm @ ${sp} c/c`, nBars: Math.floor(b / sp) };
+            }
+        }
+    }
+    if (!best) {
+        const dia = barDias[barDias.length - 1], sp = spacings[0];
+        const Ast = (Math.PI * dia * dia / 4) * (b / sp);
+        best = { dia, spacing: sp, Ast_provided: Math.round(Ast), label: `${dia}mm @ ${sp} c/c`, nBars: Math.floor(b / sp) };
+    }
+    return best;
+}
+
+// ─── Shear link selection (2-legged stirrups) ──────────────────────────────
+
+export function selectShearLinks(Asv_sv_req: number | null): ShearLinkResult | null {
+    if (!Asv_sv_req) return null;
+    const dias = [8, 10, 12];
+    for (const dia of dias) {
+        const Asv = 2 * Math.PI * dia * dia / 4;
+        for (const sp of STANDARD_SPACINGS) {
+            const prov = Asv / sp;
+            if (prov >= Asv_sv_req) {
+                return { dia, spacing: sp, label: `${dia}mm 2-legged @ ${sp} c/c`, Asv_sv_provided: Math.round(prov * 100) / 100 };
+            }
+        }
+    }
+    const Asv = 2 * Math.PI * 144 / 4;
+    return { dia: 12, spacing: 100, label: `12mm 2-legged @ 100 c/c`, Asv_sv_provided: Math.round((Asv / 100) * 100) / 100 };
+}
+
+// ─── Shear design — IS 456 Cl. 40 ─────────────────────────────────────────
+
+export function shearDesign(
+    Vu_kN: number, b_mm: number, d_mm: number,
+    Ast_mm2: number, fck: number, fy: number, grade: string,
+): ShearResult {
+    const Vu = Math.abs(Vu_kN) * 1e3;
+    const tau_v = Vu / (b_mm * d_mm);
+    const pt = 100 * Ast_mm2 / (b_mm * d_mm);
+    const tau_c = getTauC(pt, fck);
+    const tau_c_max = TAU_C_MAX[grade as ConcreteGrade] ?? 2.8;
+
+    let status: ShearStatus, Asv_sv: number | null;
+    if (tau_v <= tau_c) {
+        status = 'minimum';
+        Asv_sv = (0.4 * b_mm) / (0.87 * fy);
+    } else if (tau_v <= tau_c_max) {
+        status = 'design';
+        Asv_sv = (Vu - tau_c * b_mm * d_mm) / (0.87 * fy * d_mm);
+    } else {
+        status = 'FAIL';
+        Asv_sv = null;
+    }
+
+    return {
+        tau_v: Math.round(tau_v * 1000) / 1000,
+        tau_c: Math.round(tau_c * 1000) / 1000,
+        tau_c_max, pt: Math.round(pt * 1000) / 1000,
+        status, Asv_sv: Asv_sv !== null ? Math.round(Asv_sv * 100) / 100 : null,
+        links: selectShearLinks(Asv_sv), Vu_applied: Math.abs(Vu_kN),
+    };
+}
+
+// ─── Economic cost index ───────────────────────────────────────────────────
+// ponytail: was economicOptimization.ts — one line covers it
+export const computeCostIndex = (vol: number, steel: number, r = 90) => vol + steel * (r / 7850);

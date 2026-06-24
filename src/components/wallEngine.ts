@@ -9,21 +9,26 @@
 import { analyzeBeam, toFrac } from './beamEngine';
 import {
     TAU_C_MAX,
-    MU_LIM_COEFF,
-    MIN_STEEL_RATIO,
-    MAX_STEEL_RATIO,
-    getTauC as getTauCShared,
+    getTauC,
+    flexuralDesign,
+    selectBars,
+    shearDesign,
+    selectShearLinks,
+    computeCostIndex,
     type ConcreteGrade,
     type SteelGrade,
+    type Governs,
+    type ShearStatus,
+    type FlexuralResult as FlexuralDesign,
+    type BarResult as BarSelection,
+    type ShearLinkResult as ShearLinks,
+    type ShearResult as ShearDesign,
 } from '../lib/is456';
-// ponytail: was economicOptimization.ts — one line covers it
-const computeCostIndex = (vol: number, steel: number, r = 90) => vol + steel * (r / 7850);
 
 // ───────────────────── Types ────────────────────────────────────────────────────────────
 
 export type WaterMode = 'dry' | 'partial' | 'submerged';
-export type ShearStatus = 'minimum' | 'design' | 'FAIL';
-export type Governs = 'design' | 'minimum' | 'maximum';
+export type { ShearStatus, Governs } from '../lib/is456';
 
 export interface WallZone {
     height: number;
@@ -78,41 +83,9 @@ export interface ProfileNode extends PressurePoint {
     depth: number;
 }
 
-export interface FlexuralDesign {
-    Ast_req: number;
-    Ast_min?: number;
-    Ast_max?: number;
-    Mu_lim: number;
-    Mu_applied?: number;
-    isDoubly: boolean;
-    governs: Governs;
-    utilization: number;
-}
+export type { FlexuralDesign, BarSelection, ShearLinks, ShearDesign };
 
-export interface BarSelection {
-    dia: number;
-    spacing: number;
-    Ast_provided: number;
-    label: string;
-}
 
-export interface ShearLinks {
-    dia: number;
-    spacing: number;
-    label: string;
-    Asv_sv_provided: number;
-}
-
-export interface ShearDesign {
-    tau_v: number;
-    tau_c: number;
-    tau_c_max: number;
-    pt: number;
-    status: ShearStatus;
-    Asv_sv: number | null;
-    links: ShearLinks | null;
-    Vu_applied: number;
-}
 
 export interface ZoneDesign {
     zone: number;
@@ -237,177 +210,8 @@ function computeK0(phi_deg: number): number {
     return 1 - Math.sin(phi);
 }
 
-// ───────────────────── IS 456 Design Functions ─────────────────────
-
-/**
- * Calculate design shear strength of concrete τc (N/mm²) per IS 456 exact
- * formula. Thin wrapper around the shared `getTauC` so this file keeps its
- * original (pt_percent, fck) call signature.
- */
-function getTauC(pt_percent: number, fck: number): number {
-    return getTauCShared(pt_percent, fck);
-}
-
-/** Flexural design per IS 456 Clause 38 — singly reinforced
- *  @param {number} t_actual_mm  actual total wall thickness (mm) for Ast_max calc */
-function flexuralDesign(Mu_kNm: number, b_mm: number, d_mm: number, fck: number, fy: number, t_actual_mm: number): FlexuralDesign {
-    const Mu = Math.abs(Mu_kNm) * 1e6; // N·mm
-    
-    // Limiting moment
-    const coeff = MU_LIM_COEFF[`Fe${fy}` as SteelGrade] ?? 0.138;
-    const Mu_lim = coeff * fck * b_mm * d_mm * d_mm;
-    
-    // Maximum steel check — use actual wall thickness, not approximation
-    const t_mm = t_actual_mm || (d_mm + 50);
-
-    if (Mu <= 0.001) {
-        // No moment — provide minimum steel
-        const minRatio = MIN_STEEL_RATIO[`Fe${fy}` as SteelGrade] ?? 0.0012;
-        return {
-            Ast_req: Math.ceil((minRatio * b_mm * t_mm) / 2),
-            Mu_lim: Mu_lim / 1e6, // back to kN·m
-            isDoubly: false,
-            governs: 'minimum',
-            utilization: 0,
-        };
-    }
-    
-    const isDoubly = Mu > Mu_lim;
-    
-    // Singly reinforced steel area
-    const ratio = 4.6 * Mu / (fck * b_mm * d_mm * d_mm);
-    const sqrtTerm = Math.sqrt(Math.max(0, 1 - ratio));
-    let Ast_req = (0.5 * fck / fy) * (1 - sqrtTerm) * b_mm * d_mm;
-    
-    // Minimum steel check - 0.12% total, split per face
-    const minRatio = MIN_STEEL_RATIO[`Fe${fy}` as SteelGrade] ?? 0.0012;
-    const Ast_min = (minRatio * b_mm * t_mm) / 2;
-    
-    // Maximum steel check - 4% total
-    const Ast_max = 0.04 * b_mm * t_mm;
-    
-    let governs: Governs = 'design';
-    if (Ast_req < Ast_min) {
-        Ast_req = Ast_min;
-        governs = 'minimum';
-    } else if (Ast_req > Ast_max) {
-        Ast_req = Ast_max;
-        governs = 'maximum';
-    }
-    
-    return {
-        Ast_req: Math.ceil(Ast_req),
-        Ast_min: Math.ceil(Ast_min),
-        Ast_max: Math.floor(Ast_max),
-        Mu_lim: Mu_lim / 1e6,
-        Mu_applied: Math.abs(Mu_kNm),
-        isDoubly,
-        governs,
-        utilization: Mu / Mu_lim,
-    };
-}
-
-/** Select shear links (2-legged) for a given Asv/sv requirement */
-function selectShearLinks(Asv_sv_req: number | null): ShearLinks | null {
-    if (!Asv_sv_req) return null;
-    const dias = [8, 10, 12];
-    const spacings = [100, 125, 150, 175, 200, 250, 300];
-    
-    for (const dia of dias) {
-        const Asv = 2 * Math.PI * dia * dia / 4; // 2-legged
-        for (const sp of spacings) {
-            const Asv_sv_provided = Asv / sp;
-            if (Asv_sv_provided >= Asv_sv_req) {
-                return {
-                    dia,
-                    spacing: sp,
-                    label: `${dia}mm 2-legged @ ${sp} c/c`,
-                    Asv_sv_provided: Math.round(Asv_sv_provided * 100) / 100
-                };
-            }
-        }
-    }
-    // Fallback
-    const fallbackAsv = 2 * Math.PI * 12 * 12 / 4;
-    return {
-        dia: 12, spacing: 100,
-        label: `12mm 2-legged @ 100 c/c`,
-        Asv_sv_provided: Math.round((fallbackAsv / 100) * 100) / 100
-    };
-}
-
-/** Shear design per IS 456 Clause 40 */
-function shearDesign(Vu_kN: number, b_mm: number, d_mm: number, Ast_mm2: number, fck: number, fy: number, grade: string): ShearDesign {
-    const Vu = Math.abs(Vu_kN) * 1e3; // N
-    
-    const tau_v = Vu / (b_mm * d_mm); // N/mm²
-    const pt = 100 * Ast_mm2 / (b_mm * d_mm);
-    const tau_c = getTauC(pt, fck);
-    const tau_c_max = TAU_C_MAX[grade as ConcreteGrade] ?? 2.8;
-    
-    let status: ShearStatus;
-    let Asv_sv: number | null;
-    if (tau_v <= tau_c) {
-        status = 'minimum';
-        // Minimum shear reinforcement: Asv/sv = 0.4/(0.87×fy) × b
-        Asv_sv = (0.4 * b_mm) / (0.87 * fy);
-    } else if (tau_v <= tau_c_max) {
-        status = 'design';
-        const Vus = Vu - tau_c * b_mm * d_mm;
-        Asv_sv = Vus / (0.87 * fy * d_mm);
-    } else {
-        status = 'FAIL';
-        Asv_sv = null;
-    }
-    
-    const links = selectShearLinks(Asv_sv);
-    
-    return {
-        tau_v: Math.round(tau_v * 1000) / 1000,
-        tau_c: Math.round(tau_c * 1000) / 1000,
-        tau_c_max,
-        pt: Math.round(pt * 1000) / 1000,
-        status,
-        Asv_sv: Asv_sv !== null ? Math.round(Asv_sv * 100) / 100 : null,
-        links,
-        Vu_applied: Math.abs(Vu_kN),
-    };
-}
-
-/** Select bar arrangement: returns { dia, spacing, Ast_provided, label } */
-function selectBars(Ast_req_mm2: number, barDias: readonly number[], spacings: readonly number[], b_mm: number): BarSelection {
-    // Standard IS 456 practice: for a 1-m strip, Ast_provided = Abar × (1000 / spacing)
-    let best: BarSelection | null = null;
-    for (const dia of barDias) {
-        const Abar = Math.PI * dia * dia / 4;
-        for (const sp of spacings) {
-            const Ast = Abar * (b_mm / sp);
-            if (Ast >= Ast_req_mm2) {
-                if (!best || Ast < best.Ast_provided) {
-                    best = {
-                        dia,
-                        spacing: sp,
-                        Ast_provided: Math.round(Ast),
-                        label: `${dia}mm @ ${sp} c/c`,
-                    };
-                }
-            }
-        }
-    }
-    // Fallback: use largest bar at minimum spacing
-    if (!best) {
-        const dia = barDias[barDias.length - 1];
-        const sp = spacings[0];
-        const Ast = (Math.PI * dia * dia / 4) * (b_mm / sp);
-        best = {
-            dia,
-            spacing: sp,
-            Ast_provided: Math.round(Ast),
-            label: `${dia}mm @ ${sp} c/c`,
-        };
-    }
-    return best;
-}
+// ponytail: flexuralDesign, selectBars, shearDesign, selectShearLinks
+// all imported from ../lib/is456 — zero local copies
 
 // ───────────────────── Lateral Pressure Computation ─────────────────────
 
@@ -799,8 +603,8 @@ export function analyzeWall(config: WallConfig): WallAnalysisResult {
         }
 
         // Flexural design for both faces
-        let flex_hogging = flexuralDesign(M_hogging, b, d_mm, material.fck, material.fy, t_mm);
-        let flex_sagging = flexuralDesign(M_sagging, b, d_mm, material.fck, material.fy, t_mm);
+        let flex_hogging = flexuralDesign(M_hogging, b, d_mm, material.fck, material.fy, t_mm, true);
+        let flex_sagging = flexuralDesign(M_sagging, b, d_mm, material.fck, material.fy, t_mm, true);
         
         // Select bar arrangement
         let mainBars_hogging = selectBars(flex_hogging.Ast_req, barDias, spacings, b);
@@ -821,8 +625,8 @@ export function analyzeWall(config: WallConfig): WallAnalysisResult {
             }
             
             // Recompute flexure and select bars with true d per face
-            flex_hogging = flexuralDesign(M_hogging, b, d_hogging, material.fck, material.fy, t_mm);
-            flex_sagging = flexuralDesign(M_sagging, b, d_sagging, material.fck, material.fy, t_mm);
+            flex_hogging = flexuralDesign(M_hogging, b, d_hogging, material.fck, material.fy, t_mm, true);
+            flex_sagging = flexuralDesign(M_sagging, b, d_sagging, material.fck, material.fy, t_mm, true);
             mainBars_hogging = selectBars(flex_hogging.Ast_req, barDias, spacings, b);
             mainBars_sagging = selectBars(flex_sagging.Ast_req, barDias, spacings, b);
             

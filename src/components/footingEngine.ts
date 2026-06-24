@@ -16,16 +16,11 @@
 
 import {
     TAU_C_MAX,
-    MU_LIM_COEFF,
-    MIN_STEEL_RATIO,
     getTauC,
-    getMuLimCoeff,
-    getMinSteelRatio,
+    flexuralDesign as flexuralDesignShared,
+    computeCostIndex,
     type ConcreteGrade,
-    type SteelGrade,
 } from '../lib/is456';
-// ponytail: was economicOptimization.ts — one line covers it
-const computeCostIndex = (vol: number, steel: number, r = 90) => vol + steel * (r / 7850);
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -160,57 +155,14 @@ export interface FootingAnalysisResult {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/**
- * Flexural design per IS 456 Cl. 38 — singly reinforced, per-meter basis.
- */
-function flexuralDesignPerMeter(
-    Mu_kNm: number,
-    d_mm: number,
-    fck: number,
-    fy: number,
-): FlexuralDesignResult {
-    const b = 1000; // 1 m strip
-    const Mu = Math.abs(Mu_kNm) * 1e6; // N·mm
-    const coeff = getMuLimCoeff(fy);
-    const Mu_lim = coeff * fck * b * d_mm * d_mm;
-    const minR = getMinSteelRatio(fy);
-    const t_mm = d_mm + 50; // approximate gross thickness
-
-    const Ast_min = minR * b * t_mm;
-    const Ast_max = 0.04 * b * t_mm;
-
-    if (Mu <= 0.001) {
-        return {
-            Mu: 0, d: d_mm,
-            Ast_req: Math.ceil(Ast_min),
-            Ast_min: Math.ceil(Ast_min),
-            Ast_max: Math.floor(Ast_max),
-            pt: 0, governs: 'minimum', isDoubly: false,
-            status: 'SAFE',
-        };
-    }
-
-    const isDoubly = Mu > Mu_lim;
-    const ratio = 4.6 * Mu / (fck * b * d_mm * d_mm);
-    const sqrtTerm = Math.sqrt(Math.max(0, 1 - ratio));
-    let Ast_req = (0.5 * fck / fy) * (1 - sqrtTerm) * b * d_mm;
-
-    let governs = 'design';
-    if (Ast_req < Ast_min) { Ast_req = Ast_min; governs = 'minimum'; }
-    else if (Ast_req > Ast_max) { Ast_req = Ast_max; governs = 'maximum'; }
-
-    const pt = 100 * Ast_req / (b * d_mm);
-
+// ponytail: flexuralDesign imported from ../lib/is456 — thin wrapper for footing-specific return shape
+function flexuralDesignPerMeter(Mu_kNm: number, d_mm: number, fck: number, fy: number): FlexuralDesignResult {
+    const r = flexuralDesignShared(Mu_kNm, 1000, d_mm, fck, fy);
     return {
-        Mu: Math.abs(Mu_kNm),
-        d: d_mm,
-        Ast_req: Math.ceil(Ast_req),
-        Ast_min: Math.ceil(Ast_min),
-        Ast_max: Math.floor(Ast_max),
-        pt: Math.round(pt * 1000) / 1000,
-        governs,
-        isDoubly,
-        status: isDoubly ? 'REVISE' : 'SAFE',
+        Mu: r.Mu_applied ?? 0, d: d_mm,
+        Ast_req: r.Ast_req, Ast_min: r.Ast_min ?? 0, Ast_max: r.Ast_max ?? 0,
+        pt: r.pt ?? 0, governs: r.governs, isDoubly: r.isDoubly,
+        status: r.isDoubly ? 'REVISE' : 'SAFE',
     };
 }
 

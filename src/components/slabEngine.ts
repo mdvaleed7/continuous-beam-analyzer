@@ -12,15 +12,17 @@
 
 import {
     TAU_C_MAX,
-    MU_LIM_COEFF,
-    MIN_STEEL_RATIO,
     CREEP_COEFF,
-    getTauC as getTauCShared,
+    getTauC,
+    flexuralDesign,
+    selectBars,
+    computeCostIndex,
     type ConcreteGrade,
     type SteelGrade,
+    type Governs,
+    type FlexuralResult,
+    type BarResult,
 } from '../lib/is456';
-// ponytail: was economicOptimization.ts — one line covers it
-const computeCostIndex = (vol: number, steel: number, r = 90) => vol + steel * (r / 7850);
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -28,7 +30,7 @@ export type SlabType = 'two-way' | 'one-way' | 'cantilever';
 export type SlabTypeInput = 'auto' | SlabType;
 export type SupportCondition = 'cantilever' | 'simply' | 'one_end' | 'continuous';
 export type DesignStatus = 'OK' | 'FAIL' | 'DESIGN' | 'SAFE' | 'REVISE';
-export type Governs = 'design' | 'minimum' | 'maximum';
+export type { Governs } from '../lib/is456';
 
 /** Input configuration for a single slab panel. */
 export interface SlabConfig {
@@ -52,24 +54,9 @@ export interface SlabConfig {
     ageOfLoading?: string;  // '7' | '28' | '365'
 }
 
-export interface FlexuralDesign {
-    Ast_req: number;
-    Ast_min?: number;
-    Ast_max?: number;
-    Mu_lim: number;
-    Mu_applied?: number;
-    isDoubly: boolean;
-    governs: Governs;
-    utilization: number;
-}
-
-export interface BarSelection {
-    dia: number;
-    spacing: number;
-    label: string;
-    Ast_provided: number;
-    nBars: number;
-}
+// ponytail: FlexuralDesign and BarSelection are now FlexuralResult and BarResult from is456
+export type FlexuralDesign = FlexuralResult;
+export type BarSelection = BarResult;
 
 export interface ShearDirResult {
     Vu: number;
@@ -286,15 +273,8 @@ function interpolateCoeff(
     return row[row.length - 1];
 }
 
-// ═══════════════════════════════════════════════════════════════
-//  τc — IS 456 Table 19, closed-form equivalent (no lookup/interpolation).
-//  Implementation lives in ../lib/is456.ts so wallEngine.ts and slabEngine.ts
-//  share a single source of truth. Local wrapper preserves the original
-//  (pt, grade) call signature used by the rest of this file.
-// ═══════════════════════════════════════════════════════════════
-function getTauC(pt: number, grade: string): number {
-    return getTauCShared(pt, grade);
-}
+
+// ponytail: getTauC imported directly from ../lib/is456
 
 // ═══════════════════════════════════════════════════════════════
 //  MODIFICATION FACTOR (IS 456 Fig. 4 — simplified formula)
@@ -325,97 +305,7 @@ function getBasicLdRatio(supportType: SupportCondition): number {
 // ═══════════════════════════════════════════════════════════════
 //  FLEXURAL DESIGN — IS 456 Cl. 38
 // ═══════════════════════════════════════════════════════════════
-function flexuralDesign(
-    Mu_kNm: number,
-    b_mm: number,
-    d_mm: number,
-    fck: number,
-    fy: number,
-    D_mm?: number,
-): FlexuralDesign {
-    const Mu = Math.abs(Mu_kNm) * 1e6; // N·mm
-
-    const coeff = MU_LIM_COEFF[`Fe${fy}` as SteelGrade] ?? 0.138;
-    const Mu_lim = coeff * fck * b_mm * d_mm * d_mm;
-    const t_mm = D_mm || (d_mm + 25);
-
-    if (Mu <= 0.001) {
-        const minR = MIN_STEEL_RATIO[`Fe${fy}` as SteelGrade] ?? 0.0012;
-        return {
-            Ast_req: Math.ceil(minR * b_mm * t_mm),
-            Mu_lim: Mu_lim / 1e6,
-            Mu_applied: 0,
-            isDoubly: false,
-            governs: 'minimum',
-            utilization: 0,
-        };
-    }
-
-    const isDoubly = Mu > Mu_lim;
-    const ratio = 4.6 * Mu / (fck * b_mm * d_mm * d_mm);
-    const sqrtTerm = Math.sqrt(Math.max(0, 1 - ratio));
-    let Ast_req = (0.5 * fck / fy) * (1 - sqrtTerm) * b_mm * d_mm;
-
-    const minR = MIN_STEEL_RATIO[`Fe${fy}` as SteelGrade] ?? 0.0012;
-    const Ast_min = minR * b_mm * t_mm;
-    const Ast_max = 0.04 * b_mm * t_mm;
-
-    let governs: Governs = 'design';
-    if (Ast_req < Ast_min) { Ast_req = Ast_min; governs = 'minimum'; }
-    else if (Ast_req > Ast_max) { Ast_req = Ast_max; governs = 'maximum'; }
-
-    return {
-        Ast_req: Math.ceil(Ast_req),
-        Ast_min: Math.ceil(Ast_min),
-        Ast_max: Math.floor(Ast_max),
-        Mu_lim: Mu_lim / 1e6,
-        Mu_applied: Math.abs(Mu_kNm),
-        isDoubly,
-        governs,
-        utilization: Mu / Mu_lim,
-    };
-}
-
-// ═══════════════════════════════════════════════════════════════
-//  BAR SELECTION for 1 m strip
-// ═══════════════════════════════════════════════════════════════
-function selectBars(
-    Ast_req: number,
-    barDias: readonly number[] = [8, 10, 12, 16, 20, 25],
-    spacings: readonly number[] = [75, 100, 125, 150, 175, 200, 250, 300],
-    b: number = 1000,
-): BarSelection {
-    let best: BarSelection | null = null;
-    for (const dia of barDias) {
-        const barArea = Math.PI * dia * dia / 4;
-        for (const sp of spacings) {
-            const nBars = Math.floor(b / sp);
-            const Ast_prov = nBars * barArea;
-            if (Ast_prov >= Ast_req) {
-                if (!best || Ast_prov < best.Ast_provided) {
-                    best = {
-                        dia, spacing: sp,
-                        label: `${dia}mm @ ${sp} c/c`,
-                        Ast_provided: Math.round(Ast_prov),
-                        nBars,
-                    };
-                }
-            }
-        }
-    }
-    if (!best) {
-        const dia = barDias[barDias.length - 1];
-        const sp = spacings[0];
-        const nBars = Math.floor(b / sp);
-        best = {
-            dia, spacing: sp,
-            label: `${dia}mm @ ${sp} c/c`,
-            Ast_provided: Math.round(nBars * Math.PI * dia * dia / 4),
-            nBars,
-        };
-    }
-    return best;
-}
+// ponytail: flexuralDesign + selectBars imported from ../lib/is456 — zero local copies
 
 // ═══════════════════════════════════════════════════════════════
 //  FULL ANNEX C DEFLECTION — IS 456:2000
