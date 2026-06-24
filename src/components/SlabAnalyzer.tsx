@@ -661,6 +661,30 @@ export default function SlabAnalyzer() {
                             </table>
                         </div>
 
+                        {/* Flexural Depth */}
+                        <div className="panel">
+                            <h3 className="panel-title">
+                                <span className="panel-icon">📐</span>
+                                Flexural Depth — IS 456 Annex G
+                            </h3>
+                            <table className="result-table compact">
+                                <tbody>
+                                    <tr><td>M<sub>u,max</sub></td><td>{r.flexDepthCheck.Mu_max} kN·m</td></tr>
+                                    <tr><td>R<sub>u</sub></td><td>{(r.flexDepthCheck.coeff * r.fck).toFixed(2)} N/mm²</td></tr>
+                                    <tr><td>d<sub>req</sub></td><td>{r.flexDepthCheck.d_req} mm</td></tr>
+                                    <tr><td>d<sub>provided</sub></td><td>{r.flexDepthCheck.d_provided} mm</td></tr>
+                                    <tr>
+                                        <td>Status</td>
+                                        <td>
+                                            <span className={`chip ${r.flexDepthCheck.status === 'OK' ? 'chip-safe' : 'chip-fail'}`}>
+                                                {r.flexDepthCheck.status}
+                                            </span>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+
                         {/* Shear Check */}
                         <div className="panel">
                             <h3 className="panel-title">

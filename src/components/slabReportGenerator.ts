@@ -258,6 +258,37 @@ function shearSection(r: any, directions: {label: string, dir: any}[]): string {
 }
 
 // ═══════════════════════════════════════════════════════════════
+//  FLEXURAL DEPTH CHECK
+// ═══════════════════════════════════════════════════════════════
+
+function flexuralDepthSection(r: any): string {
+    return `
+    <div class="section-box avoid-break">
+        <div class="section-header">Flexural Depth &mdash; IS 456 Annex G</div>
+        <div class="section-body">
+            <p style="margin-top:0; color:#475569; font-size:13px;">
+                <strong>Variables:</strong><br/>
+                ${kxInline(`M_{u,max}`)}: Maximum factored moment<br/>
+                ${kxInline(`R_u`)}: Limiting moment coefficient parameter (${kxInline(`R_u = \\text{coeff} \\times f_{ck}`)} )
+            </p>
+            <div style="display: flex; gap: 20px;">
+                <div style="flex: 1;">
+                    ${kx(`M_{u,max} = ${r.flexDepthCheck.Mu_max} \\text{ kN}\\cdot\\text{m}`)}
+                    ${kx(`R_u = ${(r.flexDepthCheck.coeff * r.fck).toFixed(2)} \\text{ N/mm}^2`)}
+                </div>
+                <div style="flex: 1;">
+                    ${kx(`d_{req} = \\sqrt{\\frac{M_{u,max} \\times 10^6}{R_u b}} = ${r.flexDepthCheck.d_req} \\text{ mm}`)}
+                    ${kx(`d_{prov} = ${r.flexDepthCheck.d_provided} \\text{ mm}`)}
+                    <div style="margin-top: 10px; font-weight: bold; color: ${r.flexDepthCheck.status === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: center;">
+                        Result: ${kxInline(`d_{prov} ${r.flexDepthCheck.status === 'OK' ? '\\ge' : '<'} d_{req}`)} &rarr; ${r.flexDepthCheck.status}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>`;
+}
+
+// ═══════════════════════════════════════════════════════════════
 //  TWO-WAY SLAB
 // ═══════════════════════════════════════════════════════════════
 
@@ -326,6 +357,7 @@ function generateTwoWaySection(r: any): string {
         </div>
 
         ${deflectionSection(r)}
+        ${flexuralDepthSection(r)}
         ${spanDepthSection(r)}
         ${shearSection(r, [
             {label: 'Short (L_x)', dir: r.shear.shortDir},
@@ -408,6 +440,7 @@ function generateOneWaySection(r: any): string {
         </div>
 
         ${deflectionSection(r)}
+        ${flexuralDepthSection(r)}
         ${spanDepthSection(r)}
         ${shearSection(r, [
             {label: 'Span (L_x)', dir: r.shear.shortDir},
@@ -469,6 +502,7 @@ function generateCantileverSection(r: any): string {
         </div>
 
         ${deflectionSection(r)}
+        ${flexuralDepthSection(r)}
         ${spanDepthSection(r)}
         ${shearSection(r, [
             {label: 'Support (L_x)', dir: r.shear.shortDir},

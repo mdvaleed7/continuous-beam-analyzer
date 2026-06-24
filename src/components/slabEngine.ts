@@ -302,15 +302,6 @@ function getBasicLdRatio(supportType: SupportCondition): number {
         default: return 26;
     }
 }
-
-// ═══════════════════════════════════════════════════════════════
-//  FLEXURAL DESIGN — IS 456 Cl. 38
-// ═══════════════════════════════════════════════════════════════
-// ponytail: flexuralDesign + selectBars imported from ../lib/is456 — zero local copies
-
-// ═══════════════════════════════════════════════════════════════
-//  FULL ANNEX C DEFLECTION — IS 456:2000
-// ═══════════════════════════════════════════════════════════════
 interface AnnexCConfig {
     Lx: number;
     D: number;
@@ -758,7 +749,7 @@ export function analyzeSlab(config: SlabConfig): SlabAnalysisResult {
         explicitSupportCond ?? getSupportCondForDeflection(boundaryCase);
     const supportType: SupportCondition = effectiveSupportCond === 'one_end' ? 'one_end' :
         effectiveSupportCond === 'continuous' ? 'continuous' :
-        effectiveSupportCond === 'cantilever' ? 'cantilever' : 'simply';
+            effectiveSupportCond === 'cantilever' ? 'cantilever' : 'simply';
     const ldCheck = spanDepthCheck(
         { Lx, D, cover, fy },
         {
@@ -938,9 +929,9 @@ export function optimizeSlab(config: SlabConfig, thicknesses: number[], costRati
 
             if (result.overallStatus === 'SAFE') {
                 const concreteVol = (D / 1000) * result.Lx * result.Ly;
-                const steelWeight = ((result.bars_x_bot.Ast_provided + result.bars_x_top.Ast_provided + 
-                                      result.bars_y_bot.Ast_provided + result.bars_y_top.Ast_provided) * 
-                                     result.Lx * result.Ly * 7850) / 1e6;
+                const steelWeight = ((result.bars_x_bot.Ast_provided + result.bars_x_top.Ast_provided +
+                    result.bars_y_bot.Ast_provided + result.bars_y_top.Ast_provided) *
+                    result.Lx * result.Ly * 7850) / 1e6;
                 const costIndex = computeCostIndex(concreteVol, steelWeight, costRatio);
                 results.push({
                     thickness: D,
