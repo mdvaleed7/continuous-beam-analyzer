@@ -1,7 +1,7 @@
 import { logger } from '../lib/logger';
 
 // ═══════════════════════════════════════════════════════════════
-//  SLAB REPORT GENERATOR — two-column book layout
+//  SLAB REPORT GENERATOR — two-column book layout with HTML symbols
 // ═══════════════════════════════════════════════════════════════
 
 const SLAB_REPORT_CSS = `<style>
@@ -107,12 +107,12 @@ function statusChip(status: string): string {
 function flexBlock(label: string, Mu: number, AstReq: number, barsLabel: string, AstProv: number, isDoubly: boolean, governs: string): string {
     return `
         <h4>${label}</h4>
-        ${calcRow('Mu', Mu, 'kN.m/m')}
-        ${calcRow('Ast,req', AstReq, 'mm2/m')}
+        ${calcRow('M<sub>u</sub>', Mu, 'kN&middot;m/m')}
+        ${calcRow('A<sub>st,req</sub>', AstReq, 'mm&sup2;/m')}
         ${calcRow('Governs', governs)}
         <div class="provided-box">
             <strong>Provided:</strong> ${barsLabel}<br/>
-            Ast,prov = ${AstProv} mm2/m &nbsp; ${statusChip(isDoubly ? 'REVISE' : 'SAFE')}
+            A<sub>st,prov</sub> = ${AstProv} mm&sup2;/m &nbsp; ${statusChip(isDoubly ? 'REVISE' : 'SAFE')}
         </div>
     `;
 }
@@ -121,31 +121,31 @@ function flexBlock(label: string, Mu: number, AstReq: number, barsLabel: string,
 function deflectionSection(r: any): string {
     return `
     <div class="section-box">
-        <div class="section-header">Deflection Check - IS 456 Annex C</div>
+        <div class="section-header">Deflection Check &mdash; IS 456 Annex C</div>
         <div class="section-body">
             <div class="two-col">
                 <div class="col col-left">
                     <h4>A. Short-Term Deflection</h4>
-                    ${calcRow('Igr', (r.deflection.Igr / 1e6).toFixed(2), 'x10^6 mm4')}
-                    ${calcRow('Mcr', r.deflection.Mcr, 'kN.m')}
-                    ${calcRow('Icr', (r.deflection.Icr / 1e6).toFixed(2), 'x10^6 mm4')}
-                    ${calcRow('Ieff', (r.deflection.Ieff / 1e6).toFixed(2), 'x10^6 mm4')}
-                    ${calcRow('ai (short-term)', r.deflection.ai, 'mm')}
+                    ${calcRow('I<sub>gr</sub>', (r.deflection.Igr / 1e6).toFixed(2), '&times;10&sup3; mm&sup4;')}
+                    ${calcRow('M<sub>cr</sub>', r.deflection.Mcr, 'kN&middot;m')}
+                    ${calcRow('I<sub>cr</sub>', (r.deflection.Icr / 1e6).toFixed(2), '&times;10&sup3; mm&sup4;')}
+                    ${calcRow('I<sub>eff</sub>', (r.deflection.Ieff / 1e6).toFixed(2), '&times;10&sup3; mm&sup4;')}
+                    ${calcRow('a<sub>i</sub> (short-term)', r.deflection.ai, 'mm')}
 
                     <h4>B. Shrinkage</h4>
-                    ${calcRow('k3', r.deflection.k3)}
-                    ${calcRow('psi_cs', r.deflection.psi_cs.toExponential(2))}
-                    ${calcRow('a_shrinkage', r.deflection.a_shrinkage, 'mm')}
+                    ${calcRow('k<sub>3</sub>', r.deflection.k3)}
+                    ${calcRow('&psi;<sub>cs</sub>', r.deflection.psi_cs.toExponential(2))}
+                    ${calcRow('a<sub>shrinkage</sub>', r.deflection.a_shrinkage, 'mm')}
                 </div>
                 <div class="col">
                     <h4>C. Creep</h4>
-                    ${calcRow('theta', r.deflection.theta)}
-                    ${calcRow('Ece', Math.round(r.deflection.Ece), 'N/mm2')}
-                    ${calcRow('Icr,lt', (r.deflection.Icr_lt / 1e6).toFixed(2), 'x10^6 mm4')}
-                    ${calcRow('a_creep', r.deflection.a_creep, 'mm')}
+                    ${calcRow('&theta;', r.deflection.theta)}
+                    ${calcRow('E<sub>ce</sub>', Math.round(r.deflection.Ece), 'N/mm&sup2;')}
+                    ${calcRow('I<sub>cr,lt</sub>', (r.deflection.Icr_lt / 1e6).toFixed(2), '&times;10&sup3; mm&sup4;')}
+                    ${calcRow('a<sub>creep</sub>', r.deflection.a_creep, 'mm')}
 
                     <h4>D. Summary</h4>
-                    ${calcRow('Total (ai + acc + acs)', r.deflection.a_total, 'mm')}
+                    ${calcRow('Total (a<sub>i</sub> + a<sub>cc</sub> + a<sub>cs</sub>)', r.deflection.a_total, 'mm')}
                     ${calcRow('Limit (L/250)', r.deflection.limit_total, 'mm')}
                     ${calcRow('Status', statusChip(r.deflection.status_total))}
                     <div style="margin-top:4px;"></div>
@@ -162,18 +162,18 @@ function deflectionSection(r: any): string {
 function spanDepthSection(r: any): string {
     return `
     <div class="section-box">
-        <div class="section-header">Span/Depth Ratio - IS 456 Cl. 23.2</div>
+        <div class="section-header">Span/Depth Ratio &mdash; IS 456 Cl. 23.2</div>
         <div class="section-body">
             <div class="two-col">
                 <div class="col col-left">
                     ${calcRow('Basic l/d', r.ldCheck.basicRatio)}
-                    ${calcRow('fs', r.ldCheck.fs, 'N/mm2')}
+                    ${calcRow('f<sub>s</sub>', r.ldCheck.fs, 'N/mm&sup2;')}
                     ${calcRow('Modification Factor', r.ldCheck.mf)}
                 </div>
                 <div class="col">
                     ${calcRow('Modified l/d', r.ldCheck.modifiedRatio)}
-                    ${calcRow('d_req', r.ldCheck.d_req, 'mm')}
-                    ${calcRow('d_provided', r.ldCheck.d_provided, 'mm')}
+                    ${calcRow('d<sub>req</sub>', r.ldCheck.d_req, 'mm')}
+                    ${calcRow('d<sub>provided</sub>', r.ldCheck.d_provided, 'mm')}
                     ${calcRow('Status', '<span style="color:#666;font-style:italic;">IGNORED</span>')}
                 </div>
             </div>
@@ -183,7 +183,7 @@ function spanDepthSection(r: any): string {
 
 /** Shear check table */
 function shearSection(r: any, directions: {label: string, dir: any}[]): string {
-    const headerRow = '<tr><th>Dir</th><th>Vu (kN)</th><th>tv (N/mm2)</th><th>tc (N/mm2)</th><th>k</th><th>k.tc</th><th>Status</th></tr>';
+    const headerRow = '<tr><th>Dir</th><th>V<sub>u</sub> (kN)</th><th>&tau;<sub>v</sub> (N/mm&sup2;)</th><th>&tau;<sub>c</sub> (N/mm&sup2;)</th><th>k</th><th>k&middot;&tau;<sub>c</sub></th><th>Status</th></tr>';
     const dataRows = directions.map(({label, dir}) => `
         <tr>
             <td>${label}</td><td>${dir.Vu}</td><td>${dir.tau_v}</td>
@@ -194,7 +194,7 @@ function shearSection(r: any, directions: {label: string, dir: any}[]): string {
 
     return `
     <div class="section-box">
-        <div class="section-header">Shear Check - IS 456 Cl. 40</div>
+        <div class="section-header">Shear Check &mdash; IS 456 Cl. 40</div>
         <div class="section-body">
             <table class="result-table">${headerRow}${dataRows}</table>
         </div>
@@ -208,45 +208,53 @@ function shearSection(r: any, directions: {label: string, dir: any}[]): string {
 
 function generateTwoWaySection(r: any): string {
     return `
-        <h2>Panel ${r.label} - Two-Way Restrained Slab</h2>
+        <h2>Panel ${r.label} &mdash; Two-Way Restrained Slab</h2>
 
         <div class="section-box">
             <div class="section-header">1. Input Parameters</div>
             <div class="section-body">
                 ${inputTable([
-                    ['Lx (Short)', r.Lx + ' m', 'Ly (Long)', r.Ly + ' m'],
-                    ['Ly/Lx', String(r.lyLx), 'Boundary Case', 'Case ' + r.boundaryCase],
+                    ['L<sub>x</sub> (Short)', r.Lx + ' m', 'L<sub>y</sub> (Long)', r.Ly + ' m'],
+                    ['L<sub>y</sub>/L<sub>x</sub>', String(r.lyLx), 'Boundary Case', 'Case ' + r.boundaryCase],
                     ['Thickness D', r.D + ' mm', 'Cover', r.cover + ' mm'],
-                    ['Concrete', r.grade + ' (fck=' + r.fck + ')', 'Steel', r.steelGrade + ' (fy=' + r.fy + ')'],
-                    ['Dead Load', r.totalDL + ' kN/m2', 'Live Load', r.LL + ' kN/m2'],
-                    ['wu (Factored)', r.wFactored + ' kN/m2', 'Load Factor', String(r.loadFactor)],
+                    ['Concrete', r.grade + ' (f<sub>ck</sub>=' + r.fck + ' MPa)', 'Steel', r.steelGrade + ' (f<sub>y</sub>=' + r.fy + ' MPa)'],
+                    ['Dead Load (incl. SW)', r.totalDL + ' kN/m&sup2;', 'Live Load', r.LL + ' kN/m&sup2;'],
+                    ['w<sub>u</sub> (Factored)', r.wFactored + ' kN/m&sup2;', 'Load Factor', String(r.loadFactor)],
                 ])}
             </div>
         </div>
 
         <div class="section-box">
-            <div class="section-header">2. Moment Coefficients (IS 456 Table 26)</div>
+            <div class="section-header">2. Moment Coefficients &mdash; IS 456 Table 26</div>
             <div class="section-body">
+                <div style="font-size:10px;margin-bottom:6px;">For L<sub>y</sub>/L<sub>x</sub> = ${r.lyLx}, Boundary Case ${r.boundaryCase}:</div>
                 <table class="result-table">
-                    <tr><th>Direction</th><th>Positive (Mid-span)</th><th>Negative (Support)</th></tr>
-                    <tr><td>Short (X)</td><td>${r.ax_pos ?? '-'}</td><td>${r.ax_neg ?? '-'}</td></tr>
-                    <tr><td>Long (Y)</td><td>${r.ay_pos ?? '-'}</td><td>${r.ay_neg ?? '-'}</td></tr>
+                    <tr><th>Direction</th><th>Positive &alpha;<sup>+</sup> (Mid-span)</th><th>Negative &alpha;<sup>&minus;</sup> (Support)</th></tr>
+                    <tr><td>Short Span (X)</td><td>${r.ax_pos ?? '&mdash;'}</td><td>${r.ax_neg ?? '&mdash;'}</td></tr>
+                    <tr><td>Long Span (Y)</td><td>${r.ay_pos ?? '&mdash;'}</td><td>${r.ay_neg ?? '&mdash;'}</td></tr>
                 </table>
+                <div class="calc-block">
+                    M<sub>u</sub> = &alpha; &times; w<sub>u</sub> &times; L<sub>x</sub>&sup2;<br/>
+                    M<sub>x,pos</sub> = ${r.ax_pos} &times; ${r.wFactored} &times; ${r.Lx}&sup2; = <strong>${r.Mx_pos} kN&middot;m/m</strong><br/>
+                    M<sub>y,pos</sub> = ${r.ay_pos} &times; ${r.wFactored} &times; ${r.Lx}&sup2; = <strong>${r.My_pos} kN&middot;m/m</strong>
+                    ${r.Mx_neg > 0 ? `<br/>M<sub>x,neg</sub> = ${r.ax_neg} &times; ${r.wFactored} &times; ${r.Lx}&sup2; = <strong>${r.Mx_neg} kN&middot;m/m</strong>` : ''}
+                    ${r.My_neg > 0 ? `<br/>M<sub>y,neg</sub> = ${r.ay_neg} &times; ${r.wFactored} &times; ${r.Lx}&sup2; = <strong>${r.My_neg} kN&middot;m/m</strong>` : ''}
+                </div>
             </div>
         </div>
 
         <div class="section-box">
-            <div class="section-header">3. Flexural Reinforcement (IS 456 Cl. 38.1)</div>
+            <div class="section-header">3. Flexural Reinforcement &mdash; IS 456 Cl. 38.1</div>
             <div class="section-body">
-                <div style="font-size:10px;margin-bottom:8px;">Effective depths: dx = ${r.dx} mm, dy = ${r.dy} mm</div>
+                <div style="font-size:10px;margin-bottom:8px;">Effective depths: d<sub>x</sub> = ${r.dx} mm, d<sub>y</sub> = ${r.dy} mm</div>
                 <div class="two-col">
                     <div class="col col-left">
                         ${flexBlock('X-Bot (Mid-span +ve)', r.Mx_pos, r.flex_x_bot.Ast_req, r.bars_x_bot.label, r.bars_x_bot.Ast_provided, r.flex_x_bot.isDoubly, r.flex_x_bot.governs)}
-                        ${r.Mx_neg > 0 ? flexBlock('X-Top (Support -ve)', r.Mx_neg, r.flex_x_top.Ast_req, r.bars_x_top.label, r.bars_x_top.Ast_provided, r.flex_x_top.isDoubly, r.flex_x_top.governs) : ''}
+                        ${r.Mx_neg > 0 ? flexBlock('X-Top (Support &minus;ve)', r.Mx_neg, r.flex_x_top.Ast_req, r.bars_x_top.label, r.bars_x_top.Ast_provided, r.flex_x_top.isDoubly, r.flex_x_top.governs) : ''}
                     </div>
                     <div class="col">
                         ${flexBlock('Y-Bot (Mid-span +ve)', r.My_pos, r.flex_y_bot.Ast_req, r.bars_y_bot.label, r.bars_y_bot.Ast_provided, r.flex_y_bot.isDoubly, r.flex_y_bot.governs)}
-                        ${r.My_neg > 0 ? flexBlock('Y-Top (Support -ve)', r.My_neg, r.flex_y_top.Ast_req, r.bars_y_top.label, r.bars_y_top.Ast_provided, r.flex_y_top.isDoubly, r.flex_y_top.governs) : ''}
+                        ${r.My_neg > 0 ? flexBlock('Y-Top (Support &minus;ve)', r.My_neg, r.flex_y_top.Ast_req, r.bars_y_top.label, r.bars_y_top.Ast_provided, r.flex_y_top.isDoubly, r.flex_y_top.governs) : ''}
                     </div>
                 </div>
             </div>
@@ -255,8 +263,8 @@ function generateTwoWaySection(r: any): string {
         ${deflectionSection(r)}
         ${spanDepthSection(r)}
         ${shearSection(r, [
-            {label: 'Short (Lx)', dir: r.shear.shortDir},
-            {label: 'Long (Ly)', dir: r.shear.longDir},
+            {label: 'Short (L<sub>x</sub>)', dir: r.shear.shortDir},
+            {label: 'Long (L<sub>y</sub>)', dir: r.shear.longDir},
         ])}
     `;
 }
@@ -274,42 +282,52 @@ function generateOneWaySection(r: any): string {
     const supportLabel = supportLabels[r.supportCondition] ?? r.supportCondition;
 
     return `
-        <h2>Panel ${r.label} - One-Way Slab</h2>
+        <h2>Panel ${r.label} &mdash; One-Way Slab</h2>
 
         <div class="section-box">
             <div class="section-header">1. Input Parameters</div>
             <div class="section-body">
                 ${inputTable([
-                    ['Span Lx', r.Lx + ' m', 'Width Ly', r.Ly + ' m'],
+                    ['Span L<sub>x</sub>', r.Lx + ' m', 'Width L<sub>y</sub>', r.Ly + ' m'],
                     ['Support', supportLabel, 'Thickness D', r.D + ' mm'],
-                    ['Cover', r.cover + ' mm', 'Concrete', r.grade + ' (fck=' + r.fck + ')'],
-                    ['Steel', r.steelGrade + ' (fy=' + r.fy + ')', 'Load Factor', String(r.loadFactor)],
-                    ['Dead Load', r.totalDL + ' kN/m2', 'Live Load', r.LL + ' kN/m2'],
-                    ['wu (Factored)', r.wFactored + ' kN/m2', 'SDL', r.SDL + ' kN/m2'],
+                    ['Cover', r.cover + ' mm', 'Concrete', r.grade + ' (f<sub>ck</sub>=' + r.fck + ' MPa)'],
+                    ['Steel', r.steelGrade + ' (f<sub>y</sub>=' + r.fy + ' MPa)', 'Load Factor', String(r.loadFactor)],
+                    ['Dead Load (incl. SW)', r.totalDL + ' kN/m&sup2;', 'Live Load', r.LL + ' kN/m&sup2;'],
+                    ['w<sub>u</sub> (Factored)', r.wFactored + ' kN/m&sup2;', 'SDL', r.SDL + ' kN/m&sup2;'],
                 ])}
             </div>
         </div>
 
         <div class="section-box">
-            <div class="section-header">2. Flexural Reinforcement (IS 456 Cl. 38.1)</div>
+            <div class="section-header">2. Design Moments</div>
             <div class="section-body">
                 <div class="info-note">
-                    One-way slab: bending in Lx direction only.
-                    ${r.supportCondition === 'simply' ? 'M = wL2/8' : ''}
-                    ${r.supportCondition === 'one_end' ? 'M+ = wL2/10, M- = wL2/10' : ''}
-                    ${r.supportCondition === 'continuous' ? 'M+ = wL2/12, M- = wL2/10' : ''}
+                    <strong>One-way slab:</strong> Bending in L<sub>x</sub> direction only.
+                    ${r.supportCondition === 'simply' ? 'M = wL&sup2;/8 (simply supported)' : ''}
+                    ${r.supportCondition === 'one_end' ? 'M<sup>+</sup> = wL&sup2;/10, M<sup>&minus;</sup> = wL&sup2;/10 (one-end continuous)' : ''}
+                    ${r.supportCondition === 'continuous' ? 'M<sup>+</sup> = wL&sup2;/12, M<sup>&minus;</sup> = wL&sup2;/10 (both ends continuous)' : ''}
                 </div>
-                <div style="font-size:10px;margin:6px 0;">Effective depth: dx = ${r.dx} mm</div>
+                <div class="calc-block">
+                    M<sub>x,pos</sub> = ${r.ax_pos} &times; ${r.wFactored} &times; ${r.Lx}&sup2; = <strong>${r.Mx_pos} kN&middot;m/m</strong>
+                    ${r.Mx_neg > 0 ? `<br/>M<sub>x,neg</sub> = ${r.ax_neg} &times; ${r.wFactored} &times; ${r.Lx}&sup2; = <strong>${r.Mx_neg} kN&middot;m/m</strong>` : ''}
+                </div>
+            </div>
+        </div>
+
+        <div class="section-box">
+            <div class="section-header">3. Flexural Reinforcement &mdash; IS 456 Cl. 38.1</div>
+            <div class="section-body">
+                <div style="font-size:10px;margin:6px 0;">Effective depth: d<sub>x</sub> = ${r.dx} mm</div>
                 <div class="two-col">
                     <div class="col col-left">
                         ${flexBlock('X-Bot (Mid-span +ve)', r.Mx_pos, r.flex_x_bot.Ast_req, r.bars_x_bot.label, r.bars_x_bot.Ast_provided, r.flex_x_bot.isDoubly, r.flex_x_bot.governs)}
-                        ${r.Mx_neg > 0 ? flexBlock('X-Top (Support -ve)', r.Mx_neg, r.flex_x_top.Ast_req, r.bars_x_top.label, r.bars_x_top.Ast_provided, r.flex_x_top.isDoubly, r.flex_x_top.governs) : ''}
+                        ${r.Mx_neg > 0 ? flexBlock('X-Top (Support &minus;ve)', r.Mx_neg, r.flex_x_top.Ast_req, r.bars_x_top.label, r.bars_x_top.Ast_provided, r.flex_x_top.isDoubly, r.flex_x_top.governs) : ''}
                     </div>
                     <div class="col">
                         <h4>Distribution Steel (Y-dir)</h4>
                         <div class="provided-box">
                             <strong>Provided:</strong> ${r.bars_y_bot.label}<br/>
-                            Ast,prov = ${r.bars_y_bot.Ast_provided} mm2/m (min. steel)
+                            A<sub>st,prov</sub> = ${r.bars_y_bot.Ast_provided} mm&sup2;/m (min. steel per IS 456 Cl. 26.5.2.1)
                         </div>
                     </div>
                 </div>
@@ -319,7 +337,7 @@ function generateOneWaySection(r: any): string {
         ${deflectionSection(r)}
         ${spanDepthSection(r)}
         ${shearSection(r, [
-            {label: 'Span (Lx)', dir: r.shear.shortDir},
+            {label: 'Span (L<sub>x</sub>)', dir: r.shear.shortDir},
         ])}
     `;
 }
@@ -330,31 +348,40 @@ function generateOneWaySection(r: any): string {
 
 function generateCantileverSection(r: any): string {
     return `
-        <h2>Panel ${r.label} - Cantilever Slab</h2>
+        <h2>Panel ${r.label} &mdash; Cantilever Slab</h2>
 
         <div class="section-box">
             <div class="section-header">1. Input Parameters</div>
             <div class="section-body">
                 ${inputTable([
                     ['Span L', r.Lx + ' m', 'Thickness D', r.D + ' mm'],
-                    ['Cover', r.cover + ' mm', 'Concrete', r.grade + ' (fck=' + r.fck + ')'],
-                    ['Steel', r.steelGrade + ' (fy=' + r.fy + ')', 'Load Factor', String(r.loadFactor)],
-                    ['Dead Load', r.totalDL + ' kN/m2', 'Live Load', r.LL + ' kN/m2'],
-                    ['wu (Factored)', r.wFactored + ' kN/m2', 'SDL', r.SDL + ' kN/m2'],
+                    ['Cover', r.cover + ' mm', 'Concrete', r.grade + ' (f<sub>ck</sub>=' + r.fck + ' MPa)'],
+                    ['Steel', r.steelGrade + ' (f<sub>y</sub>=' + r.fy + ' MPa)', 'Load Factor', String(r.loadFactor)],
+                    ['Dead Load (incl. SW)', r.totalDL + ' kN/m&sup2;', 'Live Load', r.LL + ' kN/m&sup2;'],
+                    ['w<sub>u</sub> (Factored)', r.wFactored + ' kN/m&sup2;', 'SDL', r.SDL + ' kN/m&sup2;'],
                 ])}
             </div>
         </div>
 
         <div class="section-box">
-            <div class="section-header">2. Flexural Reinforcement (IS 456 Cl. 38.1)</div>
+            <div class="section-header">2. Design Moment</div>
             <div class="section-body">
                 <div class="info-note">
-                    Cantilever slab: Fixed at support, free at tip. Governing moment is hogging at support: M = wL2/2.
+                    <strong>Cantilever slab:</strong> Fixed at support, free at tip. Governing moment is hogging at support: M = wL&sup2;/2.
                 </div>
+                <div class="calc-block">
+                    M<sub>x,neg</sub> = w<sub>u</sub> &times; L&sup2; / 2 = ${r.wFactored} &times; ${r.Lx}&sup2; / 2 = <strong>${r.Mx_neg} kN&middot;m/m</strong>
+                </div>
+            </div>
+        </div>
+
+        <div class="section-box">
+            <div class="section-header">3. Flexural Reinforcement &mdash; IS 456 Cl. 38.1</div>
+            <div class="section-body">
                 <div style="font-size:10px;margin:6px 0;">Effective depth: d = ${r.dx} mm</div>
                 <div class="two-col">
                     <div class="col col-left">
-                        ${flexBlock('Top (Support - Hogging)', r.Mx_neg, r.flex_x_top.Ast_req, r.bars_x_top.label, r.bars_x_top.Ast_provided, r.flex_x_top.isDoubly, r.flex_x_top.governs)}
+                        ${flexBlock('Top (Support &mdash; Hogging)', r.Mx_neg, r.flex_x_top.Ast_req, r.bars_x_top.label, r.bars_x_top.Ast_provided, r.flex_x_top.isDoubly, r.flex_x_top.governs)}
                     </div>
                     <div class="col">
                         ${flexBlock('Bottom (Distribution)', 0, r.flex_x_bot.Ast_req, r.bars_x_bot.label, r.bars_x_bot.Ast_provided, r.flex_x_bot.isDoubly, r.flex_x_bot.governs)}
