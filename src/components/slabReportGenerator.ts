@@ -128,6 +128,12 @@ function flexBlock(label: string, Mu: number, AstReq: number, barsLabel: string,
 }
 
 function deflectionSection(r: any): string {
+    const dfl = r.deflection;
+    const Igr_str = (dfl.Igr/1e6).toFixed(2);
+    const Icr_str = (dfl.Icr/1e6).toFixed(2);
+    const Ieff_str = (dfl.Ieff/1e6).toFixed(2);
+    const Icr_lt_str = (dfl.Icr_lt/1e6).toFixed(2);
+
     return `
     <div class="section-box avoid-break">
         <div class="section-header">Deflection Check &mdash; IS 456 Annex C</div>
@@ -135,7 +141,6 @@ function deflectionSection(r: any): string {
             <p style="margin-top:0; color:#475569; font-size:13px;">
                 <strong>Variables:</strong><br/>
                 ${kxInline(`I_{gr}`)}: Gross moment of inertia<br/>
-                ${kxInline(`M_{cr}`)}: Cracking moment<br/>
                 ${kxInline(`I_{cr}`)}: Cracked moment of inertia<br/>
                 ${kxInline(`I_{eff}`)}: Effective moment of inertia<br/>
                 ${kxInline(`E_{ce}`)}: Effective modulus of elasticity of concrete
@@ -143,42 +148,43 @@ function deflectionSection(r: any): string {
             <div style="display: flex; gap: 20px;">
                 <div style="flex: 1;">
                     <h4 style="margin-top:0;">A. Short-Term Deflection</h4>
-                    ${kx(`I_{gr} = ${(r.deflection.Igr/1e6).toFixed(2)} \\times 10^6 \\text{ mm}^4`)}
-                    ${kx(`M_{cr} = ${r.deflection.Mcr} \\text{ kN}\\cdot\\text{m}`)}
-                    ${kx(`I_{cr} = ${(r.deflection.Icr/1e6).toFixed(2)} \\times 10^6 \\text{ mm}^4`)}
-                    ${kx(`I_{eff} = ${(r.deflection.Ieff/1e6).toFixed(2)} \\times 10^6 \\text{ mm}^4`)}
-                    ${kx(`a_i = ${r.deflection.ai} \\text{ mm} \\quad (\\text{short-term})`)}
+                    ${kx(`I_{gr} = \\frac{bD^3}{12} = ${Igr_str} \\times 10^6 \\text{ mm}^4`)}
+                    ${kx(`M_{cr} = \\frac{f_{cr} I_{gr}}{y_t} = ${dfl.Mcr} \\text{ kN}\\cdot\\text{m}`)}
+                    ${kx(`I_{cr} = \\frac{bx^3}{3} + m A_{st} (d-x)^2 = ${Icr_str} \\times 10^6 \\text{ mm}^4`)}
+                    ${kx(`I_{eff} = \\frac{I_{cr}}{1.2 - \\frac{M_{cr}}{M_a} \\frac{z}{d} \\left(1 - \\frac{x}{d}\\right)} = ${Ieff_str} \\times 10^6 \\text{ mm}^4 \\le I_{gr}`)}
+                    ${kx(`a_i = \\alpha \\frac{M_{service} L^2}{E_c I_{eff}} = ${dfl.ai} \\text{ mm} \\quad (\\text{short-term})`)}
 
-                    <h4 style="margin-top:15px;">B. Shrinkage</h4>
-                    ${kx(`k_3 = ${r.deflection.k3}`)}
-                    ${kx(`\\psi_{cs} = ${r.deflection.psi_cs.toExponential(2)}`)}
-                    ${kx(`a_{cs} = ${r.deflection.a_shrinkage} \\text{ mm}`)}
+                    <h4 style="margin-top:15px;">B. Shrinkage Deflection</h4>
+                    ${kx(`k_3 = ${dfl.k3} \\quad (\\text{from Cl. C-3.1})`)}
+                    ${kx(`\\psi_{cs} = k_4 \\frac{\\epsilon_{cs}}{D} = ${dfl.psi_cs.toExponential(2)}`)}
+                    ${kx(`a_{cs} = k_3 \\psi_{cs} L^2 = ${dfl.a_shrinkage} \\text{ mm}`)}
                 </div>
                 <div style="flex: 1;">
-                    <h4 style="margin-top:0;">C. Creep</h4>
-                    ${kx(`\\theta = ${r.deflection.theta}`)}
-                    ${kx(`E_{ce} = \\frac{E_c}{1 + \\theta} = ${Math.round(r.deflection.Ece)} \\text{ N/mm}^2`)}
-                    ${kx(`I_{cr,lt} = ${(r.deflection.Icr_lt/1e6).toFixed(2)} \\times 10^6 \\text{ mm}^4`)}
-                    ${kx(`a_{cc} = ${r.deflection.a_creep} \\text{ mm}`)}
+                    <h4 style="margin-top:0;">C. Creep Deflection</h4>
+                    ${kx(`\\theta = ${dfl.theta} \\quad (\\text{creep coefficient})`)}
+                    ${kx(`E_{ce} = \\frac{E_c}{1 + \\theta} = ${Math.round(dfl.Ece)} \\text{ N/mm}^2`)}
+                    ${kx(`I_{cr,lt} = ${Icr_lt_str} \\times 10^6 \\text{ mm}^4`)}
+                    ${kx(`a_{i,cc} = \\alpha \\frac{M_{perm} L^2}{E_{ce} I_{eff,lt}} = ${dfl.a1_perm} \\text{ mm}`)}
+                    ${kx(`a_{cc} = a_{i,cc} - a_{i,perm} = ${dfl.a_creep} \\text{ mm}`)}
 
                     <h4 style="margin-top:15px;">D. Summary</h4>
-                    ${r.deflection.camber > 0 ? kx(`a_{camber} = ${r.deflection.camber} \\text{ mm (upward)}`) : ''}
+                    ${dfl.camber > 0 ? kx(`a_{camber} = ${dfl.camber} \\text{ mm (upward)}`) : ''}
                     
-                    ${r.deflection.camber > 0 ? 
-                        kx(`a_{total} = a_i + a_{cc} + a_{cs} - a_{camber} = ${r.deflection.a_total} \\text{ mm}`) : 
-                        kx(`a_{total} = a_i + a_{cc} + a_{cs} = ${r.deflection.a_total} \\text{ mm}`)
+                    ${dfl.camber > 0 ? 
+                        kx(`a_{total} = a_i + a_{cc} + a_{cs} - a_{camber} = ${dfl.a_total} \\text{ mm}`) : 
+                        kx(`a_{total} = a_i + a_{cc} + a_{cs} = ${dfl.a_total} \\text{ mm}`)
                     }
-                    <div style="font-weight: bold; color: ${r.deflection.status_total === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: center;">
-                        Result: ${kxInline(`a_{total} ${r.deflection.status_total === 'OK' ? '\\le' : '>'} ${r.deflection.limit_total} \\text{ mm}`)} &rarr; ${r.deflection.status_total}
+                    <div style="font-weight: bold; color: ${dfl.status_total === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: center;">
+                        Result: ${kxInline(`a_{total} ${dfl.status_total === 'OK' ? '\\le' : '>'} ${dfl.limit_total} \\text{ mm}`)} &rarr; ${dfl.status_total}
                     </div>
 
                     <div style="margin-top:15px;"></div>
-                    ${r.deflection.camber > 0 ? 
-                        kx(`a_{post} = a_{cc} + a_{cs} - a_{camber} = ${r.deflection.a_post_construction} \\text{ mm}`) : 
-                        kx(`a_{post} = a_{cc} + a_{cs} = ${r.deflection.a_post_construction} \\text{ mm}`)
+                    ${dfl.camber > 0 ? 
+                        kx(`a_{post} = a_{cc} + a_{cs} - a_{camber} = ${dfl.a_post_construction} \\text{ mm}`) : 
+                        kx(`a_{post} = a_{cc} + a_{cs} = ${dfl.a_post_construction} \\text{ mm}`)
                     }
-                    <div style="font-weight: bold; color: ${r.deflection.status_post === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: center;">
-                        Result: ${kxInline(`a_{post} ${r.deflection.status_post === 'OK' ? '\\le' : '>'} ${r.deflection.limit_post} \\text{ mm}`)} &rarr; ${r.deflection.status_post}
+                    <div style="font-weight: bold; color: ${dfl.status_post === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: center;">
+                        Result: ${kxInline(`a_{post} ${dfl.status_post === 'OK' ? '\\le' : '>'} ${dfl.limit_post} \\text{ mm}`)} &rarr; ${dfl.status_post}
                     </div>
                 </div>
             </div>
