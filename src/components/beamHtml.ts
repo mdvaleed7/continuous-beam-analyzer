@@ -21,12 +21,12 @@ export function renderReactionsHTML(result: any, wVal: number, LVal: any): { rea
     const unitF = isCombined ? `l${refSuffix}` : `wl${refSuffix}`;
     const unitM = isCombined ? `l${refSuffix}²` : `wl${refSuffix}²`;
 
-    // When tapered beams are present, display decimals (3 dp) instead of fractions
+    // Always display decimals (3 dp) — no fraction output
     const isTapered = !!(result.spanTapers && result.spanTapers.some((t: any) => t));
-    const fmt = (v: any) => isTapered ? v.fl(result.w1Val, result.w2Val).toFixed(3) : v.html();
-    const fmtStr = (v: any) => isTapered ? v.fl(result.w1Val, result.w2Val).toFixed(3) : v.str();
+    const fmt = (v: any) => v.fl(result.w1Val, result.w2Val).toFixed(3);
+    const fmtStr = (v: any) => v.fl(result.w1Val, result.w2Val).toFixed(3);
 
-    const headerLabel = isTapered ? 'Reaction (Numeric)' : 'Reaction (Exact)';
+    const headerLabel = 'Reaction (Numeric)';
     let html = `<div style="overflow-x: auto;"><table><thead><tr><th>Support</th><th>Type</th><th>${headerLabel}</th><th>Expression</th></tr></thead><tbody>`;
     for (let i = 0; i < reactions.length; i++) {
         const r = reactions[i];
@@ -74,12 +74,12 @@ export function renderReactionsHTML(result: any, wVal: number, LVal: any): { rea
         const tl = result.totalLoad.fl(result.w1Val, result.w2Val);
         const diff = Math.abs(tr - tl);
         if (diff < TOL * Math.max(1, Math.abs(tl))) {
-            const rStr = isTapered ? tr.toFixed(3) : result.totalReaction.str();
-            const lStr = isTapered ? tl.toFixed(3) : result.totalLoad.str();
+            const rStr = tr.toFixed(3);
+            const lStr = tl.toFixed(3);
             eqHtml = `<div class="equil-note">✓ Equilibrium verified: ΣR = ${rStr} = Total load = ${lStr}</div>`;
         } else {
-            const rStr = isTapered ? tr.toFixed(3) : result.totalReaction.str();
-            const lStr = isTapered ? tl.toFixed(3) : result.totalLoad.str();
+            const rStr = tr.toFixed(3);
+            const lStr = tl.toFixed(3);
             eqHtml = `<div class="equil-note error">✗ Equilibrium error: ΣR = ${rStr}, Load = ${lStr}, Diff = ${diff.toExponential(2)}</div>`;
         }
     }
@@ -164,12 +164,11 @@ export function renderSpanCardsHTML(result: any, wVal: number, LVal: any): strin
                     }
                 }
             }
-            const isTapered = !!(result.spanTapers && result.spanTapers[si]);
             const fmtFl = (frac: any) => frac.fl(result.w1Val, result.w2Val).toFixed(3);
-            const vLStr = isTapered ? fmtFl(sp.VLeft_frac) : sp.VLeft_frac.html();
-            const vRStr = isTapered ? fmtFl(sp.VRight_frac) : sp.VRight_frac.html();
-            const mLStr = isTapered ? fmtFl(sp.MLeft_frac) : sp.MLeft_frac.html();
-            const mRStr = isTapered ? fmtFl(sp.MRight_frac) : sp.MRight_frac.html();
+            const vLStr = fmtFl(sp.VLeft_frac);
+            const vRStr = fmtFl(sp.VRight_frac);
+            const mLStr = fmtFl(sp.MLeft_frac);
+            const mRStr = fmtFl(sp.MRight_frac);
 
             const eqBlock = `
             <div class="span-section-title">Shear Force</div>
@@ -183,40 +182,16 @@ export function renderSpanCardsHTML(result: any, wVal: number, LVal: any): strin
 
         // Zero shear and max moment
         let zeroShearStr = '—', maxMStr = '—', distStr = '—';
-        if (isTapered) {
-            // Tapered: show decimals (3 dp)
-            if (sp.zeroShearX !== null) {
-                zeroShearStr = `${sp.zeroShearX.toFixed(3)} l`;
-            }
-            if (sp.maxM !== null) {
-                maxMStr = `${sp.maxM.toFixed(3)} ${unitM}`;
-            }
-            if (sp.maxMx !== null) {
-                const cumDist = result.cumAlphas[si].fl();
-                distStr = `${(cumDist + sp.maxMx).toFixed(3)} l from ${result.labels[0]}`;
-            }
-        } else {
-            // Non-tapered: show exact fractions/surds
-            if (sp.zeroShearExact) {
-                zeroShearStr = `${sp.zeroShearExact.html()} l`;
-            } else if (sp.zeroShearX !== null) {
-                const xFrac = toFrac(Math.round(sp.zeroShearX * 1e8) / 1e8);
-                zeroShearStr = `${xFrac.html()} l`;
-            }
-            if (sp.maxMExact) {
-                maxMStr = sp.maxMExact.isText ? sp.maxMExact.html() : `${sp.maxMExact.html()} ${unitM}`;
-            } else if (sp.maxM !== null) {
-                const mFrac = toFrac(Math.round(sp.maxM * 1e8) / 1e8);
-                maxMStr = `${mFrac.html()} ${unitM}`;
-            }
-            if (sp.exactDistFromA_HTML) {
-                distStr = `${sp.exactDistFromA_HTML} from Support A`;
-            } else if (sp.maxMx !== null) {
-                const cumDist = result.cumAlphas[si];
-                const localX = toFrac(Math.round(sp.maxMx * 1e8) / 1e8);
-                const distFrac = cumDist.add(localX);
-                distStr = `${distFrac.html()} l from ${result.labels[0]}`;
-            }
+        // Always show decimals (3 dp)
+        if (sp.zeroShearX !== null) {
+            zeroShearStr = `${sp.zeroShearX.toFixed(3)} l`;
+        }
+        if (sp.maxM !== null) {
+            maxMStr = `${sp.maxM.toFixed(3)} ${unitM}`;
+        }
+        if (sp.maxMx !== null) {
+            const cumDist = result.cumAlphas[si].fl();
+            distStr = `${(cumDist + sp.maxMx).toFixed(3)} l from ${result.labels[0]}`;
         }
 
         html += `<div class="span-card" style="animation-delay:${delay}ms">
@@ -284,7 +259,7 @@ export function renderValidationHTML(result: any): string {
         // Prismatic beams: exact fraction comparison
         const remFy = sumFy.sub(loadFy);
         isEquilFy = remFy.isZero();
-        detailsFy = `Applied = ${loadFy.str()}, Reactions = ${sumFy.str()}`;
+        detailsFy = `Applied = ${loadFy.fl().toFixed(3)}, Reactions = ${sumFy.fl().toFixed(3)}`;
 
         // Moment equilibrium
         let cumX = ZERO;
@@ -298,7 +273,7 @@ export function renderValidationHTML(result: any): string {
         const loadM = result.totalMoment || ZERO;
         const remM = sumM.sub(loadM);
         isEquilM = remM.isZero();
-        detailsM = `Applied = ${loadM.str()}, Reactions = ${sumM.str()}`;
+        detailsM = `Applied = ${loadM.fl().toFixed(3)}, Reactions = ${sumM.fl().toFixed(3)}`;
     }
 
     let html = `<div style="overflow-x: auto;"><table class="valid-table"><thead><tr><th>Condition</th><th>Status</th><th>Details</th></tr></thead><tbody>`;

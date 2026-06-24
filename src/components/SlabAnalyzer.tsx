@@ -2,7 +2,7 @@
 "use client";
 
 import React, { useState, useCallback, useMemo } from "react";
-import { analyzeSlab, analyzeSlabs, BOUNDARY_CASES, SLAB_TYPES, SUPPORT_CONDITIONS } from "./slabEngine";
+import { analyzeSlab, analyzeSlabs, BOUNDARY_CASES, SUPPORT_CONDITIONS } from "./slabEngine";
 import { generateSlabReport } from "./slabReportGenerator";
 import { logger } from "../lib/logger";
 
@@ -15,6 +15,7 @@ const DEFAULT_PANEL = {
     boundaryCase: 1,
     supportCondition: 'simply',
     slabType: 'auto',
+    isCantilever: false,
     ageOfLoading: '28',
 };
 
@@ -44,14 +45,17 @@ export default function SlabAnalyzer() {
         const p = panels[activePanel];
         if (!p) return;
         
-        const span = (p.slabType === 'cantilever' ? p.L : p.Lx) * 1000;
+        const isCantilever = !!p.isCantilever;
+        const ratio = (p.Ly || 1) / (p.Lx || 1);
+        const autoType = isCantilever ? 'cantilever' : (ratio > 2 ? 'one-way' : 'two-way');
+        const span = (isCantilever ? p.L : p.Lx) * 1000;
         let basicRatio = 20;
         
-        if (p.slabType === 'cantilever') {
+        if (autoType === 'cantilever') {
             basicRatio = 7;
-        } else if (p.slabType === 'one-way') {
+        } else if (autoType === 'one-way') {
             basicRatio = p.supportCondition === 'continuous' ? 26 : 20;
-        } else if (p.slabType === 'two-way' || p.slabType === 'auto') {
+        } else {
             basicRatio = p.boundaryCase === 1 ? 26 : (p.boundaryCase === 9 ? 20 : 23);
         }
         
@@ -236,6 +240,17 @@ export default function SlabAnalyzer() {
     const p = panels[activePanel] || panels[0];
     const r = results ? results[activePanel] : null;
 
+    // Auto-detect slab type from Ly/Lx ratio (used for dynamic UI)
+    const detectedSlabType = useMemo(() => {
+        if (p.isCantilever) return 'cantilever' as const;
+        const ratio = (p.Ly || 1) / (p.Lx || 1);
+        return ratio > 2 ? 'one-way' as const : 'two-way' as const;
+    }, [p.Lx, p.Ly, p.isCantilever]);
+
+    const lyLxRatio = useMemo(() => {
+        return Math.round(((p.Ly || 1) / (p.Lx || 1)) * 100) / 100;
+    }, [p.Lx, p.Ly]);
+
     return (
         <div className="layout">
             {/* ───── SIDEBAR ───── */}
@@ -321,92 +336,81 @@ export default function SlabAnalyzer() {
                             <input title="Value" value={p.label}
                                 onChange={e => updatePanel(activePanel, 'label', e.target.value)} />
                         </div>
+
+                        {/* Cantilever toggle */}
                         <div className="control-group">
-                            <label>Slab Type</label>
-                            <select title="Select option" value={p.slabType}
-                                onChange={e => updatePanel(activePanel, 'slabType', e.target.value)}>
-                                {SLAB_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
-                            </select>
+                            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+                                <input type="checkbox" checked={!!p.isCantilever}
+                                    onChange={e => {
+                                        updatePanel(activePanel, 'isCantilever', e.target.checked);
+                                        updatePanel(activePanel, 'slabType', e.target.checked ? 'cantilever' : 'auto');
+                                    }} />
+                                Cantilever Slab
+                            </label>
                         </div>
 
                         {/* ── Cantilever: single span only ── */}
-                        {p.slabType === 'cantilever' && (
+                        {p.isCantilever ? (
                             <div className="control-group">
                                 <label>Span L (m)</label>
                                 <input title="Value" type="number" min="0.3" step="0.1" value={p.L}
                                     onChange={e => updatePanel(activePanel, 'L', +e.target.value)} />
                             </div>
-                        )}
-
-                        {/* ── One-way: Lx + Ly (width) + support condition ── */}
-                        {p.slabType === 'one-way' && (
+                        ) : (
                             <>
+                                {/* ── Lx and Ly for auto-detection ── */}
                                 <div className="control-group">
-                                    <label>Span L<sub>x</sub> (m)</label>
+                                    <label>L<sub>x</sub> Short Span (m)</label>
                                     <input title="Value" type="number" min="0.5" step="0.1" value={p.Lx}
                                         onChange={e => updatePanel(activePanel, 'Lx', +e.target.value)} />
                                 </div>
                                 <div className="control-group">
-                                    <label>Width L<sub>y</sub> (m)</label>
+                                    <label>L<sub>y</sub> Long Span (m)</label>
                                     <input title="Value" type="number" min="0.5" step="0.1" value={p.Ly}
                                         onChange={e => updatePanel(activePanel, 'Ly', +e.target.value)} />
                                 </div>
-                                <div className="control-group">
-                                    <label>Support Condition</label>
-                                    <select title="Select option" value={p.supportCondition}
-                                        onChange={e => updatePanel(activePanel, 'supportCondition', e.target.value)}>
-                                        {SUPPORT_CONDITIONS.map(sc =>
-                                            <option key={sc.value} value={sc.value}>{sc.label}</option>)}
-                                    </select>
-                                </div>
-                            </>
-                        )}
 
-                        {/* ── Two-way: Lx + Ly + boundary case ── */}
-                        {p.slabType === 'two-way' && (
-                            <>
-                                <div className="control-group">
-                                    <label>L<sub>x</sub> Short (m)</label>
-                                    <input title="Value" type="number" min="0.5" step="0.1" value={p.Lx}
-                                        onChange={e => updatePanel(activePanel, 'Lx', +e.target.value)} />
+                                {/* Auto-detected type indicator */}
+                                <div style={{
+                                    padding: '8px 12px', margin: '8px 0',
+                                    borderRadius: '6px', fontSize: '0.82rem', fontWeight: 600,
+                                    background: detectedSlabType === 'one-way'
+                                        ? 'rgba(255, 165, 0, 0.12)'
+                                        : 'rgba(0, 200, 120, 0.12)',
+                                    color: detectedSlabType === 'one-way'
+                                        ? 'var(--warning, #e6a700)'
+                                        : 'var(--positive, #00c878)',
+                                    border: `1px solid ${detectedSlabType === 'one-way'
+                                        ? 'rgba(255, 165, 0, 0.25)'
+                                        : 'rgba(0, 200, 120, 0.25)'}`,
+                                    textAlign: 'center',
+                                }}>
+                                    L<sub>y</sub>/L<sub>x</sub> = {lyLxRatio} → {detectedSlabType === 'one-way' ? '📏 One-Way Slab' : '📐 Two-Way Slab'}
                                 </div>
-                                <div className="control-group">
-                                    <label>L<sub>y</sub> Long (m)</label>
-                                    <input title="Value" type="number" min="0.5" step="0.1" value={p.Ly}
-                                        onChange={e => updatePanel(activePanel, 'Ly', +e.target.value)} />
-                                </div>
-                                <div className="control-group">
-                                    <label>Boundary Case</label>
-                                    <select title="Select option" value={p.boundaryCase}
-                                        onChange={e => updatePanel(activePanel, 'boundaryCase', +e.target.value)}>
-                                        {BOUNDARY_CASES.map(bc =>
-                                            <option key={bc.case} value={bc.case}>Case {bc.case}: {bc.label}</option>)}
-                                    </select>
-                                </div>
-                            </>
-                        )}
 
-                        {/* ── Auto: Lx + Ly + boundary case (auto-detects type) ── */}
-                        {p.slabType === 'auto' && (
-                            <>
-                                <div className="control-group">
-                                    <label>L<sub>x</sub> Short (m)</label>
-                                    <input title="Value" type="number" min="0.5" step="0.1" value={p.Lx}
-                                        onChange={e => updatePanel(activePanel, 'Lx', +e.target.value)} />
-                                </div>
-                                <div className="control-group">
-                                    <label>L<sub>y</sub> Long (m)</label>
-                                    <input title="Value" type="number" min="0.5" step="0.1" value={p.Ly}
-                                        onChange={e => updatePanel(activePanel, 'Ly', +e.target.value)} />
-                                </div>
-                                <div className="control-group">
-                                    <label>Boundary Case</label>
-                                    <select title="Select option" value={p.boundaryCase}
-                                        onChange={e => updatePanel(activePanel, 'boundaryCase', +e.target.value)}>
-                                        {BOUNDARY_CASES.map(bc =>
-                                            <option key={bc.case} value={bc.case}>Case {bc.case}: {bc.label}</option>)}
-                                    </select>
-                                </div>
+                                {/* One-way: support condition */}
+                                {detectedSlabType === 'one-way' && (
+                                    <div className="control-group">
+                                        <label>Support Condition</label>
+                                        <select title="Select option" value={p.supportCondition}
+                                            onChange={e => updatePanel(activePanel, 'supportCondition', e.target.value)}>
+                                            {SUPPORT_CONDITIONS.map(sc =>
+                                                <option key={sc.value} value={sc.value}>{sc.label}</option>)}
+                                        </select>
+                                    </div>
+                                )}
+
+                                {/* Two-way: boundary case */}
+                                {detectedSlabType === 'two-way' && (
+                                    <div className="control-group">
+                                        <label>Boundary Case (IS 456 Table 26)</label>
+                                        <select title="Select option" value={p.boundaryCase}
+                                            onChange={e => updatePanel(activePanel, 'boundaryCase', +e.target.value)}>
+                                            {BOUNDARY_CASES.map(bc =>
+                                                <option key={bc.case} value={bc.case}>Case {bc.case}: {bc.label}</option>)}
+                                        </select>
+                                    </div>
+                                )}
                             </>
                         )}
 

@@ -529,7 +529,10 @@ export function optimizeFooting(
                         const costIndex = computeCostIndex(volume, steelWeight, costRatio);
 
                         results.push({
-                            L, B, D, volume, costIndex, result
+                            L: Math.round(L * 100) / 100,
+                            B: Math.round(B * 100) / 100,
+                            D: Math.round(D * 100) / 100,
+                            volume, costIndex, result
                         });
                     }
                 } catch (e) {
