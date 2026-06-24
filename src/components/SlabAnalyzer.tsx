@@ -266,7 +266,7 @@ export default function SlabAnalyzer() {
                             <select title="Select option" value={sharedMaterial.grade}
                                 onChange={e => handleGradeChange(e.target.value)}>
                                 {['M20', 'M25', 'M30', 'M35', 'M40'].map(g =>
-                                    <option key={g} value={g}>{g} (f<sub>ck</sub>={g.replace('M', '')})</option>)}
+                                    <option key={g} value={g}>{g} (f_ck={g.replace('M', '')})</option>)}
                             </select>
                         </div>
                         <div className="control-group">
