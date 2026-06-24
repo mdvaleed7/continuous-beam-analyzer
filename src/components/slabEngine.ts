@@ -172,6 +172,7 @@ export interface SlabAnalysisResult {
     bars_x_top: BarSelection;
     bars_y_top: BarSelection;
     ldCheck: SpanDepthCheck;
+    flexDepthCheck: FlexureDepthCheck;
     deflection: DeflectionResult;
     shear: ShearResult;
     steelStatus: DesignStatus;
