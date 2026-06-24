@@ -87,6 +87,14 @@ export interface SpanDepthCheck {
     note: string;
 }
 
+export interface FlexureDepthCheck {
+    Mu_max: number;
+    coeff: number;
+    d_req: number;
+    d_provided: number;
+    status: DesignStatus;
+}
+
 export interface DeflectionResult {
     L: number;
     D: number;
