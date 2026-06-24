@@ -41,6 +41,10 @@ export const REPORT_CSS = `<style>
     .section-header { background: #f1f5f9; padding: 8px 12px; margin: 0; color: #0f172a; font-size: 15px; font-weight: bold; border-bottom: 1px solid #e2e8f0; }
     .section-body { padding: 12px 14px; }
     .info-note { background: #eff6ff; border-left: 3px solid #3b82f6; padding: 8px 10px; margin: 8px 0; font-size: 12px; color: #444; }
+    /* ponytail: KaTeX display math defaults to text-align: center. Two-column
+       flex layouts make that look misaligned — force left alignment so math,
+       status lines, and notes all line up against the column's left edge. */
+    .katex-display { text-align: left !important; margin: 10px 0 !important; }
     @media print {
         .report-container { max-width: 100%; margin: 0; }
         .page-break { page-break-before: always; }

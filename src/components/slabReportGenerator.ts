@@ -29,7 +29,6 @@ export async function generateSlabReport(config: any, results: any[], isPreview:
             <title>Slab Design Report</title>
             <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css" />
             ${REPORT_CSS}
-            <style>.katex-display { text-align: left !important; margin: 10px 0 !important; }</style>
         </head>
         <body>
             <div class="report-container">
@@ -152,7 +151,7 @@ function deflectionSection(r: any): string {
                         kx(`a_{total} = a_i + a_{cc} + a_{cs} - a_{camber} = ${dfl.a_total} \\text{ mm}`) : 
                         kx(`a_{total} = a_i + a_{cc} + a_{cs} = ${dfl.a_total} \\text{ mm}`)
                     }
-                    <div style="font-weight: bold; color: ${dfl.status_total === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: center;">
+                    <div style="font-weight: bold; color: ${dfl.status_total === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: left;">
                         Result: ${kxInline(`a_{total} ${dfl.status_total === 'OK' ? '\\le' : '>'} ${dfl.limit_total} \\text{ mm}`)} &rarr; ${dfl.status_total}
                     </div>
 
@@ -161,7 +160,7 @@ function deflectionSection(r: any): string {
                         kx(`a_{post} = a_{cc} + a_{cs} - a_{camber} = ${dfl.a_post_construction} \\text{ mm}`) : 
                         kx(`a_{post} = a_{cc} + a_{cs} = ${dfl.a_post_construction} \\text{ mm}`)
                     }
-                    <div style="font-weight: bold; color: ${dfl.status_post === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: center;">
+                    <div style="font-weight: bold; color: ${dfl.status_post === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: left;">
                         Result: ${kxInline(`a_{post} ${dfl.status_post === 'OK' ? '\\le' : '>'} ${dfl.limit_post} \\text{ mm}`)} &rarr; ${dfl.status_post}
                     </div>
                 </div>
@@ -189,7 +188,7 @@ function spanDepthSection(r: any): string {
                     ${kx(`\\text{Modified } (l/d) = \\text{Basic} \\times \\text{MF} = ${r.ldCheck.modifiedRatio}`)}
                     ${kx(`d_{req} = \\frac{l}{\\text{Modified } (l/d)} = ${r.ldCheck.d_req} \\text{ mm}`)}
                     ${kx(`d_{prov} = ${r.ldCheck.d_provided} \\text{ mm}`)}
-                    <p style="margin-top: 10px; color: #64748b; font-style: italic; text-align: center;">
+                    <p style="margin-top: 10px; color: #64748b; font-style: italic; text-align: left;">
                         Note: Empirical span/depth ratio is a preliminary check. Rigorous deflection calculation governs.
                     </p>
                 </div>
@@ -211,7 +210,7 @@ function shearSection(r: any, directions: {label: string, dir: any}[]): string {
                 <div style="flex: 1;">
                     ${kx(`k = ${dir.k} \\quad (\\text{depth factor})`)}
                     ${kx(`k \\cdot \\tau_c = ${dir.allowable} \\text{ N/mm}^2`)}
-                    <div style="margin: 10px 0; font-weight: bold; color: ${dir.status === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: center;">
+                    <div style="margin: 10px 0; font-weight: bold; color: ${dir.status === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: left;">
                         Result: ${kxInline(`\\tau_v ${dir.status === 'OK' ? '\\le' : '>'} k \\tau_c`)} &rarr; ${dir.status}
                     </div>
                 </div>
@@ -258,7 +257,7 @@ function flexuralDepthSection(r: any): string {
                 <div style="flex: 1;">
                     ${kx(`d_{req} = \\sqrt{\\frac{M_{u,max} \\times 10^6}{R_u b}} = ${r.flexDepthCheck.d_req} \\text{ mm}`)}
                     ${kx(`d_{prov} = ${r.flexDepthCheck.d_provided} \\text{ mm}`)}
-                    <div style="margin-top: 10px; font-weight: bold; color: ${r.flexDepthCheck.status === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: center;">
+                    <div style="margin-top: 10px; font-weight: bold; color: ${r.flexDepthCheck.status === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: left;">
                         Result: ${kxInline(`d_{prov} ${r.flexDepthCheck.status === 'OK' ? '\\ge' : '<'} d_{req}`)} &rarr; ${r.flexDepthCheck.status}
                     </div>
                 </div>

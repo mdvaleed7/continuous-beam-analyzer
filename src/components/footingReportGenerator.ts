@@ -29,7 +29,6 @@ export async function generateFootingReport(config: any, results: any[], isPrevi
             <title>Isolated Footing Design Report</title>
             <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css" />
             ${REPORT_CSS}
-            <style>.katex-display { text-align: left !important; margin: 10px 0 !important; }</style>
         </head>
         <body>
             <div class="report-container">
@@ -113,7 +112,7 @@ function oneWayShearBlock(label: string, rDir: any): string {
                 </div>
                 <div style="flex: 1;">
                     ${kx(`\\tau_c = ${rDir.tau_c} \\text{ N/mm}^2`)}
-                    <div style="margin: 10px 0; font-weight: bold; color: ${rDir.status === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: center;">
+                    <div style="margin: 10px 0; font-weight: bold; color: ${rDir.status === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: left;">
                         Result: ${kxInline(`\\tau_v ${rDir.status === 'OK' ? '\\le' : '>'} \\tau_c`)} &rarr; ${rDir.status}
                     </div>
                 </div>
@@ -189,7 +188,7 @@ function generateFlatFootingSection(r: any, mat: any): string {
                         ${kx(`u = ${r.punchingShear.perimeter_u} \\text{ mm} \\quad (\\text{perimeter})`)}
                         ${kx(`\\tau_v = \\frac{V_u}{u \\times d} = ${r.punchingShear.tau_v} \\text{ N/mm}^2`)}
                         ${kx(`\\tau_c = 0.25\\sqrt{f_{ck}} = ${r.punchingShear.tau_c} \\text{ N/mm}^2`)}
-                        <div style="margin-top: 15px; font-weight: bold; color: ${r.punchingShear.status === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: center;">
+                        <div style="margin-top: 15px; font-weight: bold; color: ${r.punchingShear.status === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: left;">
                             Result: ${kxInline(`\\tau_v ${r.punchingShear.tau_v <= r.punchingShear.tau_c ? '\\le' : '>'} \\tau_c`)} &rarr; ${r.punchingShear.status}
                         </div>
                     </div>
@@ -302,7 +301,7 @@ function generateSlopeFootingSection(r: any, mat: any): string {
                         ${kx(`u = ${r.punchingShear.perimeter_u} \\text{ mm}`)}
                         ${kx(`\\tau_v = ${r.punchingShear.tau_v} \\text{ N/mm}^2`)}
                         ${kx(`\\tau_c = ${r.punchingShear.tau_c} \\text{ N/mm}^2`)}
-                        <div style="margin-top: 15px; font-weight: bold; color: ${r.punchingShear.status === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: center;">
+                        <div style="margin-top: 15px; font-weight: bold; color: ${r.punchingShear.status === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: left;">
                             Result: ${kxInline(`\\tau_v ${r.punchingShear.tau_v <= r.punchingShear.tau_c ? '\\le' : '>'} \\tau_c`)} &rarr; ${r.punchingShear.status}
                         </div>
                     </div>
