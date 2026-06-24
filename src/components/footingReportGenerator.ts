@@ -29,6 +29,7 @@ export async function generateFootingReport(config: any, results: any[], isPrevi
             <title>Isolated Footing Design Report</title>
             <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css" />
             <style>
+                .katex-display { text-align: left !important; margin: 10px 0 !important; }
                 @page { margin: 15mm; size: A4 portrait; }
                 body {
                     -webkit-print-color-adjust: exact;
