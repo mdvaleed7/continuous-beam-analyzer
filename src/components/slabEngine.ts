@@ -796,9 +796,9 @@ export function analyzeSlab(config: SlabConfig): SlabAnalysisResult {
         { Lx, Ly, D, cover, fck, loadFactor, slabType: actualSlabType },
         {
             wTotal: wFactored,
-            barDia_x: bars_x_top.dia || bars_x_bot.dia,
-            Ast_x: Math.max(bars_x_top.Ast_provided, bars_x_bot.Ast_provided),
-            Ast_y: Math.max(bars_y_top.Ast_provided, bars_y_bot.Ast_provided),
+            barDia_x: bars_x_top.dia,
+            Ast_x: bars_x_top.Ast_provided,
+            Ast_y: bars_y_top.Ast_provided,
             grade,
         },
     );
