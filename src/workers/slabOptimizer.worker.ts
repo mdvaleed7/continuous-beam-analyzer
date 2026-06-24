@@ -45,13 +45,7 @@ import {
     type SlabConfig,
     type SlabOptimizeResult,
 } from '../components/slabEngine';
-
-// ─── Default cost ratio ───────────────────────────────────────────────────────
-/**
- * Default volumetric cost ratio r = (7850 × P_steel_per_kg) / P_concrete_per_m3.
- * At ₹57/kg steel and ₹5,000/m³ M20–M25 concrete: r ≈ 89.5 → rounded to 90.
- */
-const DEFAULT_COST_RATIO = 90;
+import { DEFAULT_COST_RATIO, sanitize } from './workerUtils';
 
 // ─── Message types ────────────────────────────────────────────────────────────
 
@@ -99,13 +93,7 @@ const ctx = self as unknown as {
     onmessage: ((ev: MessageEvent<SlabOptimizeRequest>) => void) | null;
 };
 
-/**
- * Strip all non-cloneable values before posting via structured-clone.
- * Slab results contain no closures, but this guard is kept for safety.
- */
-function sanitizeResultForPost(result: SlabOptimizeResult): SlabOptimizeResult {
-    return JSON.parse(JSON.stringify(result));
-}
+
 
 // ─── Message handler ──────────────────────────────────────────────────────────
 
@@ -130,7 +118,7 @@ ctx.onmessage = (ev: MessageEvent<SlabOptimizeRequest>) => {
                 ctx.postMessage({ type: 'progress', done, total, feasible });
             },
         );
-        ctx.postMessage({ type: 'done', result: sanitizeResultForPost(result) });
+        ctx.postMessage({ type: 'done', result: sanitize(result) });
     } catch (err) {
         ctx.postMessage({
             type: 'error',

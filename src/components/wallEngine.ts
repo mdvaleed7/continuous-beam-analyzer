@@ -16,7 +16,8 @@ import {
     type ConcreteGrade,
     type SteelGrade,
 } from '../lib/is456';
-import { computeCostIndex } from './economicOptimization';
+// ponytail: was economicOptimization.ts — one line covers it
+const computeCostIndex = (vol: number, steel: number, r = 90) => vol + steel * (r / 7850);
 
 // ───────────────────── Types ────────────────────────────────────────────────────────────
 

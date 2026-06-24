@@ -47,14 +47,7 @@ import {
     type FootingOptimizeParams,
     type FootingOptimizeResult,
 } from '../components/footingEngine';
-
-// ─── Default cost ratio ───────────────────────────────────────────────────────
-/**
- * Default volumetric cost ratio r = (7850 × P_steel_per_kg) / P_concrete_per_m3.
- * At ₹57/kg steel and ₹5,000/m³ M20–M25 concrete: r ≈ 89.5.
- * Round to 90 for a clean default. Caller may override via the costRatio field.
- */
-const DEFAULT_COST_RATIO = 90;
+import { DEFAULT_COST_RATIO, sanitize } from './workerUtils';
 
 // ─── Message types ────────────────────────────────────────────────────────────
 
@@ -97,13 +90,7 @@ const ctx = self as unknown as {
     onmessage: ((ev: MessageEvent<FootingOptimizeRequest>) => void) | null;
 };
 
-/**
- * Deep-strip all non-cloneable values (function closures, Fraction objects)
- * from the result before posting via structured-clone.
- */
-function sanitizeResultForPost(result: FootingOptimizeResult): FootingOptimizeResult {
-    return JSON.parse(JSON.stringify(result));
-}
+
 
 // ─── Message handler ──────────────────────────────────────────────────────────
 
@@ -123,7 +110,7 @@ ctx.onmessage = (ev: MessageEvent<FootingOptimizeRequest>) => {
                 ctx.postMessage({ type: 'progress', done, total, feasible });
             },
         );
-        ctx.postMessage({ type: 'done', result: sanitizeResultForPost(result) });
+        ctx.postMessage({ type: 'done', result: sanitize(result) });
     } catch (err) {
         ctx.postMessage({
             type: 'error',

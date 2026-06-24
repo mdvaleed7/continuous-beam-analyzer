@@ -37,61 +37,49 @@ export default function WallAnalyzer() {
     const workerRef = useRef<Worker | null>(null);
     const initialized = useRef(false);
     const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    // PERF-002: guards so the canvas / design table are only re-rendered when the
-    // analysis RESULT actually changes — never on incidental re-renders (e.g. PDF
-    // modal open/close, optBounds typing, hover state). We keep the reference of
-    // the last-drawn result and coalesce draws into a single requestAnimationFrame.
     const lastDrawnResult = useRef<any>(null);
     const rafRef = useRef<number | null>(null);
+
+    // Shared worker factory — extracted to avoid duplicating the onmessage/onerror
+    // handler verbatim in both the mount useEffect and handleCancelOptimize.
+    const createWorker = useCallback(() => {
+        const worker = new Worker(new URL('../workers/wallOptimizer.worker.ts', import.meta.url));
+        worker.onmessage = (e: MessageEvent) => {
+            const msg = e.data;
+            if (msg.type === 'progress') {
+                setOptProgress({ done: msg.done, total: msg.total, feasible: msg.feasible });
+            } else if (msg.type === 'done') {
+                setOptRunning(false);
+                setOptProgress(null);
+                setOptResult(msg.result);
+                const optContainer = document.getElementById('wall-opt-table');
+                if (optContainer) renderOptimizationTable(optContainer, msg.result);
+                if (msg.result.optimum) {
+                    const newZones = zones.map((z: any, i: number) => isTapered
+                        ? { ...z, thicknessTop: msg.result.optimum?.thicknesses[i], thicknessBot: msg.result.optimum?.thicknesses[i + 1] }
+                        : { ...z, thickness: msg.result.optimum?.thicknesses[i] });
+                    setZones(newZones as any);
+                }
+            } else if (msg.type === 'error') {
+                setOptRunning(false);
+                setOptProgress(null);
+                setError(msg.error);
+                logger.error('Worker error:', msg.error);
+            }
+        };
+        worker.onerror = (e) => {
+            setOptRunning(false);
+            setOptProgress(null);
+            setError('Worker error: ' + e.message);
+            logger.error('Worker error:', e);
+        };
+        return worker;
+    }, [zones, isTapered]);
 
     // PERF-01: create the worker on mount, terminate on unmount.
     useEffect(() => {
         try {
-            const worker = new Worker(
-                new URL('../workers/wallOptimizer.worker.ts', import.meta.url)
-            );
-            worker.onmessage = (e: MessageEvent) => {
-                const msg = e.data;
-                if (msg.type === 'progress') {
-                    setOptProgress({ done: msg.done, total: msg.total, feasible: msg.feasible });
-                } else if (msg.type === 'done') {
-                    setOptRunning(false);
-                    setOptProgress(null);
-                    setOptResult(msg.result);
-                    const optContainer = document.getElementById('wall-opt-table');
-                    if (optContainer) renderOptimizationTable(optContainer, msg.result);
-                    // If optimum found, update zones to show it
-                    if (msg.result.optimum) {
-                        const newZones = zones.map((z: any, i: number) => {
-                            if (isTapered) {
-                                return {
-                                    ...z,
-                                    thicknessTop: msg.result.optimum?.thicknesses[i],
-                                    thicknessBot: msg.result.optimum?.thicknesses[i + 1],
-                                };
-                            } else {
-                                return {
-                                    ...z,
-                                    thickness: msg.result.optimum?.thicknesses[i],
-                                };
-                            }
-                        });
-                        setZones(newZones as any);
-                    }
-                } else if (msg.type === 'error') {
-                    setOptRunning(false);
-                    setOptProgress(null);
-                    setError(msg.error);
-                    logger.error('Worker optimization error:', msg.error);
-                }
-            };
-            worker.onerror = (e) => {
-                setOptRunning(false);
-                setOptProgress(null);
-                setError('Worker error: ' + e.message);
-                logger.error('Worker error:', e);
-            };
-            workerRef.current = worker;
+            workerRef.current = createWorker();
         } catch (e: any) {
             logger.warn('Could not create optimizer worker, falling back to sync:', e);
             workerRef.current = null;
@@ -102,7 +90,7 @@ export default function WallAnalyzer() {
                 workerRef.current = null;
             }
         };
-    }, [zones, isTapered]);
+    }, [createWorker]);
 
     // Load combination presets
     const handleLoadCombChange = useCallback((mode: string) => {
@@ -280,45 +268,11 @@ export default function WallAnalyzer() {
         setOptProgress(null);
         // Recreate the worker for the next run
         try {
-            const worker = new Worker(
-                new URL('../workers/wallOptimizer.worker.ts', import.meta.url)
-            );
-            worker.onmessage = (e: MessageEvent) => {
-                const msg = e.data;
-                if (msg.type === 'progress') {
-                    setOptProgress({ done: msg.done, total: msg.total, feasible: msg.feasible });
-                } else if (msg.type === 'done') {
-                    setOptRunning(false);
-                    setOptProgress(null);
-                    setOptResult(msg.result);
-                    const optContainer = document.getElementById('wall-opt-table');
-                    if (optContainer) renderOptimizationTable(optContainer, msg.result);
-                    if (msg.result.optimum) {
-                        const newZones = zones.map((z: any, i: number) => {
-                            if (isTapered) {
-                                return { ...z, thicknessTop: msg.result.optimum?.thicknesses[i], thicknessBot: msg.result.optimum?.thicknesses[i + 1] };
-                            } else {
-                                return { ...z, thickness: msg.result.optimum?.thicknesses[i] };
-                            }
-                        });
-                        setZones(newZones as any);
-                    }
-                } else if (msg.type === 'error') {
-                    setOptRunning(false);
-                    setOptProgress(null);
-                    setError(msg.error);
-                }
-            };
-            worker.onerror = (e) => {
-                setOptRunning(false);
-                setOptProgress(null);
-                setError('Worker error: ' + e.message);
-            };
-            workerRef.current = worker;
+            workerRef.current = createWorker();
         } catch (e: any) {
             logger.warn('Could not recreate optimizer worker:', e);
         }
-    }, [zones, isTapered]);
+    }, [createWorker]);
 
     // PDF preview handler
     const handlePreviewReport = useCallback(async () => {

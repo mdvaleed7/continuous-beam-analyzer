@@ -238,21 +238,6 @@ export function renderSpanCardsHTML(result: any, wVal: number, LVal: any): strin
 
 // ───────────────────── Validation ─────────────────────
 
-const WB = {
-    UDL_fixed: {
-        1: { Ra: [5, 8], Ma: [-1, 8], Rb: [3, 8] },
-        2: { Ra: [13, 28], Ma: [-1, 14], Rb: [8, 7], Rc: [11, 28] },
-        3: { Ra: [53, 104], Ma: [-9, 104], Rb: [25, 26], Rc: [59, 52], Rd: [41, 104] },
-        4: { Ra: [193, 388], Ma: [-8, 97], Rb: [98, 97], Rc: [187, 194], Rd: [110, 97], Re: [153, 388] }
-    },
-    UVL_global_fixed: {
-        1: { Ra: [2, 5], Ma: [-1, 15], Rb: [1, 10] },
-        2: { Ra: [25, 56], Ma: [-31, 420], Rb: [18, 35], Rc: [11, 280] },
-        3: { Ra: [181, 390], Ma: [-1, 13], Rb: [44, 65], Rc: [43, 130], Rd: [11, 390] },
-        4: { Ra: [3671, 7760], Ma: [-457, 5820], Rb: [147, 194], Rc: [483, 970], Rd: [243, 970], Re: [161, 7760] }
-    }
-};
-
 export function renderValidationHTML(result: any): string {
     const { nSpans, spanLoads, reactions, alphas } = result;
     const isTapered = !!(result.spanTapers && result.spanTapers.some((t: any) => t));

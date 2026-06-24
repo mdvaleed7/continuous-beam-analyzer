@@ -65,14 +65,7 @@ import {
     type WallConfig,
     type OptimizeResult,
 } from '../components/wallEngine';
-
-// ─── Default cost ratio ───────────────────────────────────────────────────────
-/**
- * Default volumetric cost ratio r = (7850 × P_steel_per_kg) / P_concrete_per_m3.
- * At ₹57/kg steel and ₹5,000/m³ M20–M25 concrete: r ≈ 89.5 → rounded to 90.
- * Caller may override via the costRatio field in the request message.
- */
-const DEFAULT_COST_RATIO = 90;
+import { DEFAULT_COST_RATIO, sanitize } from './workerUtils';
 
 // ─── Message types ────────────────────────────────────────────────────────────
 
@@ -117,24 +110,7 @@ const ctx = self as unknown as {
     onmessage: ((ev: MessageEvent<OptimizeRequest>) => void) | null;
 };
 
-/**
- * Deep-strip ALL non-cloneable content from the optimization result before
- * posting. postMessage uses structured cloning which cannot clone functions.
- *
- * The OptimizeResult tree contains function closures in several places:
- *   - beamResult.spans[k].V(x), .M(x) — beam engine shear/moment functions
- *   - config._mesh.round6 — pressure mesh rounding helper
- *   - config._mesh.zoneOfDepth — pressure mesh zone lookup
- *   - Fraction objects (F class) with .add(), .mul() etc. methods
- *
- * JSON.parse(JSON.stringify()) strips all functions, undefined, and symbols,
- * leaving only plain data. The main thread only reads plain data from the
- * result (thicknesses, concreteVol, steelWeight, maxUtilization, costIndex),
- * so this is safe.
- */
-function sanitizeResultForPost(result: OptimizeResult): OptimizeResult {
-    return JSON.parse(JSON.stringify(result));
-}
+
 
 // ─── Message handler ──────────────────────────────────────────────────────────
 
@@ -153,8 +129,7 @@ ctx.onmessage = (ev: MessageEvent<OptimizeRequest>) => {
                 ctx.postMessage({ type: 'progress', done, total, feasible });
             },
         );
-        // Strip beamResult (contains function closures) before posting.
-        const safeResult = sanitizeResultForPost(result);
+        const safeResult = sanitize(result);
         ctx.postMessage({ type: 'done', result: safeResult });
     } catch (err) {
         ctx.postMessage({
