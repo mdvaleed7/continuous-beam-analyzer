@@ -14,6 +14,7 @@ import {
     TAU_C_MAX,
     CREEP_COEFF,
     getTauC,
+    getMuLimCoeff,
     flexuralDesign,
     selectBars,
     computeCostIndex,
@@ -779,6 +780,17 @@ export function analyzeSlab(config: SlabConfig): SlabAnalysisResult {
     const bars_compression: BarSelection | null = isCantilever ? bars_x_bot : null;
 
     const supportCondDefl: SupportCondition = effectiveSupportCond;
+
+    const maxMu = Math.max(Mx_pos || 0, My_pos || 0, Math.abs(Mx_neg || 0), Math.abs(My_neg || 0));
+    const coeff = getMuLimCoeff(fy);
+    const d_req_flex = Math.sqrt((maxMu * 1e6) / (coeff * fck * 1000));
+    const flexDepthCheck: FlexureDepthCheck = {
+        Mu_max: Math.round(maxMu * 100) / 100,
+        coeff,
+        d_req: Math.round(d_req_flex),
+        d_provided: dx_actual,
+        status: dx_actual >= d_req_flex ? 'OK' : 'FAIL',
+    };
 
     const deflection = annexCDeflection(
         { Lx, D, cover, fck, fy, ageOfLoading },
