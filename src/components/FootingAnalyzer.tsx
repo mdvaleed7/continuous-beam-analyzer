@@ -723,7 +723,7 @@ export default function FootingAnalyzer() {
                                             </button>
                                         </div>
                                     </div>
-                                    <iframe srcDoc={pdfPreviewUrl}
+                                    <iframe src={pdfPreviewUrl}
                                         style={{ width: '100%', height: 'calc(100% - 60px)', border: 'none', borderRadius: '0 0 12px 12px', background: 'white' }}
                                         title="PDF Preview" />
                                 </div>

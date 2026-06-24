@@ -766,7 +766,7 @@ export default function SlabAnalyzer() {
                                         </div>
                                     </div>
                                     <iframe
-                                        srcDoc={pdfPreviewUrl}
+                                        src={pdfPreviewUrl}
                                         className="iframe-modal"
                                         title="PDF Preview"
                                     />

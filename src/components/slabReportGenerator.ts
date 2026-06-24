@@ -64,12 +64,12 @@ export async function generateSlabReport(config: any, results: any[], isPreview:
         </html>
     `;
 
+    const blob = new Blob([htmlContent], { type: 'text/html' });
+    const blobUrl = URL.createObjectURL(blob);
+
     if (isPreview) {
-        const dataUrl = 'data:text/html;charset=utf-8,' + encodeURIComponent(htmlContent);
-        return Promise.resolve(dataUrl);
+        return Promise.resolve(blobUrl);
     } else {
-        const blob = new Blob([htmlContent], { type: 'text/html' });
-        const blobUrl = URL.createObjectURL(blob);
         return new Promise<null>((resolve) => {
             let settled = false;
             const cleanup = (frame: any) => {
