@@ -47,14 +47,14 @@ export async function generateWallReport(config: any, result: any, canvas: HTMLC
     const reportZones = result.zoneDesigns.map(toReportZone);
 
     let html = `
-    <div id="pdf-report" style="padding: 20px 30px; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #111; font-size: 11px; line-height: 1.4; background: white;">
+    <div id="pdf-report" style="padding: 20px 30px; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #111; font-size: 14px; line-height: 1.5; background: white;">
         <div style="text-align: center; margin-bottom: 20px;">
-            <h1 style="color: #0f172a; border-bottom: 2px solid #0f172a; padding-bottom: 10px; margin-bottom: 5px; font-size: 22px;">Basement Wall Design Report</h1>
-            <p style="color: #475569; margin: 0; font-size: 10px;">Design Code: IS 456:2000 | Generated: ${new Date().toLocaleString()}</p>
+            <h1 style="color: #0f172a; border-bottom: 2px solid #0f172a; padding-bottom: 10px; margin-bottom: 5px; font-size: 28px;">Basement Wall Design Report</h1>
+            <p style="color: #475569; margin: 0; font-size: 13px;">Design Code: IS 456:2000 | Generated: ${new Date().toLocaleString()}</p>
         </div>
         
-        <h2 style="color: #0f172a; border-bottom: 1px solid #cbd5e1; padding-bottom: 4px; margin-top: 20px; font-size: 14px;">1. Input Parameters</h2>
-        <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 10px;">
+        <h2 style="color: #0f172a; border-bottom: 1px solid #cbd5e1; padding-bottom: 4px; margin-top: 20px; font-size: 18px;">1. Input Parameters</h2>
+        <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 13px;">
             <tr>
                 <td style="padding: 6px; border: 1px solid #e2e8f0; font-weight: bold; width: 25%;">Concrete Grade</td>
                 <td style="padding: 6px; border: 1px solid #e2e8f0; width: 25%;">${material.grade}</td>
@@ -87,8 +87,8 @@ export async function generateWallReport(config: any, result: any, canvas: HTMLC
             </tr>
         </table>
         
-        <h2 style="color: #0f172a; border-bottom: 1px solid #cbd5e1; padding-bottom: 4px; font-size: 14px;">2. Global Stability & Pressures</h2>
-        <table style="width: 100%; font-size: 10px; margin-bottom: 20px;">
+        <h2 style="color: #0f172a; border-bottom: 1px solid #cbd5e1; padding-bottom: 4px; font-size: 18px;">2. Global Stability & Pressures</h2>
+        <table style="width: 100%; font-size: 13px; margin-bottom: 20px;">
             <tr><td style="padding: 4px 0;"><strong>Total Wall Height:</strong> ${(result.totalHeight ?? 0).toFixed(2)} m</td>
             <td style="padding: 4px 0;"><strong>Total Lateral Force:</strong> ${(result.totalLateralForce ?? 0).toFixed(2)} kN/m</td></tr>
             <tr><td style="padding: 4px 0;"><strong>Center of Pressure:</strong> ${(result.centerOfPressure ?? 0).toFixed(2)} m (from base)</td>
@@ -96,14 +96,14 @@ export async function generateWallReport(config: any, result: any, canvas: HTMLC
         </table>
 
         ${canvas ? `
-        <h2 style="color: #0f172a; border-bottom: 1px solid #cbd5e1; padding-bottom: 4px; font-size: 14px;">3. Wall Schematic & Diagrams</h2>
+        <h2 style="color: #0f172a; border-bottom: 1px solid #cbd5e1; padding-bottom: 4px; font-size: 18px;">3. Wall Schematic & Diagrams</h2>
         <div style="text-align: center; margin: 15px 0;">
             <img src="${canvas.toDataURL('image/png')}" style="max-width: 90%; max-height: 350px; border: 1px solid #e2e8f0; padding: 10px; background: #fff;" />
         </div>
         ` : ''}
 
         <div style="page-break-before: always;"></div>
-        <h2 style="color: #0f172a; border-bottom: 1px solid #cbd5e1; padding-bottom: 4px; font-size: 14px;">4. Zone-by-Zone IS 456 Design</h2>
+        <h2 style="color: #0f172a; border-bottom: 1px solid #cbd5e1; padding-bottom: 4px; font-size: 18px;">4. Zone-by-Zone IS 456 Design</h2>
     `;
     
     reportZones.forEach((z: any, i: number) => {
@@ -116,7 +116,7 @@ export async function generateWallReport(config: any, result: any, canvas: HTMLC
         
         html += `
         <div style="margin-bottom: 20px; page-break-inside: avoid; border: 1px solid #e2e8f0; border-radius: 6px; overflow: hidden;">
-            <h3 style="background: #f1f5f9; padding: 8px 15px; margin: 0; color: #0f172a; font-size: 12px; border-bottom: 1px solid #e2e8f0;">
+            <h3 style="background: #f1f5f9; padding: 8px 15px; margin: 0; color: #0f172a; font-size: 16px; border-bottom: 1px solid #e2e8f0;">
                 Zone ${i + 1} (${z.topDepth.toFixed(2)} m to ${z.bottomDepth.toFixed(2)} m) &mdash; Thickness: ${z.thickness} mm
             </h3>
             
@@ -124,40 +124,40 @@ export async function generateWallReport(config: any, result: any, canvas: HTMLC
                 <table style="width: 100%; border-collapse: collapse; margin-bottom: 15px;">
                     <tr>
                         <td style="width: 50%; vertical-align: top; padding-right: 10px;">
-                            <h4 style="color: #334155; margin-top: 0; margin-bottom: 10px; font-size: 11px;">A. Flexure (Earth Face / Hogging)</h4>
+                            <h4 style="color: #334155; margin-top: 0; margin-bottom: 10px; font-size: 15px;">A. Flexure (Earth Face / Hogging)</h4>
                             ${kx(`d_{eff} = ${d_hog} \\text{ mm}`)}
                             ${kx(`M_u = ${z.flex_hogging.Mu.toFixed(2)}\\text{ kNm}, \\; M_{u,lim} = ${z.flex_hogging.Mu_lim.toFixed(2)}\\text{ kNm}`)}
                             ${kx(`d_{req} = \\sqrt{\\frac{M_u}{M_{u,lim}}} \\times d = \\sqrt{\\frac{${z.flex_hogging.Mu.toFixed(2)}}{${z.flex_hogging.Mu_lim.toFixed(2)}}} \\times ${d_hog} = ${(d_hog * Math.sqrt(z.flex_hogging.utilization || 0)).toFixed(1)} \\text{ mm}`)}
-                            <div style="font-size: 9px; overflow-x: auto; margin-bottom: 5px;">
+                            <div style="font-size: 12px; overflow-x: auto; margin-bottom: 5px;">
                                 ${kx(`A_{st} = \\frac{0.5 f_{ck}}{f_y} \\left[ 1 - \\sqrt{1 - \\frac{4.6 M_u}{f_{ck} b d^2}} \\right] bd`)}
                                 ${kx(`A_{st} = \\frac{0.5(${material.fck})}{${material.fy}} \\left[ 1 - \\sqrt{1 - \\frac{4.6(${z.flex_hogging.Mu.toFixed(2)} \\times 10^6)}{${material.fck}(${b})(${d_hog})^2}} \\right] (${b})(${d_hog})`)}
                             </div>
                             ${kx(`A_{st,req} = ${z.flex_hogging.Ast_req} \\text{ mm}^2\\text{/m} \\quad (${z.flex_hogging.governs === 'minimum' ? '\\text{Min. governs}' : '\\text{Formula}'})`)}
                             <div style="margin-top: 10px; padding: 6px; background: #f8fafc; border-left: 3px solid #0ea5e9;">
                                 <strong>Provided:</strong> ${z.mainBars_hogging.label} <br/>
-                                <span style="color: #64748b; font-size: 9px;">(${kxInline(`A_{st} = ${z.mainBars_hogging.Ast_provided} \\text{ mm}^2\\text{/m}`)})</span>
+                                <span style="color: #64748b; font-size: 12px;">(${kxInline(`A_{st} = ${z.mainBars_hogging.Ast_provided} \\text{ mm}^2\\text{/m}`)})</span>
                             </div>
                         </td>
                         <td style="width: 50%; vertical-align: top; padding-left: 10px; border-left: 1px dashed #e2e8f0;">
-                            <h4 style="color: #334155; margin-top: 0; margin-bottom: 10px; font-size: 11px;">B. Flexure (Inner Face / Sagging)</h4>
+                            <h4 style="color: #334155; margin-top: 0; margin-bottom: 10px; font-size: 15px;">B. Flexure (Inner Face / Sagging)</h4>
                             ${kx(`d_{eff} = ${d_sag} \\text{ mm}`)}
                             ${kx(`M_u = ${z.flex_sagging.Mu.toFixed(2)}\\text{ kNm}, \\; M_{u,lim} = ${z.flex_sagging.Mu_lim.toFixed(2)}\\text{ kNm}`)}
                             ${kx(`d_{req} = \\sqrt{\\frac{M_u}{M_{u,lim}}} \\times d = \\sqrt{\\frac{${z.flex_sagging.Mu.toFixed(2)}}{${z.flex_sagging.Mu_lim.toFixed(2)}}} \\times ${d_sag} = ${(d_sag * Math.sqrt(z.flex_sagging.utilization || 0)).toFixed(1)} \\text{ mm}`)}
-                            <div style="font-size: 9px; overflow-x: auto; margin-bottom: 5px;">
+                            <div style="font-size: 12px; overflow-x: auto; margin-bottom: 5px;">
                                 ${kx(`A_{st} = \\frac{0.5 f_{ck}}{f_y} \\left[ 1 - \\sqrt{1 - \\frac{4.6 M_u}{f_{ck} b d^2}} \\right] bd`)}
                                 ${kx(`A_{st} = \\frac{0.5(${material.fck})}{${material.fy}} \\left[ 1 - \\sqrt{1 - \\frac{4.6(${z.flex_sagging.Mu.toFixed(2)} \\times 10^6)}{${material.fck}(${b})(${d_sag})^2}} \\right] (${b})(${d_sag})`)}
                             </div>
                             ${kx(`A_{st,req} = ${z.flex_sagging.Ast_req} \\text{ mm}^2\\text{/m} \\quad (${z.flex_sagging.governs === 'minimum' ? '\\text{Min. governs}' : '\\text{Formula}'})`)}
                             <div style="margin-top: 10px; padding: 6px; background: #f8fafc; border-left: 3px solid #0ea5e9;">
                                 <strong>Provided:</strong> ${z.mainBars_sagging.label || z.mainBars_sagging.dia+'mm@'+z.mainBars_sagging.spacing} <br/>
-                                <span style="color: #64748b; font-size: 9px;">(${kxInline(`A_{st} = ${z.mainBars_sagging.Ast_provided} \\text{ mm}^2\\text{/m}`)})</span>
+                                <span style="color: #64748b; font-size: 12px;">(${kxInline(`A_{st} = ${z.mainBars_sagging.Ast_provided} \\text{ mm}^2\\text{/m}`)})</span>
                             </div>
                         </td>
                     </tr>
                 </table>
 
                 <div style="border-top: 1px solid #e2e8f0; padding-top: 15px;">
-                    <h4 style="color: #334155; margin-top: 0; margin-bottom: 10px; font-size: 11px;">C. Shear Check</h4>
+                    <h4 style="color: #334155; margin-top: 0; margin-bottom: 10px; font-size: 15px;">C. Shear Check</h4>
                     <div style="display: flex; gap: 20px;">
                         <div style="flex: 1;">
                             ${kx(`V_u = ${Vu_str} \\text{ kN}`)}

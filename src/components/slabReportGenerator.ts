@@ -75,10 +75,10 @@ function deflectionSection(r: any): string {
             <div class="two-col">
                 <div class="col col-left">
                     <h4>A. Short-Term Deflection</h4>
-                    ${calcRow('I<sub>gr</sub>', (r.deflection.Igr / 1e6).toFixed(2), '&times;10&sup3; mm&sup4;')}
+                    ${calcRow('I<sub>gr</sub>', (r.deflection.Igr / 1e6).toFixed(2), '&times;10&sup3; mm<sup>4</sup>')}
                     ${calcRow('M<sub>cr</sub>', r.deflection.Mcr, 'kN&middot;m')}
-                    ${calcRow('I<sub>cr</sub>', (r.deflection.Icr / 1e6).toFixed(2), '&times;10&sup3; mm&sup4;')}
-                    ${calcRow('I<sub>eff</sub>', (r.deflection.Ieff / 1e6).toFixed(2), '&times;10&sup3; mm&sup4;')}
+                    ${calcRow('I<sub>cr</sub>', (r.deflection.Icr / 1e6).toFixed(2), '&times;10&sup3; mm<sup>4</sup>')}
+                    ${calcRow('I<sub>eff</sub>', (r.deflection.Ieff / 1e6).toFixed(2), '&times;10&sup3; mm<sup>4</sup>')}
                     ${calcRow('a<sub>i</sub> (short-term)', r.deflection.ai, 'mm')}
 
                     <h4>B. Shrinkage</h4>
@@ -90,7 +90,7 @@ function deflectionSection(r: any): string {
                     <h4>C. Creep</h4>
                     ${calcRow('&theta;', r.deflection.theta)}
                     ${calcRow('E<sub>ce</sub>', Math.round(r.deflection.Ece), 'N/mm&sup2;')}
-                    ${calcRow('I<sub>cr,lt</sub>', (r.deflection.Icr_lt / 1e6).toFixed(2), '&times;10&sup3; mm&sup4;')}
+                    ${calcRow('I<sub>cr,lt</sub>', (r.deflection.Icr_lt / 1e6).toFixed(2), '&times;10&sup3; mm<sup>4</sup>')}
                     ${calcRow('a<sub>creep</sub>', r.deflection.a_creep, 'mm')}
 
                     <h4>D. Summary</h4>
