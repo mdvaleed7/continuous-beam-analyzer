@@ -524,6 +524,7 @@ interface ShearConfig {
     cover: number;
     fck: number;
     loadFactor?: number;
+    slabType: SlabType;
 }
 
 interface ShearDesign {
@@ -542,8 +543,9 @@ function shearCheck(config: ShearConfig, design: ShearDesign): ShearResult {
     const dx = D - cover - (barDia_x_bot || 10) / 2;
     const dy = dx - (barDia_x_bot || 10);
 
+    const isTwoWay = config.slabType === 'two-way';
     const Vu_x = wTotal * (Lx / 1000) / 2;
-    const Vu_y = wTotal * (Ly / 1000) / 2;
+    const Vu_y = isTwoWay ? wTotal * (Ly / 1000) / 2 : 0;
 
     const pt_x = 100 * Ast_x_bot / (b * dx);
     const pt_y = 100 * Ast_y_bot / (b * dy);
@@ -558,7 +560,7 @@ function shearCheck(config: ShearConfig, design: ShearDesign): ShearResult {
     const k = getDepthFactorK(D);
 
     const status_x: DesignStatus = (tau_v_x <= k * tau_c_x) ? 'OK' : (tau_v_x <= tau_c_max ? 'DESIGN' : 'FAIL');
-    const status_y: DesignStatus = (tau_v_y <= k * tau_c_y) ? 'OK' : (tau_v_y <= tau_c_max ? 'DESIGN' : 'FAIL');
+    const status_y: DesignStatus = isTwoWay ? ((tau_v_y <= k * tau_c_y) ? 'OK' : (tau_v_y <= tau_c_max ? 'DESIGN' : 'FAIL')) : 'OK';
 
     return {
         shortDir: {
@@ -791,7 +793,7 @@ export function analyzeSlab(config: SlabConfig): SlabAnalysisResult {
     );
 
     const shear = shearCheck(
-        { Lx, Ly, D, cover, fck, loadFactor },
+        { Lx, Ly, D, cover, fck, loadFactor, slabType: actualSlabType },
         {
             wTotal: wFactored,
             barDia_x_bot: bars_x_bot.dia,

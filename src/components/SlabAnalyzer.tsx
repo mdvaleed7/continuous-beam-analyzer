@@ -693,19 +693,21 @@ export default function SlabAnalyzer() {
                                             </span>
                                         </td>
                                     </tr>
-                                    <tr>
-                                        <td>Long (L<sub>y</sub>)</td>
-                                        <td>{r.shear.longDir.Vu}</td>
-                                        <td>{r.shear.longDir.tau_v}</td>
-                                        <td>{r.shear.longDir.tau_c}</td>
-                                        <td>{r.shear.longDir.k}</td>
-                                        <td>{r.shear.longDir.allowable}</td>
-                                        <td>
-                                            <span className={`chip ${r.shear.longDir.status === 'OK' ? 'chip-safe' : 'chip-fail'}`}>
-                                                {r.shear.longDir.status}
-                                            </span>
-                                        </td>
-                                    </tr>
+                                    {r.slabType === 'two-way' && (
+                                        <tr>
+                                            <td>Long (L<sub>y</sub>)</td>
+                                            <td>{r.shear.longDir.Vu}</td>
+                                            <td>{r.shear.longDir.tau_v}</td>
+                                            <td>{r.shear.longDir.tau_c}</td>
+                                            <td>{r.shear.longDir.k}</td>
+                                            <td>{r.shear.longDir.allowable}</td>
+                                            <td>
+                                                <span className={`chip ${r.shear.longDir.status === 'OK' ? 'chip-safe' : 'chip-fail'}`}>
+                                                    {r.shear.longDir.status}
+                                                </span>
+                                            </td>
+                                        </tr>
+                                    )}
                                 </tbody>
                             </table>
                         </div>
