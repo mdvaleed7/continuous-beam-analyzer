@@ -1,6 +1,10 @@
 // ponytail: shared CSS for slab + footing report generators.
 // Previously duplicated ~40 identical lines in each generator.
 
+// NOTE: KaTeX CSS stays as a CDN <link> in each report — inlining via `?raw`
+// breaks font loading (the CSS has relative @font-face URLs that don't resolve
+// inside the blob: iframe). See wallReportGenerator.ts for the same constraint.
+
 export const REPORT_CSS = `<style>
     @page { size: A4 portrait; margin: 15mm; }
     body {

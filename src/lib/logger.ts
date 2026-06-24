@@ -1,7 +1,6 @@
-const dev = process.env.NODE_ENV !== 'production';
-export const logger = {
-  error: (...a: unknown[]) => dev && console.error(...a),
-  warn:  (...a: unknown[]) => dev && console.warn(...a),
-  info:  (...a: unknown[]) => dev && console.info(...a),
-  debug: (...a: unknown[]) => dev && console.debug(...a),
-};
+// ponytail: was 7 lines with 4 separate guarded wrappers. Production-silent
+// console is one ternary — bind to console in dev, to no-ops in production.
+type Logger = Pick<Console, 'error' | 'warn' | 'info' | 'debug'>;
+const noop: (...a: unknown[]) => void = () => {};
+const sink: Logger = process.env.NODE_ENV !== 'production' ? console : { error: noop, warn: noop, info: noop, debug: noop };
+export const logger = sink;

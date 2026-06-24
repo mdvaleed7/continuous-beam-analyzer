@@ -1,6 +1,6 @@
 import katex from 'katex';
 import { logger } from '../lib/logger';
-import { inputTable } from './reportCss';
+import { REPORT_CSS, inputTable } from './reportCss';
 
 // ═══════════════════════════════════════════════════════════════
 //  SLAB REPORT GENERATOR — Detailed Mathematical Textbook Layout
@@ -28,36 +28,14 @@ export async function generateSlabReport(config: any, results: any[], isPreview:
             <meta charset="utf-8">
             <title>Slab Design Report</title>
             <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css" />
-            <style>
-                .katex-display { text-align: left !important; margin: 10px 0 !important; }
-                @page { margin: 15mm; size: A4 portrait; }
-                body {
-                    -webkit-print-color-adjust: exact;
-                    print-color-adjust: exact;
-                    background: white;
-                    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
-                    color: #111;
-                    margin: 0;
-                    line-height: 1.5;
-                }
-                .report-container { max-width: 800px; margin: 0 auto; padding: 20px 30px; }
-                .section-box { margin-bottom: 30px; }
-                .section-header { color: #0f172a; border-bottom: 1px solid #cbd5e1; padding-bottom: 4px; font-size: 18px; font-weight: bold; margin-bottom: 15px; }
-                .avoid-break { page-break-inside: avoid; }
-                .info-note { background: #f8fafc; border-left: 3px solid #0ea5e9; padding: 10px; font-size: 13px; color: #475569; margin-bottom: 15px; }
-                table.result-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 15px; }
-                table.result-table th { background: #f1f5f9; padding: 8px; text-align: left; border: 1px solid #e2e8f0; }
-                table.result-table td { padding: 8px; border: 1px solid #e2e8f0; }
-                @media print {
-                    .report-container { max-width: 100%; margin: 0; padding: 0; }
-                }
-            </style>
+            ${REPORT_CSS}
+            <style>.katex-display { text-align: left !important; margin: 10px 0 !important; }</style>
         </head>
         <body>
             <div class="report-container">
-                <div style="text-align: center; margin-bottom: 30px;">
-                    <h1 style="color: #0f172a; border-bottom: 2px solid #0f172a; padding-bottom: 10px; margin-bottom: 5px; font-size: 28px;">IS 456 Slab Design Report</h1>
-                    <p style="color: #475569; margin: 0; font-size: 13px;">Design Code: IS 456:2000 | Generated: ${new Date().toLocaleString()}</p>
+                <div class="report-header">
+                    <h1>IS 456 Slab Design Report</h1>
+                    <p>Design Code: IS 456:2000 | Generated: ${new Date().toLocaleString()}</p>
                 </div>
                 ${panelSections}
             </div>

@@ -124,8 +124,11 @@ session. The full audit report is at
   `__dirname`.
 - DOC-06: Created this `docs/STATUS.md` as the single source of truth.
 - PERF-02: Added 150 ms debounce to `BeamAnalyzer`'s analysis effect.
-- SEC-02: Added `src/lib/sanitize.js` (DOMPurify wrapper with allow-list
-  fallback) for future use on `dangerouslySetInnerHTML` paths.
+- SEC-02: ~~Added `src/lib/sanitize.js` (DOMPurify wrapper with allow-list
+  fallback) for future use on `dangerouslySetInnerHTML` paths.~~ Removed
+  2026-06-25 (ponytail: YAGNI — 127 lines of dead code with zero callers;
+  `dompurify` dependency dropped. Re-add a 3-line `DOMPurify.sanitize`
+  wrapper at the call site if/when an XSS sink is actually introduced).
 - SEC-03: Inlined KaTeX CSS into generated PDF HTML via `?raw` import,
   eliminating the `cdn.jsdelivr.net` dependency in PDF reports.
 - TEST-04: Added banner to `docs/VALIDATION.md` noting the original test
