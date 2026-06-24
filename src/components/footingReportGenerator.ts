@@ -6,7 +6,7 @@ import { REPORT_CSS as FOOTING_REPORT_CSS, calcRow, inputTable } from './reportC
 //  FOOTING REPORT GENERATOR — Detailed Mathematical Textbook Layout
 // ═══════════════════════════════════════════════════════════════
 
-const kx = (expr: string): string => katex.renderToString(expr, { throwOnError: false, displayMode: true });
+const kx = (expr: string): string => katex.renderToString(expr, { throwOnError: false, displayMode: true, fleqn: true });
 const kxInline = (expr: string): string => katex.renderToString(expr, { throwOnError: false, displayMode: false });
 
 function statusChip(status: string): string {

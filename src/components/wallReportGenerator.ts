@@ -2,7 +2,7 @@ import katex from 'katex';
 import { logger } from '../lib/logger';
 
 export async function generateWallReport(config: any, result: any, canvas: HTMLCanvasElement | null, previewMode: boolean = false): Promise<string | null | void> {
-    const kx = (expr: string): string => katex.renderToString(expr, { throwOnError: false, displayMode: true });
+    const kx = (expr: string): string => katex.renderToString(expr, { throwOnError: false, displayMode: true, fleqn: true });
     const kxInline = (expr: string): string => katex.renderToString(expr, { throwOnError: false, displayMode: false });
 
     // Defensive guard: bail out gracefully if the analysis result is missing the
@@ -47,6 +47,7 @@ export async function generateWallReport(config: any, result: any, canvas: HTMLC
     const reportZones = result.zoneDesigns.map(toReportZone);
 
     let html = `
+    <style>.katex-display { text-align: left !important; margin: 10px 0 !important; }</style>
     <div id="pdf-report" style="padding: 20px 30px; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #111; font-size: 14px; line-height: 1.5; background: white;">
         <div style="text-align: center; margin-bottom: 20px;">
             <h1 style="color: #0f172a; border-bottom: 2px solid #0f172a; padding-bottom: 10px; margin-bottom: 5px; font-size: 28px;">Basement Wall Design Report</h1>

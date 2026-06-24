@@ -6,7 +6,7 @@ import { inputTable } from './reportCss';
 //  SLAB REPORT GENERATOR — Detailed Mathematical Textbook Layout
 // ═══════════════════════════════════════════════════════════════
 
-const kx = (expr: string): string => katex.renderToString(expr, { throwOnError: false, displayMode: true });
+const kx = (expr: string): string => katex.renderToString(expr, { throwOnError: false, displayMode: true, fleqn: true });
 const kxInline = (expr: string): string => katex.renderToString(expr, { throwOnError: false, displayMode: false });
 
 function statusChip(status: string): string {
