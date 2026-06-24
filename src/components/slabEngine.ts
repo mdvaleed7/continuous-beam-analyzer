@@ -826,6 +826,7 @@ export function analyzeSlab(config: SlabConfig): SlabAnalysisResult {
         flex_x_bot, flex_y_bot, flex_x_top, flex_y_top,
         bars_x_bot, bars_y_bot, bars_x_top, bars_y_top,
         ldCheck,
+        flexDepthCheck,
         deflection,
         shear,
 
