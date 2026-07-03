@@ -150,14 +150,16 @@ export async function generateCantileverSlabPDF(input: CantileverSlabInput, resu
                             ? kx(`a_{total,net} = a_i + a_{creep} + a_{shrinkage} - a_{camber} = ${r.deflection.a_total.toFixed(2)} \\text{ mm} \\quad \\text{vs} \\quad L/250 = ${r.deflection.limit_total.toFixed(2)} \\text{ mm}`)
                             : kx(`a_{total} = a_i + a_{creep} + a_{shrinkage} = ${r.deflection.a_total.toFixed(2)} \\text{ mm} \\quad \\text{vs} \\quad L/250 = ${r.deflection.limit_total.toFixed(2)} \\text{ mm}`)
                         }
+                        <div style="font-weight: bold; color: ${r.deflection.status_total === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: left;">
+                            Result: ${kxInline(`a_{total} ${r.deflection.status_total === 'OK' ? '\\le' : '>'} ${r.deflection.limit_total} \\text{ mm}`)} &rarr; ${r.deflection.status_total}
+                        </div>
+                        <div style="margin-top:6px;"></div>
                         ${r.deflection.camber > 0
-                            ? kx(`a_{post,net} = a_{creep} + a_{shrinkage} - a_{camber} = ${r.deflection.a_post_construction.toFixed(2)} \\text{ mm} \\quad \\text{vs} \\quad L/350 = ${r.deflection.limit_post.toFixed(2)} \\text{ mm}`)
-                            : kx(`a_{post} = a_{creep} + a_{shrinkage} = ${r.deflection.a_post_construction.toFixed(2)} \\text{ mm} \\quad \\text{vs} \\quad L/350 = ${r.deflection.limit_post.toFixed(2)} \\text{ mm}`)
+                            ? kx(`a_{post,net} = a_{creep} + a_{shrinkage} - a_{camber} = ${r.deflection.a_post_construction.toFixed(2)} \\text{ mm}`)
+                            : kx(`a_{post} = a_{creep} + a_{shrinkage} = ${r.deflection.a_post_construction.toFixed(2)} \\text{ mm}`)
                         }
-                        <div style="margin-top:6px;">
-                            ${r.defl_safe
-                                ? `${statusChip(true, 'SAFE')} &nbsp; Total ${r.deflection.a_total.toFixed(2)} ≤ ${r.deflection.limit_total.toFixed(2)} mm &amp; Post-construction IGNORED`
-                                : `${statusChip(false, 'REVISE')} &nbsp; Total ${r.deflection.a_total.toFixed(2)} > ${r.deflection.limit_total.toFixed(2)} mm`}
+                        <div style="font-weight: bold; color: ${r.deflection.status_post === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: left;">
+                            Result: ${kxInline(`a_{post} ${r.deflection.status_post === 'OK' ? '\\le' : '>'} ${r.deflection.limit_post} \\text{ mm}`)} &rarr; ${r.deflection.status_post}
                         </div>
                     </div>
                 </div>

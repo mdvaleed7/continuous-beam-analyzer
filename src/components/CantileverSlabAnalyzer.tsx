@@ -358,11 +358,11 @@ export default function CantileverSlabAnalyzer() {
                                         {results.deflection.status_total}
                                     </span>
                                 </div>
-                                <div className="defl-result defl-ok opacity-70">
+                                <div className={`defl-result ${results.deflection.status_post === 'OK' ? 'defl-ok' : 'defl-fail'}`}>
                                     <span>{results.deflection.camber > 0 ? 'Net Post-construction' : 'Post-construction'}: {results.deflection.a_post_construction} mm</span>
                                     <span>Limit (L/350 or 20mm): {results.deflection.limit_post} mm</span>
-                                    <span className="chip chip-ignored">
-                                        IGNORED
+                                    <span className={`chip ${results.deflection.status_post === 'OK' ? 'chip-safe' : 'chip-fail'}`}>
+                                        {results.deflection.status_post}
                                     </span>
                                 </div>
                             </div>

@@ -166,9 +166,8 @@ export function analyzeCantileverSlab(input: CantileverSlabInput) {
             camber: input.camber ?? 0,
         },
     );
-    // User instruction: For cantilevers, the parapet/partition load is considered 
-    // after construction, so we only need to check the total deflection against L/250.
-    const defl_safe = deflection.status_total === 'OK';
+    // User instruction: evaluate both total and post-construction checks.
+    const defl_safe = deflection.status_total === 'OK' && deflection.status_post === 'OK';
     // Keep legacy fields for UI/PDF backwards-compat (mapped from Annex C result)
     const Ld_actual = deflection.a_total;
     const Ld_max = deflection.limit_total;
