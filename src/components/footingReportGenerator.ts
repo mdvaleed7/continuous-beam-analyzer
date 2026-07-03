@@ -186,17 +186,18 @@ function generateFlatFootingSection(r: any, mat: any): string {
             <div class="section-body">
                 <p style="margin-top:0; color:#475569; font-size:13px;">
                     <strong>Variables:</strong><br/>
-                    ${kxInline(`V_u`)}: Factored shear force<br/>
+                    ${kxInline(`V_u`)}: Factored shear force (from net factored soil pressure ${kxInline(`p_{u,net} = ${r.loadFactor}\\,p_{col}`)}, IS 456 Cl. 34.2.4.1)<br/>
                     ${kxInline(`\\tau_v`)}: Nominal shear stress<br/>
-                    ${kxInline(`\\tau_c`)}: Design shear strength of concrete
+                    ${kxInline(`\\tau_c`)}: Design shear strength of concrete<br/>
+                    ${kxInline(`p_{u,net} = ${r.soilPressure.p_max_net_factored} \\text{ kN/m}^2`)} (net factored upward pressure)
                 </p>
                 <div style="display: flex; gap: 20px;">
                     <div style="flex: 1; border-right: 1px solid #e2e8f0; padding-right: 20px;">
                         <h4 style="margin-top: 0;">A. Punching Shear (Two-Way)</h4>
-                        ${kx(`V_u = p_{max} \\times (A_{prov} - A_{punched}) = ${r.punchingShear.Vu} \\text{ kN}`)}
+                        ${kx(`V_u = p_{u,net} \\times (A_{prov} - A_{punched}) = ${r.punchingShear.Vu} \\text{ kN}`)}
                         ${kx(`u = ${r.punchingShear.perimeter_u} \\text{ mm} \\quad (\\text{perimeter})`)}
                         ${kx(`\\tau_v = \\frac{V_u}{u \\times d} = ${r.punchingShear.tau_v} \\text{ N/mm}^2`)}
-                        ${kx(`\\tau_c = 0.25\\sqrt{f_{ck}} = ${r.punchingShear.tau_c} \\text{ N/mm}^2`)}
+                        ${kx(`\\tau_c = k_s\\,0.25\\sqrt{f_{ck}} = ${r.punchingShear.tau_c} \\text{ N/mm}^2 \\quad(\\text{Cl. 31.6.3.1})`)}
                         <div style="margin-top: 15px; font-weight: bold; color: ${r.punchingShear.status === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: left;">
                             Result: ${kxInline(`\\tau_v ${r.punchingShear.tau_v <= r.punchingShear.tau_c ? '\\le' : '>'} \\tau_c`)} &rarr; ${r.punchingShear.status}
                         </div>
@@ -303,13 +304,16 @@ function generateSlopeFootingSection(r: any, mat: any): string {
         <div class="section-box avoid-break">
             <div class="section-header">3. Shear Checks</div>
             <div class="section-body">
+                <p style="margin-top:0; color:#475569; font-size:13px;">
+                    Design pressure: ${kxInline(`p_{u,net} = ${r.loadFactor}\\,p_{col} = ${r.soilPressure.p_max_net_factored} \\text{ kN/m}^2`)} (net factored, IS 456 Cl. 34.2.4.1)
+                </p>
                 <div style="display: flex; gap: 20px;">
                     <div style="flex: 1; border-right: 1px solid #e2e8f0; padding-right: 20px;">
                         <h4 style="margin-top: 0;">A. Punching Shear (Two-Way)</h4>
                         ${kx(`V_u = ${r.punchingShear.Vu} \\text{ kN}`)}
                         ${kx(`u = ${r.punchingShear.perimeter_u} \\text{ mm}`)}
                         ${kx(`\\tau_v = ${r.punchingShear.tau_v} \\text{ N/mm}^2`)}
-                        ${kx(`\\tau_c = ${r.punchingShear.tau_c} \\text{ N/mm}^2`)}
+                        ${kx(`\\tau_c = k_s\\,0.25\\sqrt{f_{ck}} = ${r.punchingShear.tau_c} \\text{ N/mm}^2 \\quad(\\text{Cl. 31.6.3.1})`)}
                         <div style="margin-top: 15px; font-weight: bold; color: ${r.punchingShear.status === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: left;">
                             Result: ${kxInline(`\\tau_v ${r.punchingShear.tau_v <= r.punchingShear.tau_c ? '\\le' : '>'} \\tau_c`)} &rarr; ${r.punchingShear.status}
                         </div>

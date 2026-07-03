@@ -97,6 +97,38 @@ export function getTauCMax(grade: string): number {
 }
 
 /**
+ * Permissible two-way (punching) shear stress for slabs & footings.
+ *
+ * IS 456:2000 Cl. 31.6.3.1:
+ *   τc(punching) = ks · τc'          where τc' = 0.25·√fck
+ *   ks = (0.5 + βc) but not greater than 1.0
+ *   βc = ratio of the SHORT side to the LONG side of the column /
+ *        loaded area (βc ≤ 1, so ks ≤ 1.5 → capped at 1.0).
+ *
+ * This is a DIFFERENT (and generally higher) permissible stress than the
+ * one-way flexural-shear τc of Table 19 (getTauC). Using Table 19 for a
+ * two-way punching check is a code error — the two limit states are distinct
+ * (biaxial confinement raises the punching capacity).
+ *
+ * @param fck        - characteristic compressive strength (MPa)
+ * @param colShort   - shorter plan dimension of the loaded area (any consistent unit)
+ * @param colLong    - longer  plan dimension of the loaded area (same unit)
+ * @returns τc,punching in N/mm²
+ *
+ * @example
+ *   getPunchingTauC(25, 400, 400)  // βc=1 → ks=1.0 → 0.25·√25 = 1.25
+ *   getPunchingTauC(25, 300, 600)  // βc=0.5 → ks=1.0 (0.5+0.5) → 1.25
+ *   getPunchingTauC(25, 300, 900)  // βc=0.333 → ks=0.833 → 1.041
+ */
+export function getPunchingTauC(fck: number, colShort: number, colLong: number): number {
+    const short = Math.min(Math.abs(colShort), Math.abs(colLong));
+    const long = Math.max(Math.abs(colShort), Math.abs(colLong));
+    const betaC = long > 0 ? short / long : 1;
+    const ks = Math.min(1.0, 0.5 + betaC); // Cl. 31.6.3.1: ks ≤ 1.0
+    return ks * 0.25 * Math.sqrt(fck);
+}
+
+/**
  * Limiting moment coefficient for a steel grade.
  *
  * @param fyOrGrade  - either the fy number (e.g. 500) or the steel grade string (e.g. "Fe500")

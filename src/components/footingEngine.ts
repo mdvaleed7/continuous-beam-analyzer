@@ -17,6 +17,7 @@
 import {
     TAU_C_MAX,
     getTauC,
+    getPunchingTauC,
     flexuralDesign as flexuralDesignShared,
     computeRequiredDepthForBM,
     computeCostIndex,
@@ -71,6 +72,11 @@ export interface FootingConfig {
     grade: string;
     steelGrade: string;
     cover: number;        // clear cover (mm)
+    // Ultimate-limit-state load factor for structural design (flexure + shear).
+    // IS 456:2000 Cl. 34.2.4.1 / Cl. 36.4.1 — footing bending & shear must be
+    // designed for FACTORED loads (γf = 1.5 for DL+LL). The soil bearing (SBC)
+    // check, in contrast, uses SERVICE loads. Defaults to 1.5 when omitted.
+    loadFactor?: number;
     // Bar diameter selection
     barDiaX: number;      // bar diameter in X direction (mm)
     barDiaZ: number;      // bar diameter in Z direction (mm)
@@ -96,12 +102,19 @@ export interface FootingConfig {
 }
 
 interface SoilPressureResult {
-    p_min: number;        // minimum soil pressure (kN/m²)
-    p_max: number;        // maximum soil pressure (kN/m²)
-    p_avg: number;        // average soil pressure (kN/m²)
+    p_min: number;        // minimum SERVICE soil pressure (kN/m²) — for SBC check
+    p_max: number;        // maximum SERVICE soil pressure (kN/m²) — for SBC check
+    p_avg: number;        // average SERVICE soil pressure (kN/m²)
+    // Net FACTORED upward pressure used for structural (flexure + shear) design.
+    // IS 456 Cl. 34.2.4.1: the footing is designed for the net upward reaction
+    // from the FACTORED column load (self-weight & fill act downward through the
+    // base and do NOT bend the footing, so they are excluded from the net design
+    // pressure). p_*_net_factored = loadFactor × (net column pressure).
+    p_max_net_factored: number;  // max net factored upward pressure (kN/m²)
+    p_min_net_factored: number;  // min net factored upward pressure (kN/m²)
     eccentricityX: number; // eccentricity in X direction (m)
     eccentricityZ: number; // eccentricity in Z direction (m)
-    sbcCheck: boolean;     // p_max ≤ SBC
+    sbcCheck: boolean;     // p_max(service) ≤ SBC
     sbcCheckFactor: number; // SBC increase factor for lateral loads
 }
 
@@ -204,9 +217,12 @@ export interface FootingAnalysisResult {
     overallStatus: 'SAFE' | 'REVISE';
     // IS 456 constants used
     tau_c_max: number;
-    // Inbuilt τc from IS 456 Table 19 (computed from pt + grade)
+    // Inbuilt one-way τc from IS 456 Table 19 (computed from pt + grade)
     tau_c_inbuilt: number;
+    // Two-way (punching) τc = ks·0.25·√fck from IS 456 Cl. 31.6.3.1
+    tau_c_punching: number;
     pt_used: number;        // % steel used for τc lookup
+    loadFactor: number;     // ULS load factor used for flexure & shear (γf)
     // ─── Multi-load-case results ──────────────────────────────────────────
     loadCases: LoadCaseResult[];   // per-load-case full results
     governingLoadCase: string;     // label of the governing load case
@@ -240,32 +256,58 @@ function flexuralDesignPerMeter(Mu_kNm: number, d_mm: number, fck: number, fy: n
 
 /**
  * Compute soil pressure under eccentric loading.
- * For a rectangular footing L × B with loads Fy, Mx, Mz:
- *   p = Fy/(L×B) ± Mx×B/(L×B²) ± Mz×L/(L²×B)
+ *
+ * Two DISTINCT pressures are returned:
+ *
+ *  1. SERVICE gross pressure (p_max / p_min / p_avg) — includes footing
+ *     self-weight + fill.  Used ONLY for the SBC (soil bearing) check, which is
+ *     a serviceability limit state (IS 456 Cl. 34.1, IS 1904).
+ *
+ *  2. NET FACTORED upward pressure (p_max_net_factored / p_min_net_factored) —
+ *     the net soil reaction produced by the FACTORED column load alone.  This is
+ *     what bends and shears the footing and is the correct design pressure for
+ *     flexure and shear per IS 456 Cl. 34.2.4.1 / Cl. 36.4.1.  Self-weight and
+ *     fill are excluded because they bear directly on the base and do not induce
+ *     bending in the projecting footing cantilever.
+ *
+ * For a rectangular footing L × B (eccentric loading):
+ *   p = P/(L·B) ± 6·Mx/(L·B²) ± 6·Mz/(L²·B)
+ *
+ * @param serviceTotal  service axial = column load + self-weight + fill (kN)
+ * @param columnLoad    service column axial only, excl. self-weight/fill (kN)
+ * @param loadFactor    ULS load factor (γf, typically 1.5)
  */
 function computeSoilPressure(
     L: number, B: number,
-    Fy: number, Mx: number, Mz: number,
-    sbc: number,
+    serviceTotal: number, columnLoad: number,
+    Mx: number, Mz: number,
+    sbc: number, loadFactor: number,
 ): SoilPressureResult {
     const area = L * B;
-    const p_avg = Fy / area;
+    const p_avg = serviceTotal / area;
 
     // BUG 1 FIX: Mx (moment about X-axis) causes eccentricity in the Z
     // direction (parallel to B), and Mz (moment about Z-axis) causes
     // eccentricity in the X direction (parallel to L). The previous code
     // had these swapped.
-    const eZ = Mx !== 0 ? Mx / Fy : 0; // eccentricity along Z due to Mx
-    const eX = Mz !== 0 ? Mz / Fy : 0; // eccentricity along X due to Mz
+    const eZ = (Mx !== 0 && serviceTotal !== 0) ? Mx / serviceTotal : 0; // along Z due to Mx
+    const eX = (Mz !== 0 && serviceTotal !== 0) ? Mz / serviceTotal : 0; // along X due to Mz
 
+    // ── Service gross pressure (for SBC check) ─────────────────────────────
     // Pressure variation: σ = F/A ± M·c/I
-    // Mx acts about X-axis → pressure varies along B: Δp = 6·Mx/(L·B²)
-    // Mz acts about Z-axis → pressure varies along L: Δp = 6·Mz/(L²·B)
     const pFromMx = 6 * Mx / (L * B * B); // pressure component from Mx
     const pFromMz = 6 * Mz / (L * L * B); // pressure component from Mz
-
     const p_max = p_avg + Math.abs(pFromMx) + Math.abs(pFromMz);
     const p_min = p_avg - Math.abs(pFromMx) - Math.abs(pFromMz);
+
+    // ── Net factored upward pressure (for flexure + shear design) ──────────
+    // IS 456 Cl. 34.2.4.1: design bending & shear for the FACTORED net soil
+    // reaction of the column load. Moments are also factored by γf.
+    const p_col_avg = columnLoad / area;
+    const pFromMx_f = 6 * Mx / (L * B * B);
+    const pFromMz_f = 6 * Mz / (L * L * B);
+    const p_max_net_factored = loadFactor * (p_col_avg + Math.abs(pFromMx_f) + Math.abs(pFromMz_f));
+    const p_min_net_factored = loadFactor * (p_col_avg - Math.abs(pFromMx_f) - Math.abs(pFromMz_f));
 
     // SBC increase factor for lateral loads (25% increase per IS 1904)
     const sbcFactor = (Mx !== 0 || Mz !== 0) ? 1.25 : 1.0;
@@ -275,6 +317,8 @@ function computeSoilPressure(
         p_min: Math.round(p_min * 100) / 100,
         p_max: Math.round(p_max * 100) / 100,
         p_avg: Math.round(p_avg * 100) / 100,
+        p_max_net_factored: Math.round(p_max_net_factored * 100) / 100,
+        p_min_net_factored: Math.round(p_min_net_factored * 100) / 100,
         eccentricityX: Math.round(eX * 1000) / 1000,
         eccentricityZ: Math.round(eZ * 1000) / 1000,
         sbcCheck,
@@ -295,6 +339,9 @@ export function analyzeFooting(config: FootingConfig): FootingAnalysisResult {
         pedestalOffset, pedestal_a, pedestal_b,
         D1,
     } = config;
+
+    // ULS load factor for structural design (flexure + shear). IS 456 Cl. 36.4.1.
+    const loadFactor = config.loadFactor && config.loadFactor > 0 ? config.loadFactor : 1.5;
 
     // ── Resolve the load-case list ─────────────────────────────────────────
     // New API: config.loadCases. Legacy fallback: single Fy/Mx/Mz/sbc.
@@ -342,17 +389,20 @@ export function analyzeFooting(config: FootingConfig): FootingAnalysisResult {
     const fillWeight = Math.max(0, (L * B - a1 * b1)) * depthFill * gammaFill;
     const footingWeight = selfWeight + fillWeight; // total permanent load (kN)
 
-    // ── Inbuilt τc from IS 456 Table 19 (replaces user-provided shearStrength) ─
-    // τc depends on pt (% tensile steel) and fck. For footings the steel is
-    // the flexural steel in the critical section. Use the governing flexure
-    // pt — but since pt is only known AFTER flexure design, we iterate:
-    // first pass with pt_min (0.12% / 0.15%) → get Ast → recompute pt → τc.
-    // For simplicity and conservatism, use pt = 0.15 (the Table 19 floor).
-    // This gives the minimum τc, which is safe. The user explicitly wants
-    // grade-based τc: getTauC automatically looks up by grade.
-    const pt_initial = 0.15; // Table 19 floor — conservative
+    // ── Permissible shear stresses (IS 456 Table 19 + Cl. 31.6.3.1) ────────
+    // ONE-WAY (flexural) shear: τc from Table 19 via getTauC(pt, grade).
+    //   τc depends on pt (% tensile steel) and fck. pt is only known AFTER
+    //   flexure design, so we use pt = 0.15 (the Table 19 floor) which gives the
+    //   minimum τc — a conservative, code-safe lower bound for the one-way check.
+    // TWO-WAY (punching) shear: τc = ks·0.25·√fck per Cl. 31.6.3.1 — a DISTINCT
+    //   and generally higher permissible stress. Using the Table 19 one-way value
+    //   for punching (as the previous code did) is a code error: it understates
+    //   the true punching capacity and wrongly rejects valid designs.
+    const pt_initial = 0.15; // Table 19 floor — conservative for one-way shear
     const gradeStr = grade as ConcreteGrade;
-    const tau_c_inbuilt = getTauC(pt_initial, gradeStr);
+    const tau_c_inbuilt = getTauC(pt_initial, gradeStr);          // one-way (Table 19)
+    // βc uses the loaded-area (pedestal/column) plan aspect ratio.
+    const tau_c_punching = getPunchingTauC(fck, pedA, pedB);      // two-way (Cl. 31.6.3.1)
     const tau_c_max_val = TAU_C_MAX[gradeStr] ?? 2.8;
 
     // ── Slope check (geometry-only, same for all LCs) ──────────────────────
@@ -379,33 +429,44 @@ export function analyzeFooting(config: FootingConfig): FootingAnalysisResult {
     // ── Per-load-case analysis ─────────────────────────────────────────────
     const lcResults: LoadCaseResult[] = loadCases.map(lc => {
         const totalLoad = lc.Fy + footingWeight;
-        const soilPressure = computeSoilPressure(L, B, totalLoad, lc.Mx, lc.Mz, lc.sbc);
+        // Service total (for SBC) + column-only load (for the net factored design
+        // pressure). lc.Fy is the SERVICE column axial; footingWeight is added for
+        // the bearing check only.
+        const soilPressure = computeSoilPressure(
+            L, B, totalLoad, lc.Fy, lc.Mx, lc.Mz, lc.sbc, loadFactor,
+        );
 
-        // Punching shear
-        const Vu_punch = soilPressure.p_max * (areaProv - area_punched);
+        // Structural design pressure = net FACTORED upward pressure (IS 456 Cl.
+        // 34.2.4.1). Flexure and shear MUST use factored loads, not the service
+        // bearing pressure.
+        const p_design = soilPressure.p_max_net_factored;
+
+        // Punching (two-way) shear — Cl. 31.6.2 (critical section d/2 from face) /
+        // Cl. 31.6.3.1 (permissible τc = ks·0.25·√fck).
+        const Vu_punch = p_design * (areaProv - area_punched);
         const tau_v_punch = (Vu_punch * 1000) / (perimeter_u * d_avg);
-        const punchingStatus: 'OK' | 'FAIL' = tau_v_punch <= tau_c_inbuilt ? 'OK' : 'FAIL';
+        const punchingStatus: 'OK' | 'FAIL' = tau_v_punch <= tau_c_punching ? 'OK' : 'FAIL';
 
-        // One-way shear X
+        // One-way shear X (Cl. 40 / critical section at d from face, Cl. 34.2.4.1)
         const distX_m = dEffX / 1000;
         const lengthBeyondX = L / 2 - a1 / 2 - distX_m;
-        const Vu_oneway_X = lengthBeyondX > 0 ? soilPressure.p_max * B * lengthBeyondX : 0;
+        const Vu_oneway_X = lengthBeyondX > 0 ? p_design * B * lengthBeyondX : 0;
         const tau_v_oneway_X = (Vu_oneway_X * 1000) / (B * 1000 * dEffX);
         const onewayXStatus: 'OK' | 'FAIL' = tau_v_oneway_X <= tau_c_inbuilt ? 'OK' : 'FAIL';
 
         // One-way shear Z
         const distZ_m = dEffZ / 1000;
         const lengthBeyondZ = B / 2 - b1 / 2 - distZ_m;
-        const Vu_oneway_Z = lengthBeyondZ > 0 ? soilPressure.p_max * L * lengthBeyondZ : 0;
+        const Vu_oneway_Z = lengthBeyondZ > 0 ? p_design * L * lengthBeyondZ : 0;
         const tau_v_oneway_Z = (Vu_oneway_Z * 1000) / (L * 1000 * dEffZ);
         const onewayZStatus: 'OK' | 'FAIL' = tau_v_oneway_Z <= tau_c_inbuilt ? 'OK' : 'FAIL';
 
-        // Flexure
+        // Flexure — factored moment at the column/pedestal face (Cl. 34.2.3.1)
         const cantLX = (L - a1) / 2;
-        const Mx_flex = soilPressure.p_max * cantLX * cantLX / 2;
+        const Mx_flex = p_design * cantLX * cantLX / 2;
         const flexureX = flexuralDesignPerMeter(Mx_flex, dEffX, fck, fy, D_mm);
         const cantLZ = (B - b1) / 2;
-        const Mz_flex = soilPressure.p_max * cantLZ * cantLZ / 2;
+        const Mz_flex = p_design * cantLZ * cantLZ / 2;
         const flexureZ = flexuralDesignPerMeter(Mz_flex, dEffZ, fck, fy, D_mm);
 
         const allChecks = [
@@ -432,7 +493,7 @@ export function analyzeFooting(config: FootingConfig): FootingAnalysisResult {
                 area_punched: Math.round(area_punched * 1e6) / 1e6,
                 Vu: Math.round(Vu_punch * 100) / 100,
                 tau_v: Math.round(tau_v_punch * 1000) / 1000,
-                tau_c: Math.round(tau_c_inbuilt * 1000) / 1000,
+                tau_c: Math.round(tau_c_punching * 1000) / 1000,
                 status: punchingStatus,
             },
             oneWayShearX: {
@@ -497,7 +558,9 @@ export function analyzeFooting(config: FootingConfig): FootingAnalysisResult {
         overallStatus,
         tau_c_max: tau_c_max_val,
         tau_c_inbuilt: Math.round(tau_c_inbuilt * 1000) / 1000,
+        tau_c_punching: Math.round(tau_c_punching * 1000) / 1000,
         pt_used: pt_initial,
+        loadFactor,
         loadCases: lcResults,
         governingLoadCase: governing.label,
         envelope: {

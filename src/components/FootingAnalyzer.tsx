@@ -622,7 +622,10 @@ export default function FootingAnalyzer() {
                                     </tbody>
                                 </table>
                                 <div className="ld-note">
-                                    τ<sub>c</sub> = {fmt(r.tau_c_inbuilt, 3)} N/mm² (inbuilt from IS 456 Table 19, grade {r.grade}, p<sub>t</sub>={fmt(r.pt_used, 2)}%). Footing self-weight = {fmt(r.selfWeight, 1)} kN (actual L×B×D), fill = {fmt(r.fillWeight, 1)} kN.
+                                    One-way τ<sub>c</sub> = {fmt(r.tau_c_inbuilt, 3)} N/mm² (IS 456 Table 19, grade {r.grade}, p<sub>t</sub>={fmt(r.pt_used, 2)}%);
+                                    two-way (punching) τ<sub>c</sub> = {fmt(r.tau_c_punching, 3)} N/mm² (Cl. 31.6.3.1, k<sub>s</sub>·0.25√f<sub>ck</sub>).
+                                    Structural design (flexure &amp; shear) uses net factored pressure p<sub>u,net</sub> = {fmt(r.loadFactor,2)}·p<sub>col</sub> = {fmt(r.soilPressure.p_max_net_factored,1)} kN/m² (Cl. 34.2.4.1); SBC check uses service pressure.
+                                    Footing self-weight = {fmt(r.selfWeight, 1)} kN (actual L×B×D), fill = {fmt(r.fillWeight, 1)} kN.
                                 </div>
                             </div>
                         )}
