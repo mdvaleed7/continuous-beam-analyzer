@@ -1,0 +1,44 @@
+{
+  "name": "continuous-beam-app",
+  "version": "0.1.0",
+  "private": false,
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "src/app/",
+    "src/components/",
+    "src/lib/",
+    "public/",
+    "package.json",
+    "README.md",
+    "LICENSE",
+    "next.config.mjs",
+    "jsconfig.json"
+  ],
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test": "jest"
+  },
+  "dependencies": {
+    "katex": "^0.17.0",
+    "next": "16.2.9",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "@types/node": "^26.0.0",
+    "@types/react": "^19.2.17",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.9",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.4.11",
+    "typescript": "^6.0.3"
+  }
+}
