@@ -746,8 +746,20 @@ export function analyzeWall(config: WallConfig): WallAnalysisResult {
     for (const zd of zoneDesigns) {
         // ── Material quantities (per m run of wall) ──
         totalConcreteVol += (zd.thickness / 1000) * zd.height * 1;
-        // Steel weight: Ast (mm²) × height (m) × strip width (1 m) × density (7850 kg/m³)
-        totalSteelWeight += ((zd.mainBars_hogging.Ast_provided + zd.mainBars_sagging.Ast_provided) / 1e6) * zd.height * 1 * 7850;
+        // IMPROVEMENT 2026-07-04 v4: include DISTRIBUTION steel in the weight.
+        // The previous formula only counted the main flexural steel (hogging +
+        // sagging). IS 456 cl. 26.5.2.1 also requires horizontal distribution
+        // steel at 0.12% (Fe415/Fe500) of the gross section (b × t), running
+        // horizontally on BOTH faces. For a 1 m strip, the distribution steel
+        // per face = 0.0012 × 1000 × t [mm²/m]; both faces = 0.0024 × 1000 × t.
+        // Total distribution steel weight per zone = (Ast_dist_both [mm²/m] / 1e6)
+        //   × zone_height [m] × 7850 [kg/m³].
+        const mainSteelWeight = ((zd.mainBars_hogging.Ast_provided + zd.mainBars_sagging.Ast_provided) / 1e6) * zd.height * 1 * 7850;
+        // Distribution steel: 0.12% of b×t per face, both faces, horizontal bars
+        // running the full height of the zone.
+        const Ast_dist_both_faces = 2 * 0.0012 * 1000 * zd.thickness; // mm²/m (both faces)
+        const distSteelWeight = (Ast_dist_both_faces / 1e6) * zd.height * 1 * 7850;
+        totalSteelWeight += mainSteelWeight + distSteelWeight;
 
         // ── Check 1: Shear capacity — IS 456 Cl. 40.2.3 / Table 20 ──
         // If τv > τc,max the section cannot be saved by shear reinforcement.

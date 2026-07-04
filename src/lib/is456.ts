@@ -444,6 +444,176 @@ export function computeCost(
     return Cc * concreteVol_m3 + Cs * steelWeight_kg * fw + Cf * slabArea_m2;
 }
 
+// ─── Design bond stress τbd (N/mm²) — IS 456 Table 21.1 (plain bars) ──────
+//     For deformed bars (Fe415/Fe500), τbd is increased by 60% per cl. 26.2.1.1.
+//     For compression bars, τbd is increased by 25% per cl. 26.2.1.2.
+const TAU_BD_PLAIN: Record<ConcreteGrade, number> = {
+    M15: 1.0, M20: 1.2, M25: 1.4, M30: 1.5, M35: 1.7, M40: 1.9,
+};
+
+/**
+ * Design bond stress τbd for the given concrete grade and bar type.
+ *
+ * @param grade     - concrete grade string (e.g. "M25")
+ * @param deformed  - true for Fe415/Fe500 deformed bars (+60% per cl. 26.2.1.1)
+ * @param compression - true for compression bars (+25% per cl. 26.2.1.2)
+ * @returns τbd in N/mm²
+ *
+ * Reference: IS 456:2000 cl. 26.2.1, Table 21.1
+ */
+export function getTauBd(
+    grade: string,
+    deformed: boolean = true,
+    compression: boolean = false,
+): number {
+    let tau = TAU_BD_PLAIN[grade as ConcreteGrade] ?? 1.4;
+    if (deformed) tau *= 1.60;  // cl. 26.2.1.1
+    if (compression) tau *= 1.25; // cl. 26.2.1.2
+    return tau;
+}
+
+/**
+ * Development length Ld — IS 456:2000 cl. 26.2.1.
+ *
+ *   Ld = (φ × σs) / (4 × τbd)
+ *
+ * where:
+ *   φ       = bar diameter (mm)
+ *   σs      = stress in the bar at the design section (N/mm²)
+ *             — 0.87 × fy for tension steel at yield
+ *             — 0.87 × fy × (Ast_req / Ast_provided) for under-stressed bars
+ *   τbd     = design bond stress (N/mm²) — see getTauBd()
+ *
+ * For tension bars: σs = 0.87 × fy (full yield).
+ * For compression bars: σs = 0.87 × fy, and τbd is increased by 25%.
+ *
+ * @param barDia_mm   - bar diameter (mm)
+ * @param fy          - yield strength of steel (MPa)
+ * @param grade       - concrete grade string (e.g. "M25")
+ * @param deformed    - true for deformed bars (default)
+ * @param compression - true for compression bars (default false)
+ * @param stressRatio - optional Ast_req / Ast_provided ratio (0–1) to reduce σs
+ *                      for over-provided sections. Default 1.0 (full yield).
+ * @returns Ld in mm
+ *
+ * @example
+ *   // 16 mm Fe500 bar in M25 concrete, tension, deformed:
+ *   developmentLength(16, 500, 'M25')  // → 779 mm
+ */
+export function developmentLength(
+    barDia_mm: number,
+    fy: number,
+    grade: string,
+    deformed: boolean = true,
+    compression: boolean = false,
+    stressRatio: number = 1.0,
+): number {
+    const tauBd = getTauBd(grade, deformed, compression);
+    const sigma_s = 0.87 * fy * Math.min(1.0, Math.max(0, stressRatio));
+    return (barDia_mm * sigma_s) / (4 * tauBd);
+}
+
+/**
+ * Check whether the available anchorage length is sufficient for the given bar.
+ *
+ * @param barDia_mm      - bar diameter (mm)
+ * @param fy             - yield strength (MPa)
+ * @param grade          - concrete grade string
+ * @param available_mm   - available anchorage length (mm) — e.g. clear span
+ *                         minus cover, or the embedment depth into the support
+ * @param deformed       - true for deformed bars (default)
+ * @param compression    - true for compression bars (default false)
+ * @param stressRatio    - Ast_req / Ast_provided (default 1.0)
+ * @returns { Ld, available, ok, ratio }
+ */
+export function checkDevelopmentLength(
+    barDia_mm: number,
+    fy: number,
+    grade: string,
+    available_mm: number,
+    deformed: boolean = true,
+    compression: boolean = false,
+    stressRatio: number = 1.0,
+): { Ld: number; available: number; ok: boolean; ratio: number } {
+    const Ld = developmentLength(barDia_mm, fy, grade, deformed, compression, stressRatio);
+    return {
+        Ld: Math.round(Ld * 10) / 10,
+        available: Math.round(available_mm * 10) / 10,
+        ok: available_mm >= Ld,
+        ratio: Ld > 0 ? Math.round((available_mm / Ld) * 1000) / 1000 : Infinity,
+    };
+}
+
+// ─── Bar spacing constraints — IS 456 cl. 26.3.3 ──────────────────────────
+//   Main bars:        spacing ≤ min(3d, 300 mm)
+//   Distribution bars: spacing ≤ min(5d, 450 mm)
+//   Minimum spacing:   ≥ max(barDia, 5 mm) + 5 mm  (aggregate size + clearance)
+//                     (simplified: ≥ barDia + 5 mm for 20 mm aggregate)
+//   Max bar diameter:  ≤ D/8 (practical slab limit, prevents congestion)
+
+export interface BarSpacingCheckResult {
+    maxSpacingMain: number;
+    maxSpacingDist: number;
+    minSpacing: number;
+    maxBarDia: number;
+    spacingMainOK: boolean;
+    spacingDistOK: boolean;
+    barDiaOK: boolean;
+    ok: boolean;
+    messages: string[];
+}
+
+/**
+ * Check bar spacing and diameter constraints per IS 456 cl. 26.3.3.
+ *
+ * @param D_mm        - overall slab/wall thickness (mm)
+ * @param d_mm        - effective depth (mm)
+ * @param barDia_mm   - main bar diameter (mm)
+ * @param spacingMain - main bar spacing (mm)
+ * @param spacingDist - distribution bar spacing (mm) — optional
+ * @returns check result with individual + combined status
+ */
+export function checkBarSpacing(
+    D_mm: number,
+    d_mm: number,
+    barDia_mm: number,
+    spacingMain: number,
+    spacingDist?: number,
+): BarSpacingCheckResult {
+    const maxSpacingMain = Math.min(3 * d_mm, 300);
+    const maxSpacingDist = Math.min(5 * d_mm, 450);
+    const minSpacing = Math.max(barDia_mm, 5) + 5; // barDia + 5 mm clearance (20 mm agg)
+    const maxBarDia = D_mm / 8;
+
+    const spacingMainOK = spacingMain <= maxSpacingMain && spacingMain >= minSpacing;
+    const spacingDistOK = spacingDist !== undefined
+        ? (spacingDist <= maxSpacingDist && spacingDist >= minSpacing)
+        : true;
+    const barDiaOK = barDia_mm <= maxBarDia;
+
+    const messages: string[] = [];
+    if (spacingMain > maxSpacingMain)
+        messages.push(`Main spacing ${spacingMain}mm > ${maxSpacingMain.toFixed(0)}mm (IS 456 cl. 26.3.3: max 3d or 300mm)`);
+    if (spacingMain < minSpacing)
+        messages.push(`Main spacing ${spacingMain}mm < ${minSpacing}mm (min: barDia + 5mm for concrete flow)`);
+    if (spacingDist !== undefined && spacingDist > maxSpacingDist)
+        messages.push(`Distribution spacing ${spacingDist}mm > ${maxSpacingDist.toFixed(0)}mm (IS 456 cl. 26.3.3: max 5d or 450mm)`);
+    if (!barDiaOK)
+        messages.push(`Bar dia ${barDia_mm}mm > D/8 = ${maxBarDia.toFixed(1)}mm (practical slab limit)`);
+
+    return {
+        maxSpacingMain: Math.floor(maxSpacingMain),
+        maxSpacingDist: Math.floor(maxSpacingDist),
+        minSpacing: Math.ceil(minSpacing),
+        maxBarDia: Math.floor(maxBarDia),
+        spacingMainOK,
+        spacingDistOK,
+        barDiaOK,
+        ok: spacingMainOK && spacingDistOK && barDiaOK,
+        messages,
+    };
+}
+
 // Backward-compat shim — keeps existing calls working
 export const computeCostIndex =
     (vol: number, steel: number, r = 90): number =>

@@ -19,10 +19,12 @@ import {
     getTauC,
     getPunchingTauC,
     flexuralDesign as flexuralDesignShared,
+    selectBars,
     computeRequiredDepthForBM,
     computeCostIndex,
     computeCost,
     type ConcreteGrade,
+    type BarResult,
 } from '../lib/is456';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -148,6 +150,12 @@ interface FlexuralDesignResult {
     // IS 456 Cl. 38.1: d_req = √(M / (R·b)) — minimum effective depth from BM
     d_req_bm: number;      // required effective depth from BM consideration (mm)
     depthStatus: 'OK' | 'FAIL';  // d_provided ≥ d_req_bm ?
+    // IMPROVEMENT 2026-07-04 v4: actual bar selection (dia + spacing + Ast_provided).
+    // Previously the footing engine only returned Ast_req and the optimizer
+    // used it for steel weight — under-counting steel because selectBars always
+    // rounds UP to the next standard bar/spacing combination. Now the engine
+    // selects bars and the optimizer can use Ast_provided for accurate weight.
+    bars: BarResult | null;  // selected bar (dia, spacing, Ast_provided, label)
 }
 
 interface SlopeCheckResult {
@@ -245,6 +253,13 @@ function flexuralDesignPerMeter(Mu_kNm: number, d_mm: number, fck: number, fy: n
     const r = flexuralDesignShared(Mu_kNm, 1000, d_mm, fck, fy, D_mm);
     // IS 456 Cl. 38.1: d = √(M / (R·b))  where R = coeff × fck
     const { d_req } = computeRequiredDepthForBM(Mu_kNm, fck, fy, 1000);
+    // IMPROVEMENT 2026-07-04 v4: select actual bars for the required Ast.
+    // selectBars picks the smallest standard bar/spacing combination that
+    // provides at least Ast_req, from the standard set [8,10,12,16,20,25] mm
+    // at [100,125,150,175,200,250,300] mm c/c. The selected bar's Ast_provided
+    // is typically 5–20% higher than Ast_req — this is the steel that will
+    // actually be in the footing, so the optimizer's weight calc must use it.
+    const bars = Mu_kNm > 0 ? selectBars(r.Ast_req, undefined, undefined, 1000, d_mm) : null;
     return {
         Mu: r.Mu_applied ?? 0, d: d_mm,
         Ast_req: r.Ast_req, Ast_min: r.Ast_min ?? 0, Ast_max: r.Ast_max ?? 0,
@@ -252,6 +267,7 @@ function flexuralDesignPerMeter(Mu_kNm: number, d_mm: number, fck: number, fy: n
         status: r.isDoubly ? 'REVISE' : 'SAFE',
         d_req_bm: Math.round(d_req * 100) / 100,
         depthStatus: d_mm >= d_req ? 'OK' : 'FAIL',
+        bars,
     };
 }
 
@@ -685,18 +701,17 @@ export function optimizeFooting(
                             volume = L * B * D1_m + (D - D1_m) / 3 * (A1 + A2 + Math.sqrt(A1 * A2));
                         }
 
-                        // AUDIT FIX OPT-4 (2026-07-04): the previous steel-weight
-                        // calc used `Ast_req` (required), which UNDER-estimates the
-                        // actual steel weight because the engine's `selectBars`
-                        // helper always rounds UP to the next standard bar/spacing
-                        // combination. There's no `Ast_provided` exposed in the
-                        // footing result (the engine only returns `Ast_req`), so
-                        // we keep `Ast_req` here but document the under-estimation.
-                        // A future improvement would be to expose `Ast_provided`
-                        // from `analyzeFooting` and use it here.
-                        //   Steel weight = (Ast_req_X [mm²/m] × L [m] + Ast_req_Z [mm²/m] × B [m]) × 7850 / 1e6 [kg]
-                        //   (X-direction bars run length L; Z-direction bars run length B.)
-                        const steelWeight = (result.flexureX.Ast_req * L + result.flexureZ.Ast_req * B) * 7850 / 1e6;
+                        // IMPROVEMENT 2026-07-04 v4: use Ast_PROVIDED (actual bars
+                        // selected by the engine) instead of Ast_req. The engine now
+                        // calls selectBars() internally and exposes the result via
+                        // flexureX.bars / flexureZ.bars. Ast_provided is typically
+                        // 5–20% higher than Ast_req, so the old formula under-counted
+                        // steel weight by the same margin.
+                        //   Steel weight = (Ast_prov_X [mm²/m] × L [m] + Ast_prov_Z [mm²/m] × B [m]) × 7850 / 1e6 [kg]
+                        // (X-direction bars run length L; Z-direction bars run length B.)
+                        const Ast_prov_X = result.flexureX.bars?.Ast_provided ?? result.flexureX.Ast_req;
+                        const Ast_prov_Z = result.flexureZ.bars?.Ast_provided ?? result.flexureZ.Ast_req;
+                        const steelWeight = (Ast_prov_X * L + Ast_prov_Z * B) * 7850 / 1e6;
 
                         // AUDIT FIX OPT-4 (2026-07-04): include formwork in the cost.
                         // Formwork area = perimeter × depth (the sides of the footing pit).
