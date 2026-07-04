@@ -15,6 +15,7 @@ import {
     shearDesign,
     selectShearLinks,
     computeCostIndex,
+    computeCost,
     computeRequiredDepthForBM,
     WALL_MIN_THICKNESS,
     type ConcreteGrade,
@@ -23,6 +24,7 @@ import {
     type ShearStatus,
     type FlexuralResult as FlexuralDesign,
     type BarResult as BarSelection,
+    type CostParameters,
     type ShearLinkResult as ShearLinks,
     type ShearResult as ShearDesign,
 } from '../lib/is456';
@@ -175,7 +177,8 @@ interface OptimumDesign {
     concreteVol: number;
     steelWeight: number;
     maxUtilization: number;
-    costIndex: number;
+    costIndex: number;             // AUDIT FIX OPT-4 (2026-07-04): now in INR (was INR without formwork); kept the field name for back-compat
+    formworkArea: number;          // AUDIT FIX OPT-4: formwork area exposed for transparency
     result: WallAnalysisResult;
 }
 
@@ -930,13 +933,22 @@ function verifyAndRemediate(
 
         // If fully feasible, return the verified design.
         if (result.feasible) {
-            const ci = computeCostIndex(result.totalConcreteVol, result.totalSteelWeight, costRatio);
+            // AUDIT FIX OPT-4 (2026-07-04): include formwork in the cost.
+            // Formwork area per metre run = 2 × totalHeight (both faces of wall).
+            const formworkArea = 2 * result.totalHeight;
+            const ci = computeCost(
+                result.totalConcreteVol,
+                result.totalSteelWeight,
+                formworkArea,
+                { steelCost_per_kg: costRatio, concreteCost_per_m3: 6500, formworkCost_per_m2: 350, wastage_factor: 1.07 },
+            );
             return {
                 thicknesses: [...currentThk],
                 concreteVol: result.totalConcreteVol,
                 steelWeight: result.totalSteelWeight,
                 maxUtilization: result.maxUtilization,
                 costIndex: ci,
+                formworkArea,
                 result,
             };
         }
@@ -1089,7 +1101,15 @@ export function optimizeWall(config: WallConfig, costRatio: number = 90, onProgr
             //   - Max steel: Ast ≤ 4% × b × t (IS 456 Cl. 26.5.1.1)
             //   - Min thickness: t ≥ 150 mm (IS 456 Cl. 32.2.3)
             if (result.feasible) {
-                const costIndex = computeCostIndex(result.totalConcreteVol, result.totalSteelWeight, costRatio);
+                // AUDIT FIX OPT-4 (2026-07-04): include formwork in the cost.
+                // Formwork area per metre run = 2 × totalHeight (both faces of wall).
+                const formworkArea = 2 * result.totalHeight;
+                const costIndex = computeCost(
+                    result.totalConcreteVol,
+                    result.totalSteelWeight,
+                    formworkArea,
+                    { steelCost_per_kg: costRatio, concreteCost_per_m3: 6500, formworkCost_per_m2: 350, wastage_factor: 1.07 },
+                );
                 results.push({
                     thicknesses: config.isTapered
                         ? indices.map((idx: number) => thicknesses[idx])
@@ -1098,6 +1118,7 @@ export function optimizeWall(config: WallConfig, costRatio: number = 90, onProgr
                     steelWeight: result.totalSteelWeight,
                     maxUtilization: result.maxUtilization,
                     costIndex,
+                    formworkArea,
                     result,
                 });
             }
@@ -1242,7 +1263,15 @@ function optimizeSequential(
                     // Feasibility now includes all IS 456 checks (shear, flexure,
                     // max steel, min thickness) — same gate as full enumeration.
                     if (result.feasible) {
-                        const ci = computeCostIndex(result.totalConcreteVol, result.totalSteelWeight, costRatio);
+                        // AUDIT FIX OPT-4 (2026-07-04): include formwork in the cost
+                        // (consistent with the full-enumeration path).
+                        const formworkArea = 2 * result.totalHeight;
+                        const ci = computeCost(
+                            result.totalConcreteVol,
+                            result.totalSteelWeight,
+                            formworkArea,
+                            { steelCost_per_kg: costRatio, concreteCost_per_m3: 6500, formworkCost_per_m2: 350, wastage_factor: 1.07 },
+                        );
                         if (ci < bestCostIndex) {
                             bestCostIndex = ci;
                             bestThk = t;

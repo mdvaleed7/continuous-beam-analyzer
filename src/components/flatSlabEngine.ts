@@ -38,8 +38,19 @@ export function analyzeFlatSlab(input: FlatSlabInput) {
     if (Ln < 0.65 * L1) Ln = 0.65 * L1;
     
     // Effective depth
-    const d_slab = D - cover - 10; // assuming 10mm bar and using avg depth
-    const d_drop = hasDrop ? (dropDepth - cover - 10) : d_slab;
+    // AUDIT FIX (2026-07-04): previously `d_slab` and `d_drop` were computed
+    // with a hard-coded 10 mm half-bar deduction (i.e. assuming a 20 mm bar),
+    // but the comment said "10mm bar" and the actual column-strip bar used
+    // throughout the rest of the engine (Ast, deflection, span/depth) defaults
+    // to 12 mm (see `barDia_defl` below) and is user-selectable via `bar_dia`.
+    // Using the actual column-strip bar diameter here keeps the effective
+    // depth consistent across the punching-shear, flexure, and deflection
+    // checks. For 12 mm bars (the default) the half-bar deduction is 6 mm;
+    // for the larger 16/20/25 mm bars allowed by the optimizer the deduction
+    // scales automatically.
+    const flatSlabBarDia = input.bar_dia || 12;
+    const d_slab = D - cover - flatSlabBarDia / 2;
+    const d_drop = hasDrop ? (dropDepth - cover - flatSlabBarDia / 2) : d_slab;
     
     // Load
     const w_dead_slab = (D / 1000) * 25;
@@ -426,22 +437,57 @@ export function optimizeFlatSlab(
                                 : 0;
                             const concreteVol = slabVol + dropExtraVol;
 
+                            // AUDIT FIX OPT-1 (2026-07-04): the previous steel-weight
+                            // calculation `(totalAst / 1e6) * 7850` was DIMENSIONALLY WRONG.
+                            // `totalAstPerPanel` is in mm² (sum of Ast across the four
+                            // strips in ONE direction). Dividing by 1e6 converts mm² → m²,
+                            // and multiplying by 7850 (kg/m³) gives kg/m — NOT a total
+                            // weight in kg. The bar LENGTH was missing entirely.
+                            //
+                            // Correct: each direction's bars run the full panel length.
+                            //   X-direction weight = totalAstPerPanel [mm²] × L1 [m] × 7850 / 1e6 [kg]
+                            //   Y-direction weight = totalAstPerPanel [mm²] × L2 [m] × 7850 / 1e6 [kg]
+                            //   (Y-direction Ast is assumed equal to X-direction Ast —
+                            //    the engine only computes one direction; for a square
+                            //    panel this is exact, for a rectangular panel it is a
+                            //    reasonable approximation.)
+                            // For a 6 m square panel, the old formula under-reported
+                            // steel weight by ~12×, making the optimizer's cost ranking
+                            // dominated by concrete + formwork and effectively ignoring
+                            // steel cost. A design with heavy rebar but slightly less
+                            // concrete would be wrongly preferred.
                             const totalAst = res.totalAstPerPanel;
                             const LAP_WASTAGE_FACTOR = 1.08;
-                            const steelWeight_net = (totalAst / 1e6) * 7850; 
+                            const steelWeight_net =
+                                (totalAst * input.L1 + totalAst * input.L2) * 7850 / 1e6;
                             const steelWeight_gross = steelWeight_net * LAP_WASTAGE_FACTOR;
                             const slabArea_m2 = input.L1 * input.L2;
-                            
+
                             const costTotal_INR = computeCost(concreteVol, steelWeight_gross, slabArea_m2, costParams);
                             const concrete_INR = concreteVol * (costParams.concreteCost_per_m3 ?? 6500);
                             const steel_INR = steelWeight_gross * (costParams.steelCost_per_kg ?? 82) * (costParams.wastage_factor ?? 1.07);
                             const formwork_INR = slabArea_m2 * (costParams.formworkCost_per_m2 ?? 350);
 
                             const Ast_provided_defl = (1000 / spacing) * (Math.PI * dia * dia / 4);
-                            const flexure_u = (res.Ast_pos_col / res.colStripWidth) / Ast_provided_defl;
+                            // AUDIT FIX OPT-5 (2026-07-04): flexure_u previously only
+                            // checked the column-strip POSITIVE moment zone. The governing
+                            // utilization is the MAX across all four zones (col/mid ×
+                            // pos/neg), since the worst case controls the design.
+                            const Ast_per_m_col = Math.max(
+                                res.Ast_pos_col / res.colStripWidth,
+                                res.Ast_neg_col / res.colStripWidth,
+                            );
+                            const Ast_per_m_mid = res.midStripWidth > 0 ? Math.max(
+                                res.Ast_pos_mid / res.midStripWidth,
+                                res.Ast_neg_mid / res.midStripWidth,
+                            ) : 0;
+                            const Ast_per_m_gov = Math.max(Ast_per_m_col, Ast_per_m_mid);
+                            const flexure_u = Ast_per_m_gov / Ast_provided_defl;
                             const deflection_u = res.deflection.a_total / res.deflection.limit_total;
-                            
-                            let shear_u = res.tau_v / res.tau_c;
+
+                            // Guard against division by zero (tau_c is always > 0 from
+                            // getTauC, but defensive programming is cheap).
+                            const shear_u = res.tau_c > 0 ? res.tau_v / res.tau_c : Infinity;
 
                             results.push({
                                 D, dropDepth: actualDropDepth, bar_dia: dia, bar_spacing: spacing,

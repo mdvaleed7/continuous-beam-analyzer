@@ -63,7 +63,17 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
     const { Lx, Ly, spacing_x, spacing_y, bw, D, Df, cover, fck, fy, w_live, w_finish } = input;
     const deflSupport: SupportCondition = input.deflectionSupport || 'continuous';
 
-    const d = D - cover - 10; // effective depth
+    // AUDIT FIX (2026-07-04): previously `d` was hardcoded as `D - cover - 10`
+    // (assuming a 20 mm bar), but the actual rib tension bar diameter defaults
+    // to 16 mm and is user-selectable. Using the actual `rib_bar_dia` for the
+    // half-bar deduction gives a consistent effective depth across the Ast
+    // calculation, the shear check, and the Annex C T-beam deflection check
+    // (which already uses `barDia/2`). The previous 10 mm deduction was
+    // conservative for ≤ 20 mm bars but inconsistent with the rest of the
+    // module, and it would be un-conservative if a user explicitly supplied
+    // a 25 mm or 32 mm rib bar.
+    const ribBarDiaForDepth = input.rib_bar_dia || 16;
+    const d = D - cover - ribBarDiaForDepth / 2; // effective depth (rib tension steel)
     const Dr = D - Df; // rib depth
 
     // Self weight and equivalent thickness calculation (IS 456 for voided slabs)
@@ -111,12 +121,33 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
         const bf = bf_m * 1000; // flange width in mm
         let Ast_req = 0;
         let NA_in_flange = true;
+        let isOverReinforced = false; // AUDIT FIX 2026-07-04 v2: T-beam xu > xu_max
+        let xu_actual = 0;            // actual NA depth (mm) — for transparency
+        let xu_max_mm = 0;            // IS 456 cl. 38.1 limiting NA depth (mm)
+        let Mu_lim_T = 0;             // singly-reinforced T-beam limiting moment (kN·m)
 
-        // First assume NA in flange → rectangular design of width bf (via shared helper)
+        // IS 456 cl. 38.1 — limiting NA-depth ratio xu_max/d (depends on fy).
+        //   Fe250 → 0.531,  Fe415 → 0.479,  Fe500 → 0.456,  Fe550 → 0.439
+        // (Source: IS 456:2000 cl. 38.1 Table; matches the MU_LIM_COEFF values
+        //  used in lib/is456.ts: 0.36 × (xu_max/d) × (1 − 0.42·(xu_max/d)) = coeff.)
+        const XU_MAX_RATIO =
+            fy <= 250 ? 0.531 :
+            fy <= 415 ? 0.479 :
+            fy <= 500 ? 0.456 :
+            0.439; // Fe550 and above
+        xu_max_mm = XU_MAX_RATIO * d;
+
+        // First assume NA in flange → rectangular design of width bf (via shared helper).
+        // The shared helper ALREADY enforces the xu ≤ xu_max limit for the rectangular
+        // section of width bf — if Mu > Mu_lim_rect it returns isDoubly = true (and the
+        // Ast is for the doubly-reinforced case). For a T-beam this is conservative:
+        // the actual Mu_lim is HIGHER than Mu_lim_rect because of the flange contribution.
+        // If we hit isDoubly here, we still proceed to the T-beam path (which may rescue
+        // the section without needing compression steel).
         const flexRect = flexuralDesignShared(M, bf, d, fck, fy);
         Ast_req = flexRect.Ast_req;
 
-        // Check if NA is actually in flange
+        // Check if NA is actually in flange (using the rectangular-section xu).
         const xu = (0.87 * fy * Ast_req) / (0.36 * fck * bf);
         NA_in_flange = xu <= Df;
 
@@ -128,23 +159,69 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
             // Rearranged as a quadratic in xu:
             //   0.36·fck·bw·(d − 0.42·xu)·xu + 0.45·fck·(bf−bw)·Df·(d − Df/2) − Mu = 0
             //   −0.1512·fck·bw·xu² + 0.36·fck·bw·d·xu + [0.45·fck·(bf−bw)·Df·(d − Df/2) − Mu] = 0
+            //
+            // Coefficients 0.36 / 0.42 / 0.45 follow the IS 456 / SP 16 SIMPLIFIED
+            // stress block (cl. 38.1 + cl. 38.1(c) for the flange overhang at uniform
+            // 0.45·fck). The textbook "exact" version uses 0.446 (= 2/3·0.67) and
+            // 0.416 (centroid of the parabolic-rectangular block); both are code-
+            // acceptable, the simplified version is slightly conservative.
             const Mu_Nmm = M * 1e6;
             const a = -0.1512 * fck * bw;
             const b_ = 0.36 * fck * bw * d;
             const c = 0.45 * fck * (bf - bw) * Df * (d - Df / 2) - Mu_Nmm;
             const disc = b_ * b_ - 4 * a * c;
+
+            // Singly-reinforced T-beam limiting moment (cl. 38.1):
+            //   Mu_lim_T = 0.36·fck·bw·xu_max·(d − 0.42·xu_max)
+            //            + 0.45·fck·(bf−bw)·Df·(d − Df/2)
+            Mu_lim_T = (0.36 * fck * bw * xu_max_mm * (d - 0.42 * xu_max_mm)
+                     + 0.45 * fck * (bf - bw) * Df * (d - Df / 2)) / 1e6; // kN·m
+
             if (disc >= 0) {
-                const xu_t = (-b_ + Math.sqrt(disc)) / (2 * a); // positive root
-                const C = 0.36 * fck * bw * xu_t + 0.45 * fck * (bf - bw) * Df;
-                Ast_req = C / (0.87 * fy);
+                const xu_t = (-b_ + Math.sqrt(disc)) / (2 * a); // smaller (singly-reinforced) root
+                xu_actual = xu_t;
+
+                // AUDIT FIX 2026-07-04 v2: IS 456 cl. 38.1 FORBIDS over-reinforced
+                // sections. If xu_t > xu_max, the concrete crushes BEFORE the steel
+                // yields — the Ast computed from the T-beam quadratic would NOT
+                // develop the design moment, and IS 456 does not allow this design.
+                // The correct options are (a) add compression reinforcement
+                // (doubly-reinforced T-beam) or (b) increase the section size.
+                // For the waffle-slab engine we flag the section as infeasible (NaN)
+                // so the optimizer rejects it; the user must increase D, bw, or Df.
+                if (xu_t > xu_max_mm) {
+                    isOverReinforced = true;
+                    Ast_req = NaN;
+                } else {
+                    const C = 0.36 * fck * bw * xu_t + 0.45 * fck * (bf - bw) * Df;
+                    Ast_req = C / (0.87 * fy);
+                }
             } else {
+                // Discriminant < 0: even xu → ∞ cannot develop Mu (section way too small).
                 Ast_req = NaN; // section fails
+                isOverReinforced = true;
             }
+        } else {
+            xu_actual = xu;
+            Mu_lim_T = flexRect.Mu_lim; // rectangular Mu_lim (already checked by flexuralDesign)
         }
 
-        // Min steel for rib (based on equivalent thickness D_eq of voided slab)
-        const p_min = getMinSteelRatio(fy);
-        const Ast_min = p_min * (bf_m * 1000) * D_eq;
+        // AUDIT FIX (2026-07-04): the previous minimum-steel calculation used
+        // the SLAB rule (Ast_min = p_min × bf × D_eq, where p_min = 0.12% for
+        // Fe500 / 0.15% for Fe250 — IS 456 Cl. 26.5.2.1). For a waffle rib,
+        // which IS 456 Cl. 30.5.3 explicitly says "shall be designed as beams
+        // in accordance with 26.5.1", the correct minimum is the BEAM rule
+        // (IS 456 Cl. 26.5.1.1(a)):
+        //     Ast_min = (0.85 / fy) × bw × d
+        // The slab rule gave a larger (more conservative) value when bf ≫ bw,
+        // but it was not code-compliant. We now use the beam rule and take the
+        // MAX of the beam rule and the slab rule on the EQUIVALENT section
+        // (bf × D_eq) — this preserves backward compatibility for any rib
+        // where the slab rule previously governed, while bringing the formula
+        // into code compliance.
+        const Ast_min_beam = (0.85 / fy) * bw * d;            // IS 456 Cl. 26.5.1.1(a) — beams
+        const Ast_min_slab = getMinSteelRatio(fy) * (bf_m * 1000) * D_eq; // IS 456 Cl. 26.5.2.1 — slabs
+        const Ast_min = Math.max(Ast_min_beam, Ast_min_slab);
         if (!Number.isNaN(Ast_req)) Ast_req = Math.max(Ast_req, Ast_min);
 
         // Shear check (per web width bw) — at the CRITICAL section.
@@ -177,7 +254,16 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
             shear_safe,
             needs_shear_reinforcement,
             shear_over_max,
-            NA_in_flange
+            NA_in_flange,
+            // AUDIT FIX 2026-07-04 v2: surface the over-reinforced flag + actual
+            // NA depth + xu_max + Mu_lim_T so the UI / report can flag the
+            // section as needing compression steel or a larger section.
+            isOverReinforced,
+            xu_actual: Math.round(xu_actual * 100) / 100,
+            xu_max: Math.round(xu_max_mm * 100) / 100,
+            xu_max_ratio: XU_MAX_RATIO,
+            Mu_lim_T: Math.round(Mu_lim_T * 100) / 100,
+            Mu_applied: M,
         };
     };
 
@@ -197,7 +283,15 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
     const topping_span = Math.max(spacing_x, spacing_y) - (bw / 1000);
     const topping_M_pos = (wu * topping_span * topping_span) / 16; // bottom mat (mid-span +M)
     const topping_M_neg = (wu * topping_span * topping_span) / 12; // top mat (over rib \u2212M)
-    const topping_d = Df - cover - 5; // using 8mm bar
+    // AUDIT FIX (2026-07-04): the previous `topping_d = Df - cover - 5` had a
+    // misleading "using 8mm bar" comment — the half-bar deduction of 5 mm
+    // actually corresponds to a 10 mm bar. The topping reinforcement is
+    // typically 8 mm or 10 mm bars (controlled by the max-bar-dia check
+    // `Df / 8` below). Using a 10 mm half-bar deduction is conservative for
+    // 8 mm bars (would be 4 mm) and exact for 10 mm bars. The comment is
+    // corrected here; the value is left as 5 mm so existing designs remain
+    // unchanged.
+    const topping_d = Df - cover - 5; // half-bar deduction (10 mm bar assumed; conservative for 8 mm)
 
     const calcAstTopping = (M_kNm: number): number => {
         const term = 1 - (4.6 * M_kNm * 1e6) / (fck * 1000 * topping_d * topping_d);
@@ -358,8 +452,12 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
         },
     };
 
+    // AUDIT FIX 2026-07-04 v2: include isOverReinforced in the SAFE/REVISE gate.
+    // A T-beam rib with xu > xu_max is forbidden by IS 456 cl. 38.1 and MUST
+    // be flagged REVISE (either add compression steel or increase section).
     const overallStatus: 'SAFE' | 'REVISE' =
         (ribGeometryOk && !ribX.shear_over_max && !ribY.shear_over_max &&
+            !ribX.isOverReinforced && !ribY.isOverReinforced &&
             allAstFinite && deflection_safe && barChecks.topping.astFeasible) ? 'SAFE' : 'REVISE';
 
     return {

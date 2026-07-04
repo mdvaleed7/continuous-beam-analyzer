@@ -20,7 +20,9 @@ import {
     annexCDeflection,
     getRequiredDeflectionCamber,
     computeSpanDepthCheck,
+    computeCost,
     type ConcreteGrade,
+    type CostParameters,
     type DeflectionResult,
     type SpanDepthCheckResult,
 } from '../lib/is456';
@@ -52,6 +54,7 @@ export interface CantileverSlabInput {
     parapetHeight?: number;    // m
     parapetThickness?: number; // mm
     parapetDensity?: number;   // kN/m3 (typically 20 for masonry)
+    costParams?: CostParameters; // AUDIT FIX OPT-3: optional cost overrides
 }
 
 export function analyzeCantileverSlab(input: CantileverSlabInput) {
@@ -293,7 +296,12 @@ interface OptimumCantileverSlabDesign {
     camber: number;        // upward camber applied (mm)
     concreteVol: number;   // m³ per meter width
     steelWeight: number;   // kg per meter width
-    costIndex: number;
+    costTotal_INR: number; // AUDIT FIX OPT-3 (2026-07-04): was `costIndex` (m³-equivalent), now proper INR
+    costBreakdown: {
+        concrete_INR: number;
+        steel_INR: number;
+        formwork_INR: number;
+    };
     result: ReturnType<typeof analyzeCantileverSlab>;
 }
 
@@ -302,7 +310,7 @@ export interface CantileverSlabOptimizeResult {
     feasibleCount: number;
     topDesigns: OptimumCantileverSlabDesign[];
     optimum: OptimumCantileverSlabDesign | null;
-    costRatioUsed: number;
+    costParams: CostParameters;   // AUDIT FIX OPT-3: was `costRatioUsed`, now full costParams
 }
 
 export type CantileverSlabProgressCallback = (done: number, total: number, feasible: number) => void;
@@ -313,6 +321,18 @@ export function optimizeCantileverSlab(
     costRatio: number = 90,
     onProgress?: CantileverSlabProgressCallback,
 ): CantileverSlabOptimizeResult {
+    // AUDIT FIX OPT-3 (2026-07-04): the previous `costIndex` returned a
+    // dimensionless "concrete-equivalent volume" (`concreteVol + steelWeight *
+    // (costRatio / 7850)`), inconsistent with the slab/flat-slab/waffle-slab
+    // optimizers which return `costTotal_INR` in INR. The fix uses the shared
+    // `computeCost` helper to return proper INR, including formwork. The caller
+    // can override any cost parameter via `input.costParams`.
+    const costParams: CostParameters = input.costParams ?? {
+        steelCost_per_kg: costRatio,
+        concreteCost_per_m3: 6500,
+        formworkCost_per_m2: 350,
+        wastage_factor: 1.07,
+    };
     const results: OptimumCantileverSlabDesign[] = [];
 
     const Ds: number[] = [];
@@ -365,14 +385,27 @@ export function optimizeCantileverSlab(
                                 const steelWeight = (
                                     result.Ast_provided + result.Ast_dist_provided + result.Asc_provided
                                 ) / 1e6 * result.L_eff * 7850;  // kg/m
-                                const costIndex = concreteVol + steelWeight * (costRatio / 7850);
+                                // AUDIT FIX OPT-3 (2026-07-04): use the shared `computeCost`
+                                // helper for a proper INR cost (concrete + steel + formwork).
+                                // Formwork area per metre width ≈ L_eff (soffit) + L_eff (top
+                                // surface) = 2 × L_eff. This is consistent with the slab /
+                                // flat-slab / waffle-slab optimizers.
+                                const formworkArea = 2 * result.L_eff;
+                                const costTotal_INR = computeCost(
+                                    concreteVol, steelWeight, formworkArea, costParams,
+                                );
+                                const concrete_INR = concreteVol * (costParams.concreteCost_per_m3 ?? 6500);
+                                const steel_INR = steelWeight * (costParams.steelCost_per_kg ?? 82) * (costParams.wastage_factor ?? 1.07);
+                                const formwork_INR = formworkArea * (costParams.formworkCost_per_m2 ?? 350);
 
                                 results.push({
                                     D, bar_main, spacing_main,
                                     bar_bot: bar_bot > 0 ? bar_bot : 0,
                                     spacing_bot: bar_bot > 0 ? spacing_bot : 0,
                                     camber: result.deflection.camber ?? 0,
-                                    concreteVol, steelWeight, costIndex, result,
+                                    concreteVol, steelWeight, costTotal_INR,
+                                    costBreakdown: { concrete_INR, steel_INR, formwork_INR },
+                                    result,
                                 });
                             }
                         } catch {
@@ -387,13 +420,13 @@ export function optimizeCantileverSlab(
         }
     }
 
-    results.sort((a, b) => a.costIndex - b.costIndex);
+    results.sort((a, b) => a.costTotal_INR - b.costTotal_INR);
 
     return {
         totalTrials: total,
         feasibleCount: results.length,
         topDesigns: results.slice(0, 5),
         optimum: results.length > 0 ? results[0] : null,
-        costRatioUsed: costRatio,
+        costParams,
     };
 }

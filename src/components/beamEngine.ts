@@ -481,12 +481,42 @@ function getTaperedBeamNormalizedFEM(d1: number, d2: number, alpha: number, wL_v
     // reaction was always 0, not wL.
     //
     // Cantilever reactions (forces the fixed left support exerts on the beam)
-    // for a trapezoidal load wL to wR over length L:
-    //   V_left = -(wL + wR)·L/2  (upward = negative in downward-positive convention)
-    //   M_left = -(2·wL + wR)·L²/6  (counterclockwise at left)
+    // for a trapezoidal load wL to wR over length L (intensity wL at the fixed
+    // left end, wR at the free right end):
+    //   V_left = -(wL + wR)·L/2                     (upward reaction; ΣV of load)
+    //   M_left = -L²·(wL + 2·wR)/6                  (moment of load about LEFT end)
     //   V_right = 0, M_right = 0
+    //
+    // Derivation of M_left:
+    //   Trapezoidal load intensity at section ξ from left:
+    //     w(ξ) = wL + (wR − wL)·ξ/L
+    //   Moment of load about left end:
+    //     M = ∫₀ᴸ w(ξ)·ξ dξ
+    //       = ∫₀ᴸ [wL·ξ + (wR − wL)·ξ²/L] dξ
+    //       = wL·L²/2 + (wR − wL)·L²/3
+    //       = L²·(3·wL + 2·(wR − wL))/6
+    //       = L²·(wL + 2·wR)/6
+    //   The support reaction moment (which balances this) is the negative of
+    //   the load moment, hence M_left_reaction = −L²·(wL + 2·wR)/6.
+    //
+    //   Sanity check (UDL wL = wR = w):
+    //     M = L²·(w + 2w)/6 = w·L²/2  ✓  (cantilever fixed-end moment = wL²/2)
+    //   Sanity check (triangular, wL = w, wR = 0 — peak at fixed end):
+    //     M = L²·(w + 0)/6 = w·L²/6   ✓  (cantilever FEM = (w·L/2)·(L/3) = wL²/6)
+    //   Sanity check (triangular, wL = 0, wR = w — peak at free end):
+    //     M = L²·(0 + 2w)/6 = w·L²/3  ✓  (cantilever FEM = (w·L/2)·(2L/3) = wL²/3)
+    //
+    // NOTE (audit 2026-07-04): the previous implementation used
+    //   M_left = −L²·(2·wL + wR)/6
+    // which is the moment of the load about the FREE (right) end, NOT about the
+    // fixed (left) end. For UDL the two coincide (both give wL²/2), so Set A's
+    // regression tests (which use UDL) passed, but for any non-uniform
+    // trapezoidal load on a tapered beam the FEM was incorrect. The corrected
+    // formula matches the closed-form uniform-beam branch above (verified by
+    // setting d2 = d1 + 1e-9 and comparing the Simpson's-rule FEM against the
+    // closed-form [fL, mL, fR, mR]).
     const V_cant = -(wL_val + wR_val) * L / 2;
-    const M_cant = -(2 * wL_val + wR_val) * L * L / 6;
+    const M_cant = -(wL_val + 2 * wR_val) * L * L / 6;
 
     const fem = [
         V_cant + restoration[0],

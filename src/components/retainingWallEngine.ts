@@ -21,7 +21,9 @@ import {
     getTauC,
     TAU_C_MAX,
     flexuralDesign as flexuralDesignShared,
+    computeCost,
     type ConcreteGrade,
+    type CostParameters,
 } from '../lib/is456';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -262,22 +264,45 @@ export function analyzeRetainingWall(input: RetainingWallInput): RetainingWallRe
 
     // ── Bearing pressure (trapezoidal, eccentric load) ──────────────────────
     // Resultant ΣV acts at x_bar from the toe. Eccentricity from base centre.
-    const x_bar = SigmaV > 0 ? M_resisting / SigmaV : 0; // (M_resist − M_ot) gives the resultant position
-    // Net moment about the centroid:
-    const M_net = SigmaV * x_bar - M_overturning; // = M_resisting - M_overturning about toe, then shift
-    // Simpler: resultant x measured from centroid = x_bar - B/2
+    //
+    // AUDIT FIX (2026-07-04): the previous code computed
+    //     x_bar = M_resisting / ΣV
+    // which is the centroid of the VERTICAL forces ONLY. The lateral
+    // (overturning) forces shift the resultant toward the toe (away from the
+    // heel), so the correct formula is
+    //     x_bar = (M_resisting − M_overturning) / ΣV
+    // This is the standard retaining-wall resultant formula (see any textbook,
+    // e.g. Reynolds's Reinforced Concrete Designer's Handbook §8.3.2, or IS 1904
+    // bearing-pressure eccentricity check).
+    //
+    // For a wall in active earth pressure, M_overturning > 0 and tends to lift
+    // the heel, so x_bar decreases (resultant moves toward the toe). The
+    // previous formula gave an x_bar that was too large (resultant too close
+    // to the heel), producing an unsafe underestimate of toe pressure and an
+    // overestimate of heel pressure.
+    const x_bar = SigmaV > 0 ? (M_resisting - M_overturning) / SigmaV : 0;
+    // Eccentricity measured from the base centre, POSITIVE TOWARD HEEL.
+    //   x_bar < B/2  →  resultant on toe side  →  e < 0  →  toe pressure higher
+    //   x_bar > B/2  →  resultant on heel side →  e > 0  →  heel pressure higher
     const eccentricity = x_bar - B_m / 2;
-    // Bearing: p = ΣV/B ± ΣV·e/(B²/6) = (ΣV/B)·(1 ± 6e/B)
+    // Bearing pressure distribution (Meyerhof / IS 1904):
+    //   p(x) = (ΣV/B)·(1 + (6·e/B)·(1 − 2·x/B))    (x measured from TOE)
+    // where e is positive toward the HEEL (the convention used above). At x=0
+    // (toe) this reduces to p_toe = (ΣV/B)·(1 − 6e/B), and at x=B (heel) to
+    // p_heel = (ΣV/B)·(1 + 6e/B). The previous code had the signs of the
+    // ±6e/B terms reversed, so when the resultant was on the toe side (the
+    // typical retaining-wall case) it reported the heel pressure as the larger
+    // value — physically backwards and unsafe for stem/heel/toe flexure design.
     const p_avg = SigmaV / B_m;
-    const p_toe = p_avg + p_avg * (6 * eccentricity / B_m) * 1; // toe side (e positive → toe pressure higher)
-    const p_heel = p_avg - p_avg * (6 * eccentricity / B_m);
-    // Note: if 6e/B > 1 the pressure at heel goes into tension — we clip to 0
+    const p_toe = p_avg - p_avg * (6 * eccentricity / B_m);  // toe (front) — LOWER when e>0 (resultant on heel)
+    const p_heel = p_avg + p_avg * (6 * eccentricity / B_m); // heel (back, under soil) — HIGHER when e>0
+    // Note: if 6e/B > 1 the pressure at the toe goes into tension — we clip to 0
     // and report a REVISE (the pressure distribution becomes triangular).
     const p_max = Math.max(p_toe, Math.max(p_heel, 0));
     const p_min = Math.min(p_toe, Math.min(p_heel, 0));
     const bearing_ok = p_max <= sbc && p_min >= 0;
     if (p_max > sbc) messages.push(`Bearing p_max ${p_max.toFixed(0)} > SBC ${sbc} kN/m²`);
-    if (p_min < 0) messages.push(`Tension at heel (e=${(eccentricity*1000).toFixed(0)}mm > B/6) — revise base`);
+    if (p_min < 0) messages.push(`Tension at toe (e=${(eccentricity*1000).toFixed(0)}mm > B/6) — revise base`);
 
     // ── Stem flexure & SFD/BMD Numerical Integration ────────────────────────
     const forcePoints: { y: number, V: number, M: number, p: number }[] = [];
@@ -337,8 +362,13 @@ export function analyzeRetainingWall(input: RetainingWallInput): RetainingWallRe
     // back to p_stem_back at the stem back face):
     const p_at_heel_back = p_heel; // at the very back of the heel
     // The stem back face is at B_toe + D_stem_base from the toe. Pressure there:
+    //   p(x) = p_avg·(1 − (6e/B)·(1 − 2x/B))   (x from toe, e positive toward heel)
+    // AUDIT FIX (2026-07-04): the sign of the (6e/B)·(1 − 2x/B) correction term
+    // was previously +, which made the interpolated pressures inconsistent with
+    // the (now-corrected) p_toe / p_heel endpoint values. It is now − so the
+    // interpolation matches the bearing-pressure distribution derived above.
     const x_stem_back = B_toe_m + D_stem_base_m;
-    const p_at_stem_back = p_avg + p_avg * (6 * eccentricity / B_m) * (1 - 2 * x_stem_back / B_m);
+    const p_at_stem_back = p_avg - p_avg * (6 * eccentricity / B_m) * (1 - 2 * x_stem_back / B_m);
     const p_heel_avg = (p_at_heel_back + p_at_stem_back) / 2;
     const heel_upward = p_heel_avg * B_heel_m;
     const heel_net_down = heel_self_wt + heel_soil_wt + heel_surcharge_wt - heel_upward;
@@ -359,7 +389,8 @@ export function analyzeRetainingWall(input: RetainingWallInput): RetainingWallRe
     //   − (toe self-weight).
     const toe_self_wt = B_toe_m * D_base_m * gamma_concrete;
     const p_at_toe_front = p_toe;
-    const p_at_stem_front = p_avg + p_avg * (6 * eccentricity / B_m) * (1 - 2 * B_toe_m / B_m);
+    // AUDIT FIX (2026-07-04): same sign correction as p_at_stem_back above.
+    const p_at_stem_front = p_avg - p_avg * (6 * eccentricity / B_m) * (1 - 2 * B_toe_m / B_m);
     const p_toe_avg = (p_at_toe_front + p_at_stem_front) / 2;
     const toe_upward = p_toe_avg * B_toe_m;
     const toe_net_up = toe_upward - toe_self_wt;
@@ -404,22 +435,80 @@ export function analyzeRetainingWall(input: RetainingWallInput): RetainingWallRe
 
 // ─── Optimizer ───────────────────────────────────────────────────────────────
 
+export interface RetainingWallOptimizeParams {
+    minB: number; maxB: number; stepB: number;       // base width (mm)
+    minThk: number; maxThk: number; stepThk: number; // stem base + base slab thickness (mm)
+}
+
+export interface OptimumRetainingWallDesign {
+    B: number;
+    B_toe: number;
+    thk: number;            // stem_base + base slab thickness
+    concreteVol: number;    // m³ per metre run
+    steelWeight: number;    // kg per metre run (sum of stem + heel + toe Ast × length)
+    costTotal_INR: number;  // total cost per metre run (₹)
+    result: RetainingWallResult;
+}
+
+export interface RetainingWallOptimizeResult {
+    totalTrials: number;
+    feasibleCount: number;
+    topDesigns: OptimumRetainingWallDesign[];        // sorted by cost ascending
+    optimum: OptimumRetainingWallDesign | null;
+    costParams: CostParameters;
+}
+
+export type RetainingWallProgressCallback = (
+    done: number, total: number, feasible: number,
+) => void;
+
+/**
+ * Optimize the cantilever retaining wall by sweeping base width B and stem/base
+ * thickness thk. The toe projection is set to B/3 (rounded to 50 mm) — a common
+ * heuristic that leaves the heel to carry the soil weight.
+ *
+ * AUDIT FIX OPT-2 (2026-07-04): the previous optimizer only minimized CONCRETE
+ * VOLUME, ignoring steel entirely. A wall with a thin stem + heavy rebar would
+ * be preferred over a wall with a slightly thicker stem + light rebar, even if
+ * the latter was cheaper. The fix computes a proper INR cost using the shared
+ * `computeCost` helper (concrete + steel + formwork), consistent with the
+ * slab/flat-slab/waffle-slab optimizers.
+ *
+ * Steel weight per metre run = Σ (Ast [mm²/m] × length [m] × 7850 / 1e6) over:
+ *   • Stem (height H_stem, Ast = stem_Ast)
+ *   • Heel (length B_heel, Ast = heel_Ast)
+ *   • Toe (length B_toe, Ast = toe_Ast)
+ * All three are per-metre-width Ast values from `analyzeRetainingWall`, so the
+ * weight is kg per metre run of wall.
+ */
 export function optimizeRetainingWall(
     baseInput: RetainingWallInput,
-    bounds: { minB: number, maxB: number, stepB: number, minThk: number, maxThk: number, stepThk: number }
-) {
-    let bestResult: RetainingWallResult | null = null;
-    let minVol = Infinity;
-    let feasible = 0;
+    bounds: RetainingWallOptimizeParams,
+    costParams: CostParameters = { steelCost_per_kg: 82, concreteCost_per_m3: 6500, formworkCost_per_m2: 350, wastage_factor: 1.07 },
+    onProgress?: RetainingWallProgressCallback,
+): RetainingWallOptimizeResult {
+    const results: OptimumRetainingWallDesign[] = [];
     let total = 0;
+    let feasible = 0;
 
     const { minB, maxB, stepB, minThk, maxThk, stepThk } = bounds;
 
-    for (let currentB = minB; currentB <= maxB; currentB += stepB) {
-        for (let thk = minThk; thk <= maxThk; thk += stepThk) {
-            // Toe projection heuristic: usually 1/3 of B
-            const currentToe = Math.round((currentB / 3) / 50) * 50; 
-            
+    // AUDIT FIX OPT-2: avoid floating-point accumulation in the sweep loops by
+    // computing the integer number of steps and using an index-based iteration.
+    const numB = Math.max(1, Math.floor((maxB - minB) / stepB) + 1);
+    const numThk = Math.max(1, Math.floor((maxThk - minThk) / stepThk) + 1);
+    total = numB * numThk;
+    let done = 0;
+
+    for (let iB = 0; iB < numB; iB++) {
+        const currentB = minB + iB * stepB;
+        for (let iT = 0; iT < numThk; iT++) {
+            const thk = minThk + iT * stepThk;
+            done++;
+
+            // Toe projection heuristic: usually 1/3 of B, rounded to 50 mm
+            const currentToe = Math.round((currentB / 3) / 50) * 50;
+
             const trialInput: RetainingWallInput = {
                 ...baseInput,
                 B: currentB,
@@ -428,19 +517,66 @@ export function optimizeRetainingWall(
                 D_base: thk,
             };
 
-            const r = analyzeRetainingWall(trialInput);
-            total++;
+            try {
+                const r = analyzeRetainingWall(trialInput);
 
-            if (r.overallStatus === 'SAFE') {
-                feasible++;
-                const vol = (r.B * r.D_base) / 1e6 + (0.5 * (r.D_stem_base + r.D_stem_top) * r.H_stem) / 1e6;
-                if (vol < minVol) {
-                    minVol = vol;
-                    bestResult = r;
+                if (r.overallStatus === 'SAFE') {
+                    feasible++;
+
+                    // Concrete volume per metre run (m³/m):
+                    //   base slab: B × D_base × 1 m
+                    //   stem (trapezoid): 0.5 × (D_stem_base + D_stem_top) × H_stem × 1 m
+                    const concreteVol =
+                        (r.B * r.D_base) / 1e6 +
+                        (0.5 * (r.D_stem_base + r.D_stem_top) * r.H_stem) / 1e6;
+
+                    // Steel weight per metre run (kg/m):
+                    //   stem: Ast [mm²/m] × H_stem [m] × 7850 / 1e6
+                    //   heel: Ast [mm²/m] × B_heel [m] × 7850 / 1e6
+                    //   toe:  Ast [mm²/m] × B_toe [m] × 7850 / 1e6
+                    // (All three Ast values are per-metre-width from the engine.)
+                    const steelWeight =
+                        (r.stem_Ast * (r.H_stem / 1000) +
+                         r.heel_Ast * (r.B_heel / 1000) +
+                         r.toe_Ast  * (r.B_toe  / 1000)) * 7850 / 1e6;
+
+                    // Formwork area per metre run (m²/m):
+                    //   both faces of stem + base top surface
+                    //   ≈ 2 × H_stem + B   (rough but reasonable for ranking)
+                    const formworkArea = 2 * (r.H_stem / 1000) + (r.B / 1000);
+
+                    const costTotal_INR = computeCost(
+                        concreteVol, steelWeight, formworkArea, costParams,
+                    );
+
+                    results.push({
+                        B: currentB,
+                        B_toe: currentToe,
+                        thk,
+                        concreteVol,
+                        steelWeight,
+                        costTotal_INR,
+                        result: r,
+                    });
                 }
+            } catch {
+                // skip invalid combo
+            }
+
+            if (onProgress && (done % Math.max(1, Math.floor(total / 20)) === 0 || done === total)) {
+                onProgress(done, total, feasible);
             }
         }
     }
 
-    return { bestResult, minVol, feasible, total };
+    // Sort by total cost ascending
+    results.sort((a, b) => a.costTotal_INR - b.costTotal_INR);
+
+    return {
+        totalTrials: total,
+        feasibleCount: feasible,
+        topDesigns: results.slice(0, 10),
+        optimum: results.length > 0 ? results[0] : null,
+        costParams,
+    };
 }

@@ -445,7 +445,7 @@ export default function CantileverSlabAnalyzer() {
                                         <div className="defl-summary">
                                             <div className="defl-result defl-ok">
                                                 <span><strong>✓ Optimum:</strong> D = {optResult.optimum.D} mm, top Ø{optResult.optimum.bar_main}@{optResult.optimum.spacing_main}{optResult.optimum.bar_bot > 0 ? `, bottom Ø${optResult.optimum.bar_bot}@${optResult.optimum.spacing_bot}` : ''}{optResult.optimum.camber > 0 ? `, camber ${optResult.optimum.camber.toFixed(0)}mm` : ''}</span>
-                                                <span className="chip chip-info">Cost Index = {optResult.optimum.costIndex.toFixed(2)}</span>
+                                                <span className="chip chip-info">Cost (₹) = {optResult.optimum.costTotal_INR.toFixed(0)}</span>
                                             </div>
                                             <div className="defl-result">
                                                 <span>Concrete: {optResult.optimum.concreteVol.toFixed(3)} m³/m</span>
@@ -465,7 +465,7 @@ export default function CantileverSlabAnalyzer() {
                                                         <td>{d.spacing_main}</td>
                                                         <td>{d.concreteVol.toFixed(3)}</td>
                                                         <td>{d.steelWeight.toFixed(2)}</td>
-                                                        <td>{d.costIndex.toFixed(2)}</td>
+                                                        <td>{d.costTotal_INR.toFixed(0)}</td>
                                                     </tr>
                                                 ))}
                                             </tbody>

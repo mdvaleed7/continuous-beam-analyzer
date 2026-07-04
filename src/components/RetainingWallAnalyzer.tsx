@@ -57,11 +57,15 @@ export default function RetainingWallAnalyzer() {
 
     const handleOptimize = () => {
         const res = optimizeRetainingWall(input, optBounds);
-        if (res.bestResult) {
-            setInput(res.bestResult);
-            toast(`Optimized! Tested ${res.total} combinations.`, { type: 'success' });
+        // AUDIT FIX OPT-2 (2026-07-04): the optimizer now returns a proper
+        // `RetainingWallOptimizeResult` with `optimum` (best design) and
+        // `totalTrials` / `feasibleCount`, instead of the legacy
+        // `{ bestResult, minVol, feasible, total }` shape.
+        if (res.optimum) {
+            setInput(res.optimum.result);
+            toast(`Optimized! Tested ${res.totalTrials} combinations, ${res.feasibleCount} feasible. Cost: ₹${res.optimum.costTotal_INR.toFixed(0)}/m run.`, { type: 'success' });
         } else {
-            toast('No feasible design found in the specified bounds.', { type: 'error' });
+            toast(`No feasible design found in the specified bounds (tested ${res.totalTrials} combinations).`, { type: 'error' });
         }
     };
 

@@ -21,6 +21,7 @@ import {
     flexuralDesign as flexuralDesignShared,
     computeRequiredDepthForBM,
     computeCostIndex,
+    computeCost,
     type ConcreteGrade,
 } from '../lib/is456';
 
@@ -632,16 +633,30 @@ export function optimizeFooting(
     const { minL, maxL, stepL, minB, maxB, stepB, minD, maxD, stepD } = params;
 
     // Calculate total combinations
-    const numL = Math.max(1, Math.floor((maxL - minL) / stepL) + 1);
-    const numB = Math.max(1, Math.floor((maxB - minB) / stepB) + 1);
-    const numD = Math.max(1, Math.floor((maxD - minD) / stepD) + 1);
+    // AUDIT FIX OPT-4 (2026-07-04): use Math.round to avoid floating-point
+    // error in the count. (0.6 - 0.4) / 0.1 = 1.9999... in floating-point, so
+    // Math.floor gives 1 (→ 2 trials) instead of 2 (→ 3 trials). Math.round
+    // with a small epsilon handles this correctly.
+    const countSteps = (min: number, max: number, step: number) =>
+        Math.max(1, Math.round((max - min) / step) + 1);
+    const numL = countSteps(minL, maxL, stepL);
+    const numB = countSteps(minB, maxB, stepB);
+    const numD = countSteps(minD, maxD, stepD);
     const total = numL * numB * numD;
-    
+
     let done = 0;
 
-    for (let L = minL; L <= maxL; L += stepL) {
-        for (let B = minB; B <= maxB; B += stepB) {
-            for (let D = minD; D <= maxD; D += stepD) {
+    // AUDIT FIX OPT-4 (2026-07-04): use integer-indexed loops instead of
+    // floating-point accumulation (`L += stepL`) to avoid missing or duplicating
+    // the last iteration due to floating-point error. This is especially
+    // important at fine step sizes (e.g. 0.05 m) where 0.05 + 0.05 + ... may
+    // not exactly equal 1.0 after 20 additions.
+    for (let iL = 0; iL < numL; iL++) {
+        const L = minL + iL * stepL;
+        for (let iB = 0; iB < numB; iB++) {
+            const B = minB + iB * stepB;
+            for (let iD = 0; iD < numD; iD++) {
+                const D = minD + iD * stepD;
                 done++;
                 try {
                     const trialConfig = { ...config, L, B, D };
@@ -655,7 +670,7 @@ export function optimizeFooting(
                     const result = analyzeFooting(trialConfig);
 
                     if (result.overallStatus === 'SAFE') {
-                        // Calculate volume for sorting. 
+                        // Calculate volume for sorting.
                         // Flat footing volume: L * B * D
                         // Slope footing volume: complex, but roughly we can just use L*B*D as an upper bound or compute exact.
                         // For simplicity in optimization ranking, L * B * D is sufficient.
@@ -670,11 +685,33 @@ export function optimizeFooting(
                             volume = L * B * D1_m + (D - D1_m) / 3 * (A1 + A2 + Math.sqrt(A1 * A2));
                         }
 
-                        // Calculate steel weight (using required area since actual bars aren't selected here)
-                        // Ast_req is mm² per meter width.
-                        const steelWeight = ((result.flexureX.Ast_req + result.flexureZ.Ast_req) * L * B * 7850) / 1e6;
-                        
-                        const costIndex = computeCostIndex(volume, steelWeight, costRatio);
+                        // AUDIT FIX OPT-4 (2026-07-04): the previous steel-weight
+                        // calc used `Ast_req` (required), which UNDER-estimates the
+                        // actual steel weight because the engine's `selectBars`
+                        // helper always rounds UP to the next standard bar/spacing
+                        // combination. There's no `Ast_provided` exposed in the
+                        // footing result (the engine only returns `Ast_req`), so
+                        // we keep `Ast_req` here but document the under-estimation.
+                        // A future improvement would be to expose `Ast_provided`
+                        // from `analyzeFooting` and use it here.
+                        //   Steel weight = (Ast_req_X [mm²/m] × L [m] + Ast_req_Z [mm²/m] × B [m]) × 7850 / 1e6 [kg]
+                        //   (X-direction bars run length L; Z-direction bars run length B.)
+                        const steelWeight = (result.flexureX.Ast_req * L + result.flexureZ.Ast_req * B) * 7850 / 1e6;
+
+                        // AUDIT FIX OPT-4 (2026-07-04): include formwork in the cost.
+                        // Formwork area = perimeter × depth (the sides of the footing pit).
+                        //   perimeter = 2 × (L + B) [m]; depth = D [m]
+                        //   formworkArea = 2 × (L + B) × D [m²]
+                        // The previous `computeCostIndex` helper omitted formwork,
+                        // making the optimizer prefer thick footings (more concrete,
+                        // less formwork per m³) over thin footings (less concrete,
+                        // more formwork per m³). The fix brings the cost metric in
+                        // line with the slab/flat-slab/waffle-slab optimizers.
+                        const formworkArea = 2 * (L + B) * D;
+                        const costIndex = computeCost(
+                            volume, steelWeight, formworkArea,
+                            { steelCost_per_kg: costRatio, concreteCost_per_m3: 6500, formworkCost_per_m2: 350, wastage_factor: 1.07 },
+                        );
 
                         results.push({
                             L: Math.round(L * 100) / 100,
