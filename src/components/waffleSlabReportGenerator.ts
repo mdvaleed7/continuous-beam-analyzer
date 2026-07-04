@@ -89,7 +89,7 @@ function cl305StatusBlock(rg: any): string {
     `;
 }
 
-function ribSection(label: string, M: number, V: number, rib: any, bf_m: number, input: WaffleSlabInput): string {
+function ribSection(label: string, M: number, V: number, rib: any, bf_m: number, input: WaffleSlabInput, D_eq: number): string {
     const { spacing_x, spacing_y, bw, D, Df, cover, fck, fy } = input;
     const d = D - cover - 10;
     return `
@@ -120,7 +120,10 @@ function ribSection(label: string, M: number, V: number, rib: any, bf_m: number,
                         Re-solved quadratic for x<sub>u</sub>, then A<sub>st</sub> = C/(0.87·f<sub>y</sub>).
                     </p>
                 ` : ''}
-                ${kx(`A_{st,min} = 0.0012 \\times b_w \\times d = ${rib.Ast_min.toFixed(0)} \\text{ mm}^2`)}
+                <p style="font-size:12px;color:#64748b;margin:4px 0;">
+                    Min steel per IS 456 for voided slabs based on equivalent thickness D<sub>eq</sub> = ${D_eq.toFixed(1)} mm.
+                </p>
+                ${kx(`A_{st,min} = 0.0012 \\times b_f \\times D_{eq} = ${rib.Ast_min.toFixed(0)} \\text{ mm}^2`)}
                 <div class="provided-box">
                     <strong>Provided A<sub>st</sub>:</strong> ${rib.Ast_req.toFixed(0)} mm² (≥ min: ${rib.Ast_req >= rib.Ast_min ? 'OK' : 'LOW'})
                 </div>
@@ -189,7 +192,8 @@ export async function generateWaffleSlabPDF(input: WaffleSlabInput, results: any
                     <div class="section-body">
                         ${kx(`d = D - \\text{cover} - 10 = ${D} - ${cover} - 10 = ${(D - cover - 10)} \\text{ mm}`)}
                         ${kx(`D_r = D - D_f = ${D} - ${Df} = ${D - Df} \\text{ mm (rib depth)}`)}
-                        <p style="font-size:12px;color:#64748b;margin:4px 0 0 0;">Self-weight computed from solid volume minus void volume per unit cell.</p>
+                        <p style="font-size:12px;color:#64748b;margin:4px 0 0 0;">Equivalent solid thickness and self-weight (IS 456 for voided slabs).</p>
+                        ${kx(`D_{eq} = \\left(1 - \\frac{V_v}{V_s}\\right)D = ${r.D_eq.toFixed(1)} \\text{ mm}`)}
                         ${calcRow('Eq. self-weight (w_dead)', `${r.w_dead.toFixed(2)}`, 'kN/m²')}
                         ${kx(`w_u = 1.5 \\times (w_{dead} + w_{live} + w_{finish}) = ${r.wu.toFixed(2)} \\text{ kN/m}^2`)}
                     </div>
@@ -213,9 +217,9 @@ export async function generateWaffleSlabPDF(input: WaffleSlabInput, results: any
                     Each rib designed as a T-beam with flange width = rib spacing.
                     Neutral-axis check performed; T-beam stress block applied when x<sub>u</sub> &gt; D<sub>f</sub>.
                 </p>
-                ${ribSection('Ribs Parallel to X (Short Span)', r.M_rib_x, r.V_rib_x, r.ribX, spacing_y, input)}
+                ${ribSection('Ribs Parallel to X (Short Span)', r.M_rib_x, r.V_rib_x, r.ribX, spacing_y, input, r.D_eq)}
                 <div style="page-break-before: always;"></div>
-                ${ribSection('Ribs Parallel to Y (Long Span)', r.M_rib_y, r.V_rib_y, r.ribY, spacing_x, input)}
+                ${ribSection('Ribs Parallel to Y (Long Span)', r.M_rib_y, r.V_rib_y, r.ribY, spacing_x, input, r.D_eq)}
 
                 <h2>5. Topping Slab Design</h2>
                 <div class="section-box avoid-break">

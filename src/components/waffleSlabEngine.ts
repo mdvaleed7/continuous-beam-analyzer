@@ -66,13 +66,18 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
     const d = D - cover - 10; // effective depth
     const Dr = D - Df; // rib depth
 
-    // Self weight calculation
+    // Self weight and equivalent thickness calculation (IS 456 for voided slabs)
     // Volume of a unit cell: spacing_x * spacing_y * D
     // Volume of void in a unit cell: (spacing_x - bw/1000) * (spacing_y - bw/1000) * (Dr/1000)
     const cell_area = spacing_x * spacing_y;
     const void_vol = (spacing_x - bw / 1000) * (spacing_y - bw / 1000) * (Dr / 1000);
     const solid_vol = (cell_area * D / 1000) - void_vol;
     const w_dead = (solid_vol / cell_area) * 25; // equivalent uniform dead load kN/m2
+
+    // Equivalent thickness Deq = (1 - Vv / Vs) * D
+    const V_v = void_vol / cell_area;
+    const V_s = D / 1000;
+    const D_eq = (1 - V_v / V_s) * D;
 
     const wu = 1.5 * (w_dead + w_live + w_finish);
 
@@ -137,9 +142,9 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
             }
         }
 
-        // Min steel for rib (based on web width bw, per IS 456 Cl. 26.5.2.1)
+        // Min steel for rib (based on equivalent thickness D_eq of voided slab)
         const p_min = getMinSteelRatio(fy);
-        const Ast_min = p_min * bw * d;
+        const Ast_min = p_min * (bf_m * 1000) * D_eq;
         if (!Number.isNaN(Ast_req)) Ast_req = Math.max(Ast_req, Ast_min);
 
         // Shear check (per web width bw) — at the CRITICAL section.
@@ -378,6 +383,7 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
         // for UI + report so the user sees both top and bottom contributions).
         Ast_rib_provided,
         Asc_rib_provided,
+        D_eq,
         // deflection (Annex C)
         deflection,
         deflection_safe,
@@ -605,8 +611,13 @@ export function optimizeWaffleSlab(
                 result.ribX.Ast_req / result.Ast_rib_provided,
                 result.ribY.Ast_req / result.Ast_rib_provided
             );
+            if (flexure_u > 1.0) return null; // enforce flexural capacity and voided slab min steel
+
             const deflection_u = result.deflection.a_total / result.deflection.limit_total;
+            if (deflection_u > 1.0) return null; // strictly enforce deflection limit
+
             const shear_u = Math.max(result.ribX.tau_v / result.ribX.tau_c, result.ribY.tau_v / result.ribY.tau_c);
+            if (shear_u > 1.0) return null; // enforce shear capacity (tau_v <= tau_c) to avoid links in ribs
 
             return {
                 D, Df, bw, spacing, ribDepth: D - Df, rib_bar_dia, rib_n_bars,
