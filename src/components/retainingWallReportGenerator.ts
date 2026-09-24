@@ -109,6 +109,7 @@ export async function generateRetainingWallReport(
             ${kx('P_a = \\frac{1}{2} K_a \\gamma H_{soil}^2 = \\frac{1}{2} \\times ' + fmt(r.Ka, 3) + ' \\times ' + config.gamma_soil + ' \\times ' + fmt(r.H_soil / 1000, 2) + '^2 = ' + fmt(r.Pa, 2) + ' \\text{ kN/m}' )}
             ${config.q_surcharge > 0 ? kx('P_q = K_a \\cdot q \\cdot H_{soil} = ' + fmt(r.Ka, 3) + ' \\times ' + config.q_surcharge + ' \\times ' + fmt(r.H_soil / 1000, 2) + ' = ' + fmt(r.Pq, 2) + ' \\text{ kN/m}') : ''}
             ${r.Pa_water > 0 ? kx('P_w = \\frac{1}{2} \\gamma_w h_{wet}^2 = ' + fmt(r.Pa_water, 2) + ' \\text{ kN/m}') : ''}
+            ${r.U > 0 ? kx('U = \\frac{1}{2} \\gamma_w h_w B = ' + fmt(r.U, 2) + ' \\text{ kN/m} \\text{ at } ' + fmt(r.U_arm, 3) + ' \\text{ m from the toe (uplift, triangular heel → toe)}') : ''}
         </div>
 
         <!-- ───────── 4. Stability Checks ───────── -->
@@ -118,13 +119,13 @@ export async function generateRetainingWallReport(
                 <th>Check</th><th>Achieved</th><th>Required</th><th>Status</th>
             </tr>
             <tr>
-                <td style="font-weight:bold; text-align:left; padding-left:10px;">Overturning (about toe)</td>
+                <td style="font-weight:bold; text-align:left; padding-left:10px;">Overturning (about toe) — ${kxInline('0.9 M_R / M_O')}, IS 456 Cl. 20.1</td>
                 <td>${fmt(r.fos_overturning, 2)}</td>
                 <td>≥ 1.4</td>
                 <td class="${r.overturning_ok ? 'status-safe' : 'status-fail'}">${r.overturning_ok ? '✅ SAFE' : '❌ FAIL'}</td>
             </tr>
             <tr>
-                <td style="font-weight:bold; text-align:left; padding-left:10px;">Sliding</td>
+                <td style="font-weight:bold; text-align:left; padding-left:10px;">Sliding — ${kxInline('0.9 \\mu (\\Sigma W - U) / \\Sigma H')}, IS 456 Cl. 20.2</td>
                 <td>${fmt(r.fos_sliding, 2)}</td>
                 <td>≥ 1.4</td>
                 <td class="${r.sliding_ok ? 'status-safe' : 'status-fail'}">${r.sliding_ok ? '✅ SAFE' : '❌ FAIL'}</td>
@@ -139,11 +140,12 @@ export async function generateRetainingWallReport(
 
         <div class="calc-block">
             <strong>Overturning Check</strong>
-            ${kx('M_{resist} = ' + fmt(r.M_resisting, 2) + ' \\text{ kN·m/m}, \\quad M_{over} = ' + fmt(r.M_overturning, 2) + ' \\text{ kN·m/m}')}
-            ${kx('FoS_{OT} = \\frac{M_R}{M_O} = \\frac{' + fmt(r.M_resisting, 2) + '}{' + fmt(r.M_overturning, 2) + '} = ' + fmt(r.fos_overturning, 2))}
+            <p style="font-size:12px;color:#475569;">Restoring moment from permanent loads only (stem, base, soil over the heel — soil height H<sub>soil</sub> − D<sub>base</sub>); the surcharge over the heel is variable and not counted as restoring. Only 0.9 × dead load resists (IS 456 Cl. 20.1, 20.2).</p>
+            ${kx('M_R = ' + fmt(r.M_resisting, 2) + ' \\text{ kN·m/m}, \\quad M_O = M_{lateral} + U\\,x_U = ' + fmt(r.M_overturning, 2) + ' \\text{ kN·m/m}')}
+            ${kx('FoS_{OT} = \\frac{0.9 M_R}{M_O} = \\frac{0.9 \\times ' + fmt(r.M_resisting, 2) + '}{' + fmt(r.M_overturning, 2) + '} = ' + fmt(r.fos_overturning, 2) + ' \\geq 1.4')}
             <strong>Sliding Check</strong>
-            ${kx('FoS_{SL} = \\frac{\\mu \\Sigma V}{\\Sigma H} = \\frac{' + fmt(r.mu, 2) + ' \\times ' + fmt(r.SigmaV, 2) + '}{' + fmt(r.Pa + r.Pq + r.Pa_water, 2) + '} = ' + fmt(r.fos_sliding, 2))}
-            <strong>Bearing Pressure</strong>
+            ${kx('FoS_{SL} = \\frac{0.9 \\mu (\\Sigma W_{dead} - U)}{\\Sigma H} = \\frac{0.9 \\times ' + fmt(r.mu, 2) + ' \\times (' + fmt(r.W_dead, 2) + ' - ' + fmt(r.U, 2) + ')}{' + fmt(r.SigmaH, 2) + '} = ' + fmt(r.fos_sliding, 2) + ' \\geq 1.4')}
+            <strong>Bearing Pressure</strong> (governing: ${r.bearingCase} over the heel; no tension permitted)
             ${kx('p_{toe} = ' + fmt(r.p_toe, 1) + ' \\text{ kN/m²}, \\quad p_{heel} = ' + fmt(r.p_heel, 1) + ' \\text{ kN/m²}')}
         </div>
 
@@ -156,6 +158,9 @@ export async function generateRetainingWallReport(
                 <div class="calc-row"><span class="label">${kxInline('M_u')}</span><span class="value">${fmt(r.stem_Mu, 2)} kN·m</span></div>
                 <div class="calc-row"><span class="label">${kxInline('A_{st,req}')}</span><span class="value">${fmt(r.stem_Ast, 0)} mm²/m</span></div>
                 <div class="calc-row"><span class="label">${kxInline('p_t')}</span><span class="value">${fmt(r.stem_pt ?? 0, 3)} %</span></div>
+                <div class="calc-row"><span class="label">Vertical bars (earth face)</span><span class="value">${r.stem_bars.label}</span></div>
+                <div class="calc-row"><span class="label">Horizontal (Cl. 32.5 c, ${fmt(r.stem_horizontal.ratio * 100, 2)}%)</span><span class="value">${r.stem_horizontal.bars.label} each face</span></div>
+                <div class="calc-row"><span class="label">Anchorage in base (${kxInline('L_d')} = ${r.anchorage.Ld} mm)</span><span class="value">${r.anchorage.detail === 'straight' ? 'straight' : r.anchorage.detail === 'L-bar' ? `L-bar, leg ≥ ${r.anchorage.leg_req} mm` : 'INSUFFICIENT'}</span></div>
             </div>
             <div class="col">
                 <h4>Shear</h4>
@@ -172,7 +177,8 @@ export async function generateRetainingWallReport(
                 <h4>Flexure</h4>
                 <div class="calc-row"><span class="label">Effective depth d</span><span class="value">${fmt(r.heel_d, 0)} mm</span></div>
                 <div class="calc-row"><span class="label">${kxInline('M_u')}</span><span class="value">${fmt(r.heel_Mu, 2)} kN·m</span></div>
-                <div class="calc-row"><span class="label">${kxInline('A_{st,req}')}</span><span class="value">${fmt(r.heel_Ast, 0)} mm²/m</span></div>
+                <div class="calc-row"><span class="label">${kxInline('A_{st,req}')}</span><span class="value">${fmt(r.heel_Ast, 0)} mm²/m → ${r.heel_bars.label} (top)</span></div>
+                <p style="font-size:11px;color:#64748b;">Net load: soil + surcharge + self-weight down; trapezoidal contact pressure + uplift up (exact moments at the stem face, worse of with/without surcharge).</p>
             </div>
             <div class="col">
                 <h4>Shear</h4>
@@ -189,7 +195,8 @@ export async function generateRetainingWallReport(
                 <h4>Flexure</h4>
                 <div class="calc-row"><span class="label">Effective depth d</span><span class="value">${fmt(r.toe_d, 0)} mm</span></div>
                 <div class="calc-row"><span class="label">${kxInline('M_u')}</span><span class="value">${fmt(r.toe_Mu, 2)} kN·m</span></div>
-                <div class="calc-row"><span class="label">${kxInline('A_{st,req}')}</span><span class="value">${fmt(r.toe_Ast, 0)} mm²/m</span></div>
+                <div class="calc-row"><span class="label">${kxInline('A_{st,req}')}</span><span class="value">${fmt(r.toe_Ast, 0)} mm²/m → ${r.toe_bars.label} (bottom)</span></div>
+                <div class="calc-row"><span class="label">Base distribution (Cl. 26.5.2.1)</span><span class="value">${r.base_distribution.bars.label} each face</span></div>
             </div>
             <div class="col">
                 <h4>Shear</h4>

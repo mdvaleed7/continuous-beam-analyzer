@@ -6,19 +6,19 @@
  * guards to prevent the bugs from creeping back in:
  *
  *   1. RW-BM-1: 4 m dry cantilever retaining wall, surcharge 10 kN/m².
- *      Hand-derived: Ka=1/3, Pa=48 kN/m, M_overturning=90.67 kN·m/m,
- *      ΣV=163.76 kN/m, x_bar=0.9335 m (corrected), e=-0.2665 m,
- *      p_toe=113.67 kN/m², p_heel=22.78 kN/m².
- *      Buggy formula would give x_bar=1.487 m, e=+0.287 m, p_toe=19.31,
- *      p_heel=117.18 — the OLD code under-estimated toe pressure by 6×.
+ *      Hand-derived (2026-09 review): soil over the heel H − D_base = 3.6 m,
+ *      surcharge not restoring (IS 456 Cl. 20.1): W_dead = 139.68 kN/m,
+ *      M_R = 202.61 kN·m/m, M_O = 90.67 kN·m/m, 0.9·M_R/M_O = 2.01,
+ *      sliding 0.92 < 1.4. Bearing governed without the heel surcharge:
+ *      x_bar = 0.8014 m, e = −0.3986 m, p_toe = 116.19, p_heel = 0.21 kN/m².
  *
  *   2. RW-BM-2: 6 m wall with surcharge (textbook size). Hand-derived
- *      x_bar=0.9252 m, e=-0.5748 m, p_toe=211.40 kN/m² (>SBC → REVISE),
- *      p_heel=-14.71 kN/m² (tension → REVISE). The corrected code
- *      correctly flags this wall as REVISE on both checks.
+ *      x_bar = 0.7563 m, e = −0.7437 m, p_toe = 214.47 kN/m² (> SBC → REVISE),
+ *      p_heel = −42.03 kN/m² (tension → REVISE).
  *
- *   3. RW-BM-3: 5 m wall with water table at 2 m depth. Tests the water-
- *      table handling in the bearing-pressure computation.
+ *   3. RW-BM-3: 5 m wall with water table at 2 m depth. Water, submerged
+ *      soil and the uplift under the base (U = 39.73 kN/m at 2B/3):
+ *      x_bar = 0.5997 m, p_toe = 151.46, p_heel = −37.90 kN/m² → REVISE.
  *
  *   4. WS-D-2: Waffle-slab effective depth tracks the user-supplied
  *      `rib_bar_dia` parameter (12/16/20/25 mm all give the expected d).
@@ -65,57 +65,64 @@ describe('RW-BM-1: 4 m dry cantilever retaining wall (textbook benchmark)', () =
         expect(r.M_overturning).toBeCloseTo(90.67, 1);
     });
 
-    test('ΣV (stem + base + soil + surcharge) = 163.76 kN/m', () => {
+    test('vertical loads: soil over the heel is H − D_base = 3.6 m high', () => {
         const r = analyzeRetainingWall(input);
         // Stem: 0.5*(0.4+0.2)*3.6*24 = 25.92
         // Base: 2.4*0.4*24 = 23.04
-        // Soil: 1.4*4*18 = 100.8
-        // Surcharge: 1.4*10 = 14
-        // Total: 163.76
-        expect(r.SigmaV).toBeCloseTo(163.76, 1);
+        // Soil: 1.4*3.6*18 = 90.72   (not 1.4*4.0 — the base occupies 0.4 m)
+        // Surcharge: 1.4*10 = 14     (variable — bearing only)
+        expect(r.W_soil).toBeCloseTo(90.72, 2);
+        expect(r.W_dead).toBeCloseTo(139.68, 2);
+        expect(r.SigmaV).toBeCloseTo(153.68, 2);   // W_dead + surcharge − U (U = 0, dry)
     });
 
-    test('M_resisting (about toe) = 243.54 kN·m/m', () => {
+    test('M_resisting (permanent loads about the toe) = 202.61 kN·m/m', () => {
         const r = analyzeRetainingWall(input);
         // Stem: 25.92 * 0.8 = 20.736
         // Base: 23.04 * 1.2 = 27.648
-        // Soil: 100.8 * 1.7 = 171.36
-        // Surcharge: 14 * 1.7 = 23.8
-        // Total: 243.544
-        expect(r.M_resisting).toBeCloseTo(243.54, 1);
+        // Soil: 90.72 * 1.7 = 154.224
+        // Surcharge over the heel is not a restoring action (IS 456 Cl. 20.1)
+        expect(r.M_resisting).toBeCloseTo(202.608, 2);
     });
 
-    test('x_bar = (M_resisting - M_overturning) / ΣV = 0.9335 m (CORRECTED)', () => {
+    test('stability per IS 456 Cl. 20: 0.9·M_R/M_O = 2.011, 0.9·μ·ΣW/ΣH = 0.922 (sliding fails)', () => {
         const r = analyzeRetainingWall(input);
-        const B_m = r.B / 1000;
-        const x_bar = r.eccentricity + B_m / 2;
-        // (243.544 - 90.667) / 163.76 = 0.9335 m
-        expect(x_bar).toBeCloseTo(0.9335, 3);
-        // The buggy formula would give 243.544/163.76 = 1.487 m — way off.
-        expect(x_bar).not.toBeCloseTo(1.487, 1);
+        expect(r.fos_overturning).toBeCloseTo(0.9 * 202.608 / 90.667, 3);   // 2.011 ≥ 1.4
+        expect(r.overturning_ok).toBe(true);
+        expect(r.fos_sliding).toBeCloseTo(0.9 * 0.45 * 139.68 / 61.333, 3); // 0.922 < 1.4
+        expect(r.sliding_ok).toBe(false);
+        expect(r.overallStatus).toBe('REVISE');
     });
 
-    test('eccentricity = -0.2665 m (NEGATIVE → resultant on toe side)', () => {
+    test('bearing governed by the case without heel surcharge: x_bar = 0.8014 m', () => {
         const r = analyzeRetainingWall(input);
-        // e = x_bar - B/2 = 0.9335 - 1.2 = -0.2665
-        expect(r.eccentricity).toBeCloseTo(-0.2665, 3);
-        expect(r.eccentricity).toBeLessThan(0); // on toe side (typical RW)
+        // With surcharge:    V = 153.68, x̄ = (202.608 + 23.8 − 90.667)/153.68 = 0.8833 → p_toe 114.74
+        // Without surcharge: V = 139.68, x̄ = (202.608 − 90.667)/139.68 = 0.8014 → p_toe 116.19
+        expect(r.bearingCase).toBe('without surcharge');
+        expect(r.V_bearing).toBeCloseTo(139.68, 2);
+        expect(r.x_bar).toBeCloseTo(0.80141, 4);
+        // The resultant is NOT M_resisting / ΣV (the old bug, 1.45 m)
+        expect(r.x_bar).not.toBeCloseTo(202.608 / 139.68, 1);
     });
 
-    test('p_toe = 113.67 kN/m² (corrected sign — HIGHER than p_heel)', () => {
+    test('eccentricity = −0.3986 m (NEGATIVE → resultant on toe side)', () => {
         const r = analyzeRetainingWall(input);
-        // p_avg = 68.233, 6e/B = -0.6662
-        // p_toe = 68.233 * (1 - (-0.6662)) = 113.67
-        expect(r.p_toe).toBeCloseTo(113.67, 0);
+        // e = x_bar − B/2 = 0.80141 − 1.2
+        expect(r.eccentricity).toBeCloseTo(-0.39859, 4);
+        expect(r.eccentricity).toBeLessThan(0);
+    });
+
+    test('p_toe = 116.19 kN/m² (HIGHER than p_heel)', () => {
+        const r = analyzeRetainingWall(input);
+        // p_avg = 139.68/2.4 = 58.2, 6e/B = −0.99648 → p_toe = 58.2 × 1.99648
+        expect(r.p_toe).toBeCloseTo(116.195, 2);
         expect(r.p_toe).toBeGreaterThan(r.p_heel);
-        // The buggy formula would give p_toe = 19.31 — under-estimated by ~6×.
-        expect(r.p_toe).toBeGreaterThan(100);
     });
 
-    test('p_heel = 22.78 kN/m² (corrected sign — LOWER than p_toe, positive)', () => {
+    test('p_heel = 0.205 kN/m² (resultant just inside the middle third)', () => {
         const r = analyzeRetainingWall(input);
-        // p_heel = 68.233 * (1 + (-0.6662)) = 22.78
-        expect(r.p_heel).toBeCloseTo(22.78, 0);
+        // p_heel = 58.2 × (1 − 0.99648)
+        expect(r.p_heel).toBeCloseTo(0.205, 2);
         expect(r.p_heel).toBeGreaterThan(0); // no tension
     });
 
@@ -136,30 +143,35 @@ describe('RW-BM-2: 6 m wall with surcharge (textbook size — exceeds SBC)', () 
         fck: 25, fy: 500, grade: 'M25', steelGrade: 'Fe500',
         cover: 50, loadFactor: 1.5,
     };
+    // W_stem = 0.5·0.7·5.4·24 = 45.36 @ 1.0; W_base = 3·0.6·24 = 43.2 @ 1.5;
+    // W_soil = 1.75·5.4·18 = 170.1 @ 2.125; W_surcharge = 17.5 @ 2.125
+    // W_dead = 258.66, M_R = 45.36 + 64.8 + 361.4625 = 471.6225
 
-    test('M_overturning = 276 kN·m/m, ΣV = 295.06 kN/m', () => {
+    test('M_overturning = 276 kN·m/m, ΣV = 276.16 kN/m, M_R = 471.62 kN·m/m', () => {
         const r = analyzeRetainingWall(input);
         expect(r.M_overturning).toBeCloseTo(276.0, 1);
-        expect(r.SigmaV).toBeCloseTo(295.06, 1);
+        expect(r.SigmaV).toBeCloseTo(276.16, 2);
+        expect(r.M_resisting).toBeCloseTo(471.6225, 2);
     });
 
-    test('x_bar = 0.9252 m (corrected), eccentricity = -0.5748 m', () => {
+    test('governing case without surcharge: x_bar = 0.7563 m, eccentricity = −0.7437 m', () => {
         const r = analyzeRetainingWall(input);
-        const B_m = r.B / 1000;
-        const x_bar = r.eccentricity + B_m / 2;
-        expect(x_bar).toBeCloseTo(0.9252, 3);
-        expect(r.eccentricity).toBeCloseTo(-0.5748, 3);
+        // x̄ = (471.6225 − 276)/258.66 = 0.75629
+        expect(r.bearingCase).toBe('without surcharge');
+        expect(r.x_bar).toBeCloseTo(0.75629, 4);
+        expect(r.eccentricity).toBeCloseTo(-0.74371, 4);
     });
 
-    test('p_toe = 211.4 kN/m² (EXCEEDS SBC = 200 → REVISE)', () => {
+    test('p_toe = 214.47 kN/m² (EXCEEDS SBC = 200 → REVISE)', () => {
         const r = analyzeRetainingWall(input);
-        expect(r.p_toe).toBeCloseTo(211.4, 0);
+        // p_avg = 86.22, 6e/B = −1.48742
+        expect(r.p_toe).toBeCloseTo(214.465, 1);
         expect(r.p_toe).toBeGreaterThan(200); // exceeds SBC
     });
 
-    test('p_heel = -14.71 kN/m² (TENSION at heel → REVISE)', () => {
+    test('p_heel = −42.03 kN/m² (TENSION at heel → REVISE)', () => {
         const r = analyzeRetainingWall(input);
-        expect(r.p_heel).toBeCloseTo(-14.71, 0);
+        expect(r.p_heel).toBeCloseTo(-42.025, 1);
         expect(r.p_heel).toBeLessThan(0); // tension
     });
 
@@ -179,34 +191,41 @@ describe('RW-BM-3: 5 m wall with water table at 2 m depth', () => {
         fck: 25, fy: 500, grade: 'M25', steelGrade: 'Fe500',
         cover: 50, loadFactor: 1.5,
     };
+    // hw = 5 − 2 = 3 m of water above the base underside.
+    // Lateral: 12·3.667 + 36·1.5 + 12.285·1 + 44.145·1 = 154.43 kN·m/m
+    // Uplift (retained side, free-draining toe): U = ½·9.81·3·2.7 = 39.7305 kN/m at 2B/3 = 1.8 m
+    // W_stem = 35.1 @ 0.925, W_base = 32.4 @ 1.35, W_soil = 1.55·4.5·18 = 125.55 @ 1.925
+    // W_dead = 193.05, M_R = 32.4675 + 43.74 + 241.68375 = 317.89125
 
-    test('M_overturning includes water + submerged soil pressure', () => {
+    test('M_overturning includes water, submerged soil and uplift', () => {
         const r = analyzeRetainingWall(input);
-        // Hand: 12*3.667 + 36*1.5 + 12.285*1 + 44.145*1 ≈ 154.43 kN·m/m
-        // (small buoyancy correction in ΣV brings engine slightly off.)
-        expect(r.M_overturning).toBeCloseTo(154.43, 0);
+        expect(r.U).toBeCloseTo(39.7305, 3);
+        expect(r.U_arm).toBeCloseTo(1.8, 6);
+        expect(r.M_overturning).toBeCloseTo(154.43 + 39.7305 * 1.8, 1);   // 225.94
     });
 
-    test('x_bar = 0.920 m (corrected), eccentricity = -0.430 m (toe side)', () => {
+    test('stability: 0.9·M_R/M_O = 1.266 (< 1.4), sliding 0.9·μ·(ΣW − U)/ΣH = 0.661', () => {
         const r = analyzeRetainingWall(input);
-        const B_m = r.B / 1000;
-        const x_bar = r.eccentricity + B_m / 2;
-        expect(x_bar).toBeCloseTo(0.920, 2);
-        expect(r.eccentricity).toBeCloseTo(-0.430, 2);
-        expect(r.eccentricity).toBeLessThan(0); // resultant on toe side
+        expect(r.fos_overturning).toBeCloseTo(0.9 * 317.89125 / 225.9449, 3);
+        expect(r.fos_sliding).toBeCloseTo(0.9 * 0.5 * (193.05 - 39.7305) / 104.43, 3);
+        expect(r.overturning_ok).toBe(false);
+        expect(r.sliding_ok).toBe(false);
     });
 
-    test('p_toe = ~150 kN/m² (< SBC = 200), p_heel = ~3 kN/m² (positive)', () => {
+    test('x_bar = 0.5997 m, eccentricity = −0.7503 m (outside the middle third)', () => {
         const r = analyzeRetainingWall(input);
-        expect(r.p_toe).toBeCloseTo(150.0, 0);
-        expect(r.p_heel).toBeCloseTo(3.3, 0);
-        expect(r.p_heel).toBeGreaterThan(0); // no tension
-        expect(r.p_toe).toBeGreaterThan(r.p_heel);
+        // V = 193.05 − 39.7305 = 153.3195; x̄ = (317.89125 − 225.9449)/153.3195
+        expect(r.V_bearing).toBeCloseTo(153.3195, 3);
+        expect(r.x_bar).toBeCloseTo(0.59970, 4);
+        expect(r.eccentricity).toBeCloseTo(-0.75030, 4);
     });
 
-    test('bearing_ok = true (despite water table, pressures within limits)', () => {
+    test('p_toe = 151.46 kN/m², p_heel = −37.90 kN/m² (tension → REVISE)', () => {
         const r = analyzeRetainingWall(input);
-        expect(r.bearing_ok).toBe(true);
+        expect(r.p_toe).toBeCloseTo(151.46, 1);
+        expect(r.p_heel).toBeCloseTo(-37.90, 1);
+        expect(r.bearing_ok).toBe(false);
+        expect(r.overallStatus).toBe('REVISE');
     });
 });
 

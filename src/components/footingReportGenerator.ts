@@ -117,7 +117,7 @@ function oneWayShearBlock(label: string, rDir: any): string {
             <div style="display: flex; gap: 20px;">
                 <div style="flex: 1; min-width: 0;">
                     ${kx(`V_u = ${rDir.Vu} \\text{ kN}`)}
-                    ${kx(`\\tau_v = \\frac{V_u}{bd} = ${rDir.tau_v} \\text{ N/mm}^2`)}
+                    ${kx(`d = ${rDir.d} \\text{ mm (at the section)}, \\quad \\tau_v = \\frac{V_u}{bd} = ${rDir.tau_v} \\text{ N/mm}^2`)}
                 </div>
                 <div style="flex: 1; min-width: 0;">
                     ${kx(`\\tau_c = ${rDir.tau_c} \\text{ N/mm}^2`)}
@@ -125,6 +125,25 @@ function oneWayShearBlock(label: string, rDir: any): string {
                         Result: ${kxInline(`\\tau_v ${rDir.status === 'OK' ? '\\le' : '>'} \\tau_c`)} &rarr; ${rDir.status}
                     </div>
                 </div>
+            </div>
+        </div>
+    `;
+}
+
+function detailingBlock(r: any): string {
+    const band = r.centralBand;
+    return `
+        <div class="section-box avoid-break">
+            <div class="section-header">Detailing, Bearing &amp; Anchorage &mdash; IS 456 Cl. 34</div>
+            <div class="section-body">
+                <table class="result-table" style="margin: 0;">
+                    <tr><th>Check</th><th>Detail</th><th>Status</th></tr>
+                    <tr><td>Edge thickness (Cl. 34.1.2)</td><td>${r.edgeThickness.value} mm ≥ 150 mm</td><td>${statusChip(r.edgeThickness.ok ? 'OK' : 'FAIL')}</td></tr>
+                    ${band ? `<tr><td>Central band (Cl. 34.3.1 b), β = ${band.beta}</td><td>${kxInline(`A_{band} = \\frac{2}{\\beta + 1} A_s = ${band.As_band}\\text{ mm}^2`)} over ${band.bandWidth} m → ${band.bandBars.label}; outer ${band.outerBars ? band.outerBars.label : '—'}</td><td>${statusChip('OK')}</td></tr>` : ''}
+                    ${r.bearing.map((b: any) => `<tr><td>Bearing: ${b.location} (Cl. 34.4)</td><td>${kxInline(`P_u = ${b.Pu} \\text{ kN}; \\ 0.45 f_{ck}\\sqrt{A_1/A_2}\\,A_2 = ${b.capacity} \\text{ kN}`)}; dowels ≥ ${b.As_dowel_req} mm² (Cl. 34.4.3)</td><td>${statusChip(b.ok ? 'OK' : 'SAFE')}${b.ok ? '' : ' with dowels'}</td></tr>`).join('')}
+                    ${r.developmentLength.map((dl: any) => `<tr><td>Development length ${dl.direction} (Cl. 34.2.4.3)</td><td>${kxInline(`L_d = ${dl.Ld} \\text{ mm}`)}; straight ${dl.available} mm${dl.anchorage === 'bend' ? `; 90° bend (8φ, Cl. 26.2.2.1) + ${dl.leg_req} mm leg` : ''}</td><td>${statusChip(dl.anchorage === 'insufficient' ? 'FAIL' : 'OK')}</td></tr>`).join('')}
+                </table>
+                ${r.messages.map((m: string) => `<p style="font-size:12px;color:#991b1b;">${m}</p>`).join('')}
             </div>
         </div>
     `;
@@ -167,7 +186,8 @@ function generateFlatFootingSection(r: any, mat: any): string {
                         ${kx(`A_{req} = \\frac{F_y + W_{self}}{q_{net}} = ${r.areaReq} \\text{ m}^2`)}
                         ${kx(`A_{prov} = L \\times B = ${r.L} \\times ${r.B} = ${r.areaProv} \\text{ m}^2`)}
                         ${kx(`p_{avg} = \\frac{P_{total}}{A} = \\frac{${r.totalLoad}}{${r.areaProv}} = ${r.soilPressure.p_avg} \\text{ kN/m}^2`)}
-                        ${r.Mx !== 0 || r.Mz !== 0 ? kx(`p_{max} = ${r.soilPressure.p_max} \\text{ kN/m}^2 \\le ${r.sbc * r.soilPressure.sbcCheckFactor} \\text{ kN/m}^2`) : ''}
+                        ${r.Mx !== 0 || r.Mz !== 0 ? kx(`p_{max} = ${r.soilPressure.p_max} \\text{ kN/m}^2 ${r.soilPressure.sbcCheck ? '\\le' : '>'} \\text{SBC} = ${r.sbc} \\text{ kN/m}^2`) : ''}
+                        ${!r.soilPressure.fullContact ? `<p style="font-size:12px;color:#92400e;">Resultant outside the kern: no-tension distribution, ${Math.round(r.soilPressure.contactFraction * 100)}% of the base in contact${r.soilPressure.contactOk ? ' (allowed for this case)' : ' — NOT allowed for this case'}.</p>` : ''}
                     </div>
                     <div style="flex: 1; min-width: 0;">
                         <table class="result-table" style="margin: 0;">
@@ -186,7 +206,7 @@ function generateFlatFootingSection(r: any, mat: any): string {
             <div class="section-body">
                 <p style="margin-top:0; color:#475569; font-size:13px;">
                     <strong>Variables:</strong><br/>
-                    ${kxInline(`V_u`)}: Factored shear force (from net factored soil pressure ${kxInline(`p_{u,net} = ${r.loadFactor}\\,p_{col}`)}, IS 456 Cl. 34.2.4.1)<br/>
+                    ${kxInline(`V_u`)}: Factored shear force (from net factored soil pressure ${kxInline(`p_{u,net} = \\gamma_f\\,(p_{max} - W/A)`)}, IS 456 Cl. 34.2.4.1)<br/>
                     ${kxInline(`\\tau_v`)}: Nominal shear stress<br/>
                     ${kxInline(`\\tau_c`)}: Design shear strength of concrete<br/>
                     ${kxInline(`p_{u,net} = ${r.soilPressure.p_max_net_factored} \\text{ kN/m}^2`)} (net factored upward pressure)
@@ -227,6 +247,8 @@ function generateFlatFootingSection(r: any, mat: any): string {
                 </div>
             </div>
         </div>
+
+        ${detailingBlock(r)}
 
         <div class="section-box avoid-break">
             <div class="section-header">5. Overall Status</div>
@@ -305,7 +327,7 @@ function generateSlopeFootingSection(r: any, mat: any): string {
             <div class="section-header">3. Shear Checks</div>
             <div class="section-body">
                 <p style="margin-top:0; color:#475569; font-size:13px;">
-                    Design pressure: ${kxInline(`p_{u,net} = ${r.loadFactor}\\,p_{col} = ${r.soilPressure.p_max_net_factored} \\text{ kN/m}^2`)} (net factored, IS 456 Cl. 34.2.4.1)
+                    Design pressure: ${kxInline(`p_{u,net} = \\gamma_f\\,(p_{max} - W/A) = ${r.soilPressure.p_max_net_factored} \\text{ kN/m}^2`)} (net factored, IS 456 Cl. 34.2.4.1); shear with the effective depth at each critical section.
                 </p>
                 <div style="display: flex; gap: 20px;">
                     <div style="flex: 1; border-right: 1px solid #e2e8f0; padding-right: 20px;">
@@ -360,6 +382,8 @@ function generateSlopeFootingSection(r: any, mat: any): string {
                 </div>
             </div>
         </div>
+
+        ${detailingBlock(r)}
 
         <div class="section-box avoid-break">
             <div class="section-header">6. Overall Status</div>

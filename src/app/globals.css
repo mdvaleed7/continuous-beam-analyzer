@@ -2483,6 +2483,10 @@ footer.app-footer {
     gap: 4px;
     align-items: center;
 }
+.load-case-row.load-case-row-7 {
+    grid-template-columns: 1.4fr 1fr 1fr 1fr 1fr 0.7fr 0.5fr;
+}
+.load-case-row input[type="checkbox"] { width: auto; justify-self: center; }
 .load-case-row input {
     padding: 4px 6px;
     font-size: 0.78rem;

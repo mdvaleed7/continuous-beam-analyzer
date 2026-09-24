@@ -20,11 +20,9 @@ function statusChip(ok: boolean, label: string): string {
 export async function generateFlatSlabPDF(input: FlatSlabInput, results: any, preview: boolean = false): Promise<string | null> {
     const { L1, L2, c1, c2, hasDrop, dropL1, dropL2, dropDepth, D, cover, fck, fy, w_live, w_finish, panelType } = input;
     const r = results;
-    const dPunch = hasDrop ? r.d_drop : r.d_slab;
-    const critPerimeterM = r.crit_perimeter;
-    const critPerimeterMm = critPerimeterM * 1000;
-    const dPunchM = dPunch / 1000;
-    const punchingAreaInside = (c1 + dPunchM) * (c2 + dPunchM);
+    const co1 = r.coefficients.dir1;
+    const co2 = r.coefficients.dir2;
+    const f3 = (v: number) => (Number.isNaN(v) ? 'Fails' : v.toFixed(0));
 
     const htmlContent = `
         <!DOCTYPE html>
@@ -56,10 +54,10 @@ export async function generateFlatSlabPDF(input: FlatSlabInput, results: any, pr
                 <div class="section-box avoid-break">
                     <div class="section-header">Section Properties</div>
                     <div class="section-body">
-                        ${kx(`d_{slab} = D - \\text{cover} - 10 = ${D} - ${cover} - 10 = ${r.d_slab.toFixed(0)} \\text{ mm}`)}
-                        ${hasDrop ? kx(`d_{drop} = ${dropDepth} - \\text{cover} - 10 = ${r.d_drop.toFixed(0)} \\text{ mm}`) : ''}
-                        ${kx(`L_n = L_1 - c_1 = ${L1} - ${c1} = ${r.Ln.toFixed(2)} \\text{ m}`)}
-                        <p style="font-size:12px;color:#64748b;margin:4px 0 0 0;">(IS 456 Cl. 31.3.3: clear span face-to-face; ${r.Ln < 0.65 * L1 ? 'clamped to 0.65·L₁ = ' + (0.65 * L1).toFixed(2) : '≥ 0.65·L₁ OK'})</p>
+                        ${kx(`d_{L1} = D - \\text{cover} - \\phi/2 = ${r.d_slab.toFixed(0)} \\text{ mm}, \\quad d_{L2} = d_{L1} - \\phi = ${r.d_slab2.toFixed(0)} \\text{ mm}, \\quad d_{punch} = D - \\text{cover} - \\phi = ${r.d_slab_avg.toFixed(0)} \\text{ mm}`)}
+                        ${hasDrop ? kx(`d_{drop} = ${dropDepth} - \\text{cover} - \\phi/2 = ${r.d_drop.toFixed(0)} \\text{ mm}, \\quad d_{drop,punch} = ${r.d_drop_avg.toFixed(0)} \\text{ mm}`) : ''}
+                        ${kx(`L_n = \\max(L_1 - c_1,\\ 0.65 L_1) = ${r.Ln.toFixed(2)} \\text{ m}, \\quad L_{n2} = ${r.Ln2.toFixed(2)} \\text{ m}`)}
+                        <p style="font-size:12px;color:#64748b;margin:4px 0 0 0;">(IS 456 Cl. 31.4.2.2: clear span face-to-face, not less than 0.65·L)</p>
                     </div>
                 </div>
 
@@ -85,69 +83,64 @@ export async function generateFlatSlabPDF(input: FlatSlabInput, results: any, pr
                     <div class="section-header">Load &amp; M₀ (IS 456 Cl. 31.3.3)</div>
                     <div class="section-body">
                         ${calcRow('Self-weight (slab)', `(${D}/1000 × 25) = ${(D / 1000 * 25).toFixed(2)}`, 'kN/m²')}
+                        ${hasDrop ? calcRow('Drop panel (smeared)', r.w_drop.toFixed(2), 'kN/m²') : ''}
                         ${calcRow('Live Load', w_live, 'kN/m²')}
                         ${calcRow('Floor Finish', w_finish, 'kN/m²')}
-                        ${calcRow('Total Service Load', `${(D / 1000 * 25 + w_live + w_finish).toFixed(2)}`, 'kN/m²')}
+                        ${calcRow('Total Service Load', `${(r.w_dead + w_live).toFixed(2)}`, 'kN/m²')}
                         ${kx(`w_u = 1.5 \\times w_{total} = ${r.wu.toFixed(2)} \\text{ kN/m}^2`)}
                         ${kx(`W = w_u \\cdot L_2 \\cdot L_n = ${r.wu.toFixed(2)} \\times ${L2} \\times ${r.Ln.toFixed(2)} = ${r.W.toFixed(1)} \\text{ kN}`)}
                         ${kx(`M_0 = \\frac{W \\cdot L_n}{8} = \\frac{${r.W.toFixed(1)} \\times ${r.Ln.toFixed(2)}}{8} = ${r.M0.toFixed(1)} \\text{ kN·m}`)}
                     </div>
                 </div>
 
-                <h2>4. Longitudinal Moment Distribution</h2>
+                <h2>4. Longitudinal Moment Distribution &mdash; IS 456 Cl. 31.4.3</h2>
                 <div class="section-box avoid-break">
-                    <div class="section-header">M₀ split into Negative / Positive (IS 456 Cl. 31.3.4)</div>
+                    <div class="section-header">${panelType === 'interior' ? 'Interior span (Cl. 31.4.3.2)' : 'End span (Cl. 31.4.3.3)'}</div>
                     <div class="section-body">
                         ${panelType === 'interior'
-                            ? kx(`M_{neg} = 0.65 M_0 = ${r.M_neg_col ? (0.65 * r.M0).toFixed(1) : '—'} \\text{ kN·m}, \\quad M_{pos} = 0.35 M_0 = ${(0.35 * r.M0).toFixed(1)} \\text{ kN·m}`)
-                            : kx(`\\text{Exterior panel: } M_{neg} = 0.75 M_0, \\quad M_{pos} = 0.52 M_0`)}
+                            ? kx(`M_{neg} = 0.65 M_0, \\quad M_{pos} = 0.35 M_0`)
+                            : `${kx(`\\alpha_c = \\frac{\\Sigma K_c}{K_s} = ${co1.alpha_c_ext}, \\quad f = \\frac{1}{1 + 1/\\alpha_c} = ${co1.f.toFixed(3)}`)}
+                               ${kx(`M_{neg,int} = (0.75 - 0.10 f) M_0 = ${co1.negInt.toFixed(3)} M_0, \\quad M_{pos} = (0.63 - 0.28 f) M_0 = ${co1.pos.toFixed(3)} M_0, \\quad M_{neg,ext} = 0.65 f\\, M_0 = ${co1.negExt.toFixed(3)} M_0`)}`}
+                        ${panelType === 'corner' ? kx(`\\text{L2 direction (end span): } \\alpha_c = ${co2.alpha_c_ext}, \\ M_{neg,int} = ${co2.negInt.toFixed(3)} M_{0,2}, \\ M_{pos} = ${co2.pos.toFixed(3)} M_{0,2}, \\ M_{neg,ext} = ${co2.negExt.toFixed(3)} M_{0,2}`) : ''}
+                        <p style="font-size:12px;color:#64748b;">Column strip: 75% of interior negative (Cl. 31.5.5.1), 100% of exterior negative (Cl. 31.5.5.2), 60% of positive (Cl. 31.5.5.3). Column-strip width 0.25·l₂ each side, not more than 0.25·l₁ (Cl. 31.1.1) = ${r.colStripWidth.toFixed(2)} m.</p>
                     </div>
                 </div>
-                <table class="result-table">
-                    <thead><tr><th>Strip</th><th>Width (m)</th><th>M<sub>neg</sub> (kN·m)</th><th>M<sub>pos</sub> (kN·m)</th><th>% Neg</th><th>% Pos</th></tr></thead>
-                    <tbody>
-                        <tr><td><strong>Column Strip</strong></td><td>${r.colStripWidth.toFixed(2)}</td><td>${r.M_neg_col.toFixed(1)}</td><td>${r.M_pos_col.toFixed(1)}</td><td>75%</td><td>60%</td></tr>
-                        <tr><td><strong>Middle Strip</strong></td><td>${r.midStripWidth.toFixed(2)}</td><td>${r.M_neg_mid.toFixed(1)}</td><td>${r.M_pos_mid.toFixed(1)}</td><td>25%</td><td>40%</td></tr>
-                    </tbody>
-                </table>
-                <p style="font-size:12px;color:#64748b;">
-                    Column strip width = L<sub>2</sub>/2 = ${r.colStripWidth.toFixed(2)} m (IS 456 Cl. 31.2).
-                    Middle strip width = L<sub>2</sub> − col. strip = ${r.midStripWidth.toFixed(2)} m.
-                </p>
 
-                <h2>5. Flexural Design &mdash; IS 456 Cl. 38.1</h2>
-                <p style="font-size:13px;color:#475569;">${kxInline(`A_{st} = \\frac{0.5 f_{ck}}{f_y} \\left[ 1 - \\sqrt{1 - \\frac{4.6 M_u}{f_{ck} b d^2}} \\right] b d`)} per strip width.</p>
+                <h2>5. Flexural Design &mdash; IS 456 Cl. 38.1 (both directions)</h2>
+                <p style="font-size:13px;color:#475569;">${kxInline(`A_{st} = \\frac{0.5 f_{ck}}{f_y} \\left[ 1 - \\sqrt{1 - \\frac{4.6 M_u}{f_{ck} b d^2}} \\right] b d`)} per strip width; bars per metre selected to cover the requirement.</p>
                 <table class="result-table">
-                    <thead><tr><th>Location</th><th>Strip</th><th>M<sub>u</sub> (kN·m)</th><th>b (mm)</th><th>d (mm)</th><th>A<sub>st,req</sub> (mm²)</th><th>Status</th></tr></thead>
+                    <thead><tr><th>Direction / zone</th><th>M<sub>u</sub> (kN·m)</th><th>b (m)</th><th>d (mm)</th><th>A<sub>st,req</sub> (mm²)</th><th>Bars</th></tr></thead>
                     <tbody>
-                        <tr><td>Negative (Top)</td><td>Column</td><td>${r.M_neg_col.toFixed(1)}</td><td>${(r.colStripWidth * 1000).toFixed(0)}</td><td>${(hasDrop ? r.d_drop : r.d_slab).toFixed(0)}</td><td>${Number.isNaN(r.Ast_neg_col) ? 'Fails' : r.Ast_neg_col.toFixed(0)}</td><td>${Number.isNaN(r.Ast_neg_col) ? statusChip(false,'FAIL') : statusChip(true,'OK')}</td></tr>
-                        <tr><td>Positive (Bot)</td><td>Column</td><td>${r.M_pos_col.toFixed(1)}</td><td>${(r.colStripWidth * 1000).toFixed(0)}</td><td>${r.d_slab.toFixed(0)}</td><td>${Number.isNaN(r.Ast_pos_col) ? 'Fails' : r.Ast_pos_col.toFixed(0)}</td><td>${Number.isNaN(r.Ast_pos_col) ? statusChip(false,'FAIL') : statusChip(true,'OK')}</td></tr>
-                        <tr><td>Negative (Top)</td><td>Middle</td><td>${r.M_neg_mid.toFixed(1)}</td><td>${(r.midStripWidth * 1000).toFixed(0)}</td><td>${r.d_slab.toFixed(0)}</td><td>${Number.isNaN(r.Ast_neg_mid) ? 'Fails' : r.Ast_neg_mid.toFixed(0)}</td><td>${Number.isNaN(r.Ast_neg_mid) ? statusChip(false,'FAIL') : statusChip(true,'OK')}</td></tr>
-                        <tr><td>Positive (Bot)</td><td>Middle</td><td>${r.M_pos_mid.toFixed(1)}</td><td>${(r.midStripWidth * 1000).toFixed(0)}</td><td>${r.d_slab.toFixed(0)}</td><td>${Number.isNaN(r.Ast_pos_mid) ? 'Fails' : r.Ast_pos_mid.toFixed(0)}</td><td>${Number.isNaN(r.Ast_pos_mid) ? statusChip(false,'FAIL') : statusChip(true,'OK')}</td></tr>
+                        ${(['dir1', 'dir2'] as const).map(dir => Object.entries(r.zones[dir]).filter(([, z]: any) => z).map(([k, z]: any) => `
+                        <tr><td>${dir === 'dir1' ? 'L1' : 'L2'} ${({ negCol: 'column strip, top (interior support)', posCol: 'column strip, bottom', negMid: 'middle strip, top', posMid: 'middle strip, bottom', negExtCol: 'column strip, top (exterior support)', negExtMid: 'middle strip, top (exterior support)' } as Record<string, string>)[k] ?? k}</td>
+                            <td>${z.M.toFixed(1)}</td><td>${z.width.toFixed(2)}</td><td>${z.d.toFixed(0)}</td><td>${f3(z.Ast)}</td>
+                            <td>${z.bars.label}${!Number.isNaN(z.Ast) && z.bars.Ast_provided * z.width < z.Ast ? ' ' + statusChip(false, 'INSUFFICIENT') : ''}</td></tr>`).join('')).join('')}
                     </tbody>
                 </table>
+                ${r.providedSteelCheck.messages.map((m: string) => `<p style="font-size:12px;color:#991b1b;">${m}</p>`).join('')}
 
                 <h2>6. Punching Shear Check &mdash; IS 456 Cl. 31.6</h2>
                 <div class="section-box avoid-break">
-                    <div class="section-header">Two-Way (Punching) Shear at d/2 from Face</div>
+                    <div class="section-header">Critical sections at d/2 (Cl. 31.6.1, Fig. 13) with moment transfer (Cl. 31.6.2.2)</div>
                     <div class="section-body">
-                        ${kx(`\\beta_c = \\frac{\\min(c_1, c_2)}{\\max(c_1, c_2)} = \\frac{${Math.min(c1, c2)}}{${Math.max(c1, c2)}} = ${(Math.min(c1, c2) / Math.max(c1, c2)).toFixed(3)}`)}
-                        ${kx(`k_s = \\min(0.5 + \\beta_c,\\; 1.0) = ${Math.min(0.5 + Math.min(c1, c2) / Math.max(c1, c2), 1.0).toFixed(3)}`)}
-                        ${kx(`\\tau_c = k_s \\cdot 0.25 \\sqrt{f_{ck}} = ${Math.min(0.5 + Math.min(c1, c2) / Math.max(c1, c2), 1.0).toFixed(3)} \\times 0.25 \\times \\sqrt{${fck}} = ${r.tau_c.toFixed(3)} \\text{ N/mm}^2`)}
-                        ${kx(`u = 2\\left[(c_1 + d) + (c_2 + d)\\right] = ${critPerimeterM.toFixed(2)} \\text{ m} = ${critPerimeterMm.toFixed(0)} \\text{ mm}`)}
-                        ${kx(`V_u = w_u \\cdot (L_1 L_2 - \\text{area inside } u) = ${r.wu.toFixed(2)} \\times (${L1} \\times ${L2} - ${punchingAreaInside.toFixed(2)}) = ${r.shear_force.toFixed(1)} \\text{ kN}`)}
-                        ${kx(`\\tau_v = \\frac{V_u}{u \\cdot d} = \\frac{${r.shear_force.toFixed(1)} \\times 1000}{(${critPerimeterM.toFixed(2)} \\times 1000) \\times ${dPunch.toFixed(0)}} = ${r.tau_v.toFixed(3)} \\text{ N/mm}^2`)}
-                        <div style="margin-top:6px;">
-                            ${r.punching_safe
-                                ? `${statusChip(true, 'SAFE')} &nbsp; ${kxInline(`\\tau_v = ${r.tau_v.toFixed(3)} \\leq \\tau_c = ${r.tau_c.toFixed(3)}`)}`
-                                : `${statusChip(false, 'FAIL')} &nbsp; ${kxInline(`\\tau_v = ${r.tau_v.toFixed(3)} > \\tau_c = ${r.tau_c.toFixed(3)}`)}`}
-                        </div>
+                        ${kx(`\\tau_v = \\frac{V_u}{u\\,d} + \\gamma_v \\frac{M\\,c}{J_c}, \\quad \\gamma_v = 1 - \\frac{1}{1 + \\frac{2}{3}\\sqrt{a_1/b_1}}, \\quad \\tau_c = k_s \\cdot 0.25\\sqrt{f_{ck}},\\ k_s = \\min(0.5 + \\beta_c, 1)`)}
+                        <p style="font-size:12px;color:#64748b;">Interior columns: unbalanced moment from Cl. 31.4.5.2 (equal adjacent spans), and for an end span the share of the difference in interior negative moments (Cl. 31.4.3.4). Edge / corner columns: the exterior negative moment is transferred; the critical section extends to the slab edge (Fig. 13).</p>
+                        <table class="result-table">
+                            <thead><tr><th>Section</th><th>a₁×b₁ (mm)</th><th>u (mm)</th><th>d (mm)</th><th>V<sub>u</sub> (kN)</th><th>M (kN·m)</th><th>γ<sub>v</sub></th><th>τ<sub>v</sub></th><th>τ<sub>c</sub></th><th>Status</th></tr></thead>
+                            <tbody>
+                                ${r.punchingChecks.map((p: any) => `<tr><td>${p.location}</td><td>${p.a1}×${p.b1}</td><td>${p.u}</td><td>${p.d}</td><td>${p.V.toFixed(1)}</td><td>${p.M1.toFixed(1)}${p.M2 > 0 ? ' / ' + p.M2.toFixed(1) : ''}</td><td>${p.gammaV1.toFixed(3)}</td><td>${p.tau_v.toFixed(3)}</td><td>${p.tau_c.toFixed(3)}</td><td>${statusChip(p.ok, p.ok ? 'OK' : 'FAIL')}</td></tr>`).join('')}
+                            </tbody>
+                        </table>
+                        ${r.transferChecks.length ? `<p style="font-size:12px;color:#475569;">Flexural part of the transferred moment (1 − γ<sub>v</sub>)·M within c₂ + 1.5·D each side (Cl. 31.3.3):</p>
+                        <table class="result-table"><thead><tr><th>Column</th><th>Band (mm)</th><th>M (kN·m)</th><th>A<sub>st</sub> req (mm²)</th><th>In band (mm²)</th><th>Extra</th></tr></thead><tbody>
+                        ${r.transferChecks.map((t: any) => `<tr><td>${t.location}</td><td>${t.bandWidth}</td><td>${t.M_flex.toFixed(1)}</td><td>${t.Ast_req}</td><td>${t.Ast_available}</td><td>${t.ok ? (t.Ast_extra > 0 ? '+' + t.Ast_extra + ' mm²' : 'none') : statusChip(false, 'SECTION FAILS')}</td></tr>`).join('')}
+                        </tbody></table>` : ''}
                     </div>
                 </div>
 
                 <h2>7. Deflection Check &mdash; IS 456 Annex C</h2>
                 <div class="section-box avoid-break">
-                    <div class="section-header">Short-term + Shrinkage + Creep (Continuous: α=1/16, k₃=0.063)</div>
+                    <div class="section-header">Short-term + Shrinkage + Creep — crossing strips, α = 0.104(1 − β/10)</div>
                     <div class="section-body">
                         <p style="margin-top:0; color:#475569; font-size:13px;">
                             The full Annex C deflection calculation governs the design. The simplified
@@ -177,7 +170,8 @@ export async function generateFlatSlabPDF(input: FlatSlabInput, results: any, pr
                             Computed for all slabs per user request. The status is IGNORED because the
                             rigorous Annex C deflection check governs the design.
                         </p>
-                        ${kx(`\\text{Basic } l/d = ${r.ldCheck.basicRatio} \\quad (\\text{support: } ${r.deflectionSupport})`)}
+                        ${kx(`\\text{Basic } l/d = ${r.ldCheck.basicRatio} \\quad (\\text{support: } ${r.deflectionSupport}; \\text{ longer span, Cl. 31.2.1})`)}
+                        <p style="font-size:12px;color:#64748b;">${r.ldCheck.note}</p>
                         ${kx(`f_s = ${r.ldCheck.fs} \\text{ N/mm}^2, \\quad p_t = ${r.ldCheck.pt}\\%`)}
                         ${kx(`\\text{Modification factor} = ${r.ldCheck.mf}, \\quad \\text{Modified } l/d = ${r.ldCheck.modifiedRatio}`)}
                         ${kx(`d_{req} = ${r.ldCheck.d_req} \\text{ mm}, \\quad d_{provided} = ${r.ldCheck.d_provided} \\text{ mm}`)}
@@ -194,13 +188,15 @@ export async function generateFlatSlabPDF(input: FlatSlabInput, results: any, pr
                     <tbody>
                         <tr><td>Min. Thickness (Cl. 31.2.1)</td><td>${r.thicknessCheck.D} mm</td><td>${r.thicknessCheck.D_min} mm</td><td>${r.thicknessCheck.ok ? statusChip(true,'OK') : statusChip(false,'FAIL')}</td></tr>
                         <tr><td>Static Moment M₀</td><td>${r.M0.toFixed(1)} kN·m</td><td>—</td><td>—</td></tr>
-                        <tr><td>Punching Shear τ<sub>v</sub> (Cl. 31.6)</td><td>${r.tau_v.toFixed(3)} N/mm²</td><td>${r.tau_c.toFixed(3)} N/mm²</td><td>${r.punching_safe ? statusChip(true,'OK') : statusChip(false,'FAIL')}</td></tr>
-                        <tr><td>Col. Strip Neg. Ast</td><td>${Number.isNaN(r.Ast_neg_col) ? '—' : r.Ast_neg_col.toFixed(0)+' mm²'}</td><td>—</td><td>${Number.isNaN(r.Ast_neg_col) ? statusChip(false,'FAIL') : statusChip(true,'OK')}</td></tr>
-                        <tr><td>Col. Strip Pos. Ast</td><td>${Number.isNaN(r.Ast_pos_col) ? '—' : r.Ast_pos_col.toFixed(0)+' mm²'}</td><td>—</td><td>${Number.isNaN(r.Ast_pos_col) ? statusChip(false,'FAIL') : statusChip(true,'OK')}</td></tr>
+                        <tr><td>Punching Shear τ<sub>v</sub> (Cl. 31.6, governing section)</td><td>${r.tau_v.toFixed(3)} N/mm²</td><td>${r.tau_c.toFixed(3)} N/mm²</td><td>${r.punching_safe ? statusChip(true,'OK') : statusChip(false,'FAIL')}</td></tr>
+                        <tr><td>Provided steel ≥ required (all zones)</td><td>col. strip bottom ${r.providedSteelCheck.colBottomProvided} mm²/m</td><td>${Number.isNaN(r.providedSteelCheck.colBottomRequired) ? '—' : r.providedSteelCheck.colBottomRequired + ' mm²/m'}</td><td>${r.providedSteelCheck.ok ? statusChip(true,'OK') : statusChip(false,'REVISE')}</td></tr>
+                        ${r.dropChecks ? `<tr><td>Drop plan ≥ l/3 (Cl. 31.2.2)</td><td>${dropL1}×${dropL2} m</td><td>${r.dropChecks.dropL1_min}×${r.dropChecks.dropL2_min} m</td><td>${r.dropChecks.planOk ? statusChip(true,'OK') : statusChip(false,'REVISE')}</td></tr>` : ''}
+                        <tr><td>DDM limitations (Cl. 31.4.1)</td><td>${r.ddmChecks.nSpansL1}×${r.ddmChecks.nSpansL2} spans, ratio ${r.ddmChecks.aspect}, LL/DL ${r.ddmChecks.loadRatio}</td><td>≥3 spans, ≤2.0, ≤3.0</td><td>${r.ddmChecks.ok ? statusChip(true,'OK') : statusChip(false,'REVISE')}</td></tr>
                         <tr><td>Span/Depth (Cl. 23.2)</td><td>d<sub>prov</sub>=${r.ldCheck.d_provided} mm</td><td>d<sub>req</sub>=${r.ldCheck.d_req} mm</td><td><span style="color:#64748b; font-weight:bold;">IGNORED</span></td></tr>
                     </tbody>
                 </table>
 
+                ${[...r.ddmChecks.messages, ...r.warnings, ...(r.dropChecks ? r.dropChecks.messages : [])].map((m: string) => `<p style="font-size:12px;color:#475569;">${m}</p>`).join('')}
                 <div class="info-note" style="margin-top:20px;">
                     <strong>Disclaimer:</strong> Outputs are for preliminary design only and must be independently
                     verified by a qualified licensed structural engineer before use.

@@ -114,7 +114,7 @@ export async function generateWallReport(config: any, result: any, canvas: HTMLC
         const b = 1000;
         const d_hog = z.flex_hogging.d_eff.toFixed(1);
         const d_sag = z.flex_sagging.d_eff.toFixed(1);
-        const d_shear = Math.min(z.flex_hogging.d_eff, z.flex_sagging.d_eff).toFixed(1);
+        const d_shear = Number(z.shearAt?.d ?? Math.min(z.flex_hogging.d_eff, z.flex_sagging.d_eff)).toFixed(1);
         
         html += `
         <div class="section-box">
@@ -159,31 +159,65 @@ export async function generateWallReport(config: any, result: any, canvas: HTMLC
                 </div>
 
                 <div style="border-top: 1px solid #e2e8f0; padding-top: 15px; margin-top: 15px;">
-                    <h4 style="margin-top: 0;">C. Shear Check</h4>
+                    <h4 style="margin-top: 0;">C. Shear Check — without links (IS 456 Cl. 40.2.1.1)</h4>
                     <div class="two-col">
                         <div class="col">
-                            ${kx(`V_u = ${Vu_str} \\text{ kN}`)}
+                            ${kx(`V_u = ${Vu_str} \\text{ kN at } d \\text{ from the ${z.shearAt?.at === 'top' ? 'top' : 'bottom'} support (${z.shearAt?.face === 's' ? 'inner' : 'earth'} face in tension)}`)}
                             ${kx(`\\tau_v = \\frac{V_u}{bd} = \\frac{${Vu_str} \\times 10^3}{${b} \\times ${d_shear}} = ${z.shear.tau_v} \\text{ N/mm}^2`)}
-                            ${kx(`\\tau_c = ${z.shear.tau_c} \\text{ N/mm}^2 \\quad (p_t = ${z.shear.pt}\\%)`)}
+                            ${kx(`\\tau_c = ${z.shear.tau_c} \\text{ N/mm}^2 \\quad (p_t = ${z.shear.pt}\\%, \\text{ Table 19})`)}
                         </div>
                         <div class="col">
-                            ${kx(`\\tau_{c,max} = ${z.shear.tau_c_max} \\text{ N/mm}^2`)}
-                            <p style="margin: 10px 0; font-weight: bold; color: ${z.shear.status === 'FAIL' ? '#ef4444' : '#10b981'};">
-                                Result: ${kxInline(`\\tau_v ${z.shear.tau_v <= z.shear.tau_c ? '\\le' : '>'} \\tau_c`)} &rarr; ${z.shear.status.toUpperCase()}
+                            ${kx(`k = ${Number(z.shear_k).toFixed(2)} \\;(D = ${z.thickness}\\text{ mm}), \\quad k\\,\\tau_c = ${(z.shear_k * z.shear.tau_c).toFixed(3)} \\text{ N/mm}^2`)}
+                            <p style="margin: 10px 0; font-weight: bold; color: ${z.shearOk ? '#10b981' : '#ef4444'};">
+                                Result: ${kxInline(`\\tau_v ${z.shearOk ? '\\le' : '>'} k\\,\\tau_c`)} &rarr; ${z.shearOk ? 'OK — no shear links required' : 'FAIL — increase thickness'}
                             </p>
-                            ${z.shear.status === 'design' && z.shear.links ? `
-                                ${kx(`V_{us} = V_u - \\tau_c\\,bd = ${(Vu_num - z.shear.tau_c*b*Number(d_shear)/1000).toFixed(1)} \\text{ kN}`)}
-                                <div style="margin-top: 8px; padding: 6px; background: #f0fdf4; border-left: 3px solid #10b981;">
-                                    <strong>Shear Links Provided:</strong> ${z.shear.links.label}
-                                </div>
-                            ` : ''}
-                            ${z.shear.status === 'minimum' && z.shear.links ? `
-                                <div style="margin-top: 8px; padding: 6px; background: #f8fafc; border-left: 3px solid #64748b;">
-                                    <strong>Min. Links Provided:</strong> ${z.shear.links.label}
-                                </div>
-                            ` : ''}
+                            <p style="font-size: 12px; color: #64748b;">Shear links are not used in the wall; where τc falls short the tension bars at the support are increased to raise p<sub>t</sub>. The bars counted in p<sub>t</sub> must extend at least d beyond the section (Table 19 note).</p>
                         </div>
                     </div>
+                </div>
+
+                <div style="border-top: 1px solid #e2e8f0; padding-top: 15px; margin-top: 15px;">
+                    <h4 style="margin-top: 0;">D. Crack Width — IS 456 Annex F (limit Cl. 35.3.2)</h4>
+                    ${kx(`w_{cr} = \\frac{3\\,a_{cr}\\,\\varepsilon_m}{1 + 2\\,\\frac{a_{cr} - c_{min}}{h - x}}, \\quad \\varepsilon_m = \\varepsilon_1 - \\frac{b\\,(h - x)(a - x)}{3\\,E_s A_s (d - x)}`)}
+                    <div class="two-col">
+                        <div class="col col-left">
+                            <strong>Earth face</strong> (${kxInline(`M_s = ${Number(z.crack.hogging.Ms).toFixed(2)}`)} kN·m)
+                            ${kx(`x = ${z.crack.hogging.x.toFixed(1)}, \\; f_s = ${z.crack.hogging.fs.toFixed(0)} \\text{ N/mm}^2, \\; a_{cr} = ${z.crack.hogging.acr.toFixed(1)} \\text{ mm}`)}
+                            ${kx(`w_{cr} = ${z.crack.hogging.w.toFixed(3)} \\text{ mm} ${z.crack.hogging.ok ? '\\le' : '>'} ${z.crack.hogging.limit} \\text{ mm}`)}
+                        </div>
+                        <div class="col">
+                            <strong>Inner face</strong> (${kxInline(`M_s = ${Number(z.crack.sagging.Ms).toFixed(2)}`)} kN·m)
+                            ${kx(`x = ${z.crack.sagging.x.toFixed(1)}, \\; f_s = ${z.crack.sagging.fs.toFixed(0)} \\text{ N/mm}^2, \\; a_{cr} = ${z.crack.sagging.acr.toFixed(1)} \\text{ mm}`)}
+                            ${kx(`w_{cr} = ${z.crack.sagging.w.toFixed(3)} \\text{ mm} ${z.crack.sagging.ok ? '\\le' : '>'} ${z.crack.sagging.limit} \\text{ mm}`)}
+                        </div>
+                    </div>
+                    ${config.checkCrackWidth === false ? '<p style="font-size: 12px; color: #b45309;">Crack width check switched off by the user — values are for information only.</p>' : ''}
+                </div>
+
+                <div style="border-top: 1px solid #e2e8f0; padding-top: 15px; margin-top: 15px;">
+                    <h4 style="margin-top: 0;">E. Axial Load + Bending with Slenderness — IS 456 Cl. 32.2 / 39</h4>
+                    <div class="two-col">
+                        <div class="col col-left">
+                            ${kx(`P_u = ${z.pm.Pu} \\text{ kN/m} \\;(\\text{load from above + self-weight})`)}
+                            ${kx(`H_e = 0.75H = ${z.pm.He} \\text{ m}, \\quad H_e/t = ${z.pm.slenderness} ${z.pm.slendernessOk ? '\\le' : '>'} 30`)}
+                            ${kx(`e_a = \\frac{H_e^2}{2500\\,t} = ${z.pm.ea} \\text{ mm}, \\quad e_{min} = 0.05t = ${(0.05 * z.thickness).toFixed(1)} \\text{ mm}`)}
+                        </div>
+                        <div class="col">
+                            ${kx(`M_{u} = \\max(M, P_u e_{min}) + P_u e_a`)}
+                            ${kx(`\\text{Earth face: } ${z.pm.Mu_h} ${z.pm.cap_h >= z.pm.Mu_h ? '\\le' : '>'} ${z.pm.cap_h} \\text{ kNm}`)}
+                            ${kx(`\\text{Inner face: } ${z.pm.Mu_s} ${z.pm.cap_s >= z.pm.Mu_s ? '\\le' : '>'} ${z.pm.cap_s} \\text{ kNm}`)}
+                            <p style="font-size: 12px; color: #64748b;">Capacity at P<sub>u</sub> by strain compatibility (Cl. 39.1, Fig. 21 / 23), both faces' steel included.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="border-top: 1px solid #e2e8f0; padding-top: 15px; margin-top: 15px;">
+                    <h4 style="margin-top: 0;">F. Horizontal Reinforcement — IS 456 Cl. 32.5(c)</h4>
+                    ${kx(`A_{h} = ${material.fy >= 415 ? '0.0020' : '0.0025'} \\times ${b} \\times ${z.thickness} = ${((material.fy >= 415 ? 0.0020 : 0.0025) * b * z.thickness).toFixed(0)} \\text{ mm}^2\\text{/m} \\;(\\text{half per face})`)}
+                    <div class="provided-box">
+                        <strong>Provided (each face):</strong> ${z.distBars.label} ${kxInline(`(${z.distBars.Ast_provided} \\text{ mm}^2\\text{/m})`)}, spacing ≤ min(3t, 450 mm)
+                    </div>
+                    ${z.construction ? `<p style="font-size: 12px; color: #64748b; margin-top: 8px;">Construction stage (backfill before the floors): cantilever ${kxInline(`M_u = ${z.construction.M.toFixed(2)}`)} kN·m, ${kxInline(`V_u = ${z.construction.V.toFixed(1)}`)} kN at the zone base — included in the earth-face design.</p>` : ''}
                 </div>
             </div>
         </div>

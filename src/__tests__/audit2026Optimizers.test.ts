@@ -48,6 +48,12 @@ const INR_TOLERANCE = 0.01; // 1% tolerance for cost comparisons
 
 describe('OPT-1: flat slab steel weight includes panel area', () => {
     test('steel weight is ~12× larger than the buggy formula for a 6 m panel', () => {
+        // D = 200 and 220 mm fail punching at the 400 × 400 interior column
+        // (IS 456 Cl. 31.6): at D = 200, d = 163 mm, b0 = 4(400 + 163) = 2252 mm,
+        //   Vu = 1.5·(5 + 1.5 + 3)·(36 − 0.563²) = 508.5 kN → τv,V = 1.385 N/mm²,
+        //   unbalanced moment (Cl. 31.4.5.2) 17.5 kN·m, γv = 0.4 → τv,M = 0.099,
+        //   τv = 1.485 > ks·0.25√fck = 1.25  → REVISE.
+        // The first feasible thickness is 240 mm.
         const result = optimizeFlatSlab({
             L1: 6, L2: 6, c1: 0.4, c2: 0.4,
             hasDrop: false, dropL1: 0, dropL2: 0, dropDepth: 200,
@@ -55,7 +61,7 @@ describe('OPT-1: flat slab steel weight includes panel area', () => {
             w_live: 3, w_finish: 1.5,
             panelType: 'interior',
         }, {
-            minD: 200, maxD: 220, stepD: 20,
+            minD: 200, maxD: 300, stepD: 20,
             barDias: [12],
             barSpacings: [150],
         });
@@ -63,6 +69,7 @@ describe('OPT-1: flat slab steel weight includes panel area', () => {
         expect(result.feasibleCount).toBeGreaterThan(0);
         const opt = result.optimum!;
         expect(opt).not.toBeNull();
+        expect(opt.D).toBe(240);
 
         // For a 6 m × 6 m panel, the corrected steel weight should be in the
         // hundreds of kg, not tens of kg. The buggy formula gave ~40 kg for
@@ -157,9 +164,10 @@ describe('OPT-2: retaining wall optimizer uses cost (not just concrete volume)',
             minThk: 300, maxThk: 600, stepThk: 50,
         });
         const o = r.optimum!;
-        // Hand-compute: formwork = 2 × H_stem (both faces of stem) + B (top of base)
-        //   — matches the engine's formula `2 * (r.H_stem / 1000) + (r.B / 1000)`.
-        const formworkArea = 2 * (o.result.H_stem / 1000) + (o.B / 1000);
+        // Hand-compute: formwork = 2 × H_stem (both faces of the stem) + 2 × D_base
+        //   (the two edges of the base; its top is not formed)
+        //   — matches the engine's formula `2 * (r.H_stem / 1000) + 2 * (r.D_base / 1000)`.
+        const formworkArea = 2 * (o.result.H_stem / 1000) + 2 * (o.result.D_base / 1000);
         const expected = computeCost(o.concreteVol, o.steelWeight, formworkArea, r.costParams);
         expect(o.costTotal_INR).toBeCloseTo(expected, 0);
     });
@@ -309,32 +317,34 @@ describe('OPT-4: footing optimizer includes formwork in cost', () => {
 
 // ─── OPT-5: Flat slab flexure_u uses MAX of all 4 zones ──────────────────
 
-describe('OPT-5: flat slab flexure_u uses MAX of all 4 zones', () => {
-    test('flexure_u is the max across col/mid × pos/neg zones', () => {
+describe('OPT-5: flat slab flexure_u uses MAX of all zones', () => {
+    test('flexure_u is the max of M / Mu,R (provided bars) over both directions and all strips', () => {
+        // D = 200/220 fail punching (see OPT-1), so the range starts feasible at 240.
         const r = optimizeFlatSlab({
             L1: 6, L2: 6, c1: 0.4, c2: 0.4,
             hasDrop: false, dropL1: 0, dropL2: 0, dropDepth: 200,
-            D: 200, cover: 25, fck: 25, fy: 500,
+            D: 240, cover: 25, fck: 25, fy: 500,
             w_live: 3, w_finish: 1.5,
             panelType: 'interior',
         }, {
-            minD: 200, maxD: 220, stepD: 20,
+            minD: 240, maxD: 260, stepD: 20,
             barDias: [12, 16],
             barSpacings: [125, 150, 175],
         });
 
-        if (r.optimum) {
-            const o = r.optimum;
-            const res = o.result;
-            const Ast_provided_defl = (1000 / o.bar_spacing) * (Math.PI * o.bar_dia * o.bar_dia / 4);
-            // The governing flexure utilization should be the MAX across all 4 zones
-            const expected = Math.max(
-                res.Ast_pos_col / res.colStripWidth,
-                res.Ast_neg_col / res.colStripWidth,
-                res.Ast_pos_mid / res.midStripWidth,
-                res.Ast_neg_mid / res.midStripWidth,
-            ) / Ast_provided_defl;
-            expect(o.utilizationRatio.flexure).toBeCloseTo(expected, 3);
-        }
+        expect(r.optimum).not.toBeNull();
+        const o = r.optimum!;
+        const zones = [...Object.values(o.result.zones.dir1), ...Object.values(o.result.zones.dir2)]
+            .filter((z): z is NonNullable<typeof z> => z !== null && z.M > 0);
+        // Mu,R = 0.87·fy·Ast·d·(1 − Ast·fy/(b·d·fck)) ≤ Mu,lim = 0.133·fck·b·d² (Annex G-1.1 b)
+        const capacity = (z: typeof zones[number]) => {
+            const Ast = z.bars.Ast_provided * z.width, b = z.width * 1000;
+            const Mu = 0.87 * 500 * Ast * z.d * (1 - Ast * 500 / (b * z.d * 25)) / 1e6;
+            return Math.min(Mu, 0.133 * 25 * b * z.d * z.d / 1e6);
+        };
+        const expected = Math.max(...zones.map(z => z.M / capacity(z)));
+        expect(zones.length).toBeGreaterThanOrEqual(8);          // 4 zones × 2 directions
+        expect(o.utilizationRatio.flexure).toBeCloseTo(expected, 3);
+        expect(o.utilizationRatio.flexure).toBeLessThanOrEqual(1);
     });
 });

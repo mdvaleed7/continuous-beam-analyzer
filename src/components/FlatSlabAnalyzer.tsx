@@ -76,7 +76,10 @@ export default function FlatSlabAnalyzer() {
             const checked = (e.target as HTMLInputElement).checked;
             setInput(prev => ({ ...prev, [name]: checked }));
         } else if (name === 'panelType') {
-            setInput(prev => ({ ...prev, [name]: value as 'interior' | 'exterior' }));
+            setInput(prev => ({ ...prev, [name]: value as 'interior' | 'exterior' | 'corner' }));
+        } else if (name === 'alpha_c') {
+            // blank → computed from the column / slab stiffness
+            setInput(prev => ({ ...prev, alpha_c: value === '' ? undefined : parseFloat(value) }));
         } else if (name === 'deflectionSupport') {
             setInput(prev => ({ ...prev, [name]: value as 'continuous' | 'simply' | 'one_end' }));
         } else if (name === 'grade') {
@@ -148,15 +151,43 @@ export default function FlatSlabAnalyzer() {
                         <label>Panel Type</label>
                         <select title="panelType" name="panelType" value={input.panelType} onChange={handleInputChange} id="panelType">
                             <option value="interior">Interior Panel</option>
-                            <option value="exterior">Exterior Panel</option>
+                            <option value="exterior">Exterior Panel (end span in L1)</option>
+                            <option value="corner">Corner Panel (end span both ways)</option>
                         </select>
                     </div>
+                    {input.panelType !== 'interior' && (
+                        <>
+                            <div className="control-group">
+                                <label htmlFor="alpha_c">α<sub>c</sub> = ΣK<sub>c</sub>/K<sub>s</sub> at exterior joint (<CodeRef clause="31.4.3.3">Cl. 31.4.3.3</CodeRef>) — blank = from columns</label>
+                                <input title="alpha_c" type="number" min="0" step="0.1" name="alpha_c" value={input.alpha_c ?? ''} onChange={handleInputChange} id="alpha_c" placeholder="auto" />
+                            </div>
+                            <div className="control-group">
+                                <label htmlFor="edgeOverhang">Slab overhang beyond edge column face (m)</label>
+                                <input title="edgeOverhang" type="number" min="0" step="0.05" name="edgeOverhang" value={input.edgeOverhang ?? 0} onChange={handleInputChange} id="edgeOverhang" />
+                            </div>
+                        </>
+                    )}
                     <div className="control-group">
-                        <label>Deflection Support Condition (Annex C)</label>
+                        <label htmlFor="colHeight">Storey height for column stiffness (m)</label>
+                        <input title="colHeight" type="number" min="0" step="0.1" name="colHeight" value={input.colHeight ?? 3} onChange={handleInputChange} id="colHeight" />
+                    </div>
+                    <div className="control-group">
+                        <label htmlFor="colsAtJoint">Columns at joint (above + below)</label>
+                        <input title="colsAtJoint" type="number" min="1" max="2" step="1" name="colsAtJoint" value={input.colsAtJoint ?? 2} onChange={handleInputChange} id="colsAtJoint" />
+                    </div>
+                    <div className="control-group">
+                        <label htmlFor="nSpansL1">Continuous spans L1 / L2 (DDM <CodeRef clause="31.4.1">Cl. 31.4.1</CodeRef>)</label>
+                        <div className="flex-row-gap-8-mb-12">
+                            <input title="nSpansL1" type="number" min="1" step="1" name="nSpansL1" value={input.nSpansL1 ?? 3} onChange={handleInputChange} id="nSpansL1" />
+                            <input title="nSpansL2" type="number" min="1" step="1" name="nSpansL2" value={input.nSpansL2 ?? 3} onChange={handleInputChange} id="nSpansL2" />
+                        </div>
+                    </div>
+                    <div className="control-group">
+                        <label>Shrinkage support condition (Annex C k₃)</label>
                         <select title="deflectionSupport" name="deflectionSupport" value={input.deflectionSupport || 'continuous'} onChange={handleInputChange} id="deflectionSupport">
-                            <option value="continuous">Continuous (both ends) — α=1/16, k₃=0.063</option>
-                            <option value="one_end">One-end continuous — α=1/12, k₃=0.086</option>
-                            <option value="simply">Simply supported — α=5/48, k₃=0.125</option>
+                            <option value="continuous">Continuous (both ends) — k₃=0.063</option>
+                            <option value="one_end">One-end continuous — k₃=0.086</option>
+                            <option value="simply">Simply supported — k₃=0.125</option>
                         </select>
                     </div>
                     <div className="control-group">
@@ -284,27 +315,53 @@ export default function FlatSlabAnalyzer() {
 
                         {/* Punching Shear */}
                         <div className="panel">
-                            <h3 className="panel-title"><span className="panel-icon">⚔️</span>Punching Shear — IS 456 <CodeRef clause="31.6">Cl. 31.6</CodeRef></h3>
+                            <h3 className="panel-title"><span className="panel-icon">⚔️</span>Punching Shear — IS 456 <CodeRef clause="31.6">Cl. 31.6</CodeRef> (moment transfer <CodeRef clause="31.6.2.2">Cl. 31.6.2.2</CodeRef>)</h3>
                             <table className="result-table">
                                 <thead>
                                     <tr>
+                                        <th>Critical section</th>
+                                        <th>u (mm)</th>
+                                        <th>d (mm)</th>
+                                        <th>V<sub>u</sub> (kN)</th>
+                                        <th>M transferred (kN·m)</th>
                                         <th>τ<sub>v</sub> (N/mm²)</th>
                                         <th>τ<sub>c</sub> (N/mm²)</th>
-                                        <th>Crit. Perimeter (m)</th>
-                                        <th>V<sub>u</sub> (kN)</th>
                                         <th>Status</th>
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    <tr>
-                                        <td>{results.tau_v.toFixed(2)}</td>
-                                        <td>{results.tau_c.toFixed(2)}</td>
-                                        <td>{results.crit_perimeter.toFixed(2)}</td>
-                                        <td>{results.shear_force.toFixed(1)}</td>
-                                        <td><span className={`chip ${results.punching_safe ? 'chip-safe' : 'chip-fail'}`}>{results.punching_safe ? 'OK' : 'FAIL'}</span></td>
-                                    </tr>
+                                    {results.punchingChecks.map(p => (
+                                        <tr key={p.location}>
+                                            <td>{p.location}</td>
+                                            <td>{p.u.toFixed(0)}</td>
+                                            <td>{p.d.toFixed(0)}</td>
+                                            <td>{p.V.toFixed(1)}</td>
+                                            <td>{p.M1.toFixed(1)}{p.M2 > 0 ? ` / ${p.M2.toFixed(1)}` : ''}</td>
+                                            <td>{p.tau_v.toFixed(3)}</td>
+                                            <td>{p.tau_c.toFixed(3)}</td>
+                                            <td><span className={`chip ${p.ok ? 'chip-safe' : 'chip-fail'}`}>{p.ok ? 'OK' : 'FAIL'}</span></td>
+                                        </tr>
+                                    ))}
                                 </tbody>
                             </table>
+                            {results.transferChecks.length > 0 && (
+                                <table className="result-table compact">
+                                    <thead>
+                                        <tr><th>Flexural transfer (<CodeRef clause="31.3.3">Cl. 31.3.3</CodeRef>)</th><th>Band (mm)</th><th>M (kN·m)</th><th>A<sub>st</sub> req / in band (mm²)</th><th>Extra bars</th></tr>
+                                    </thead>
+                                    <tbody>
+                                        {results.transferChecks.map(t => (
+                                            <tr key={t.location}>
+                                                <td>{t.location}</td>
+                                                <td>{t.bandWidth}</td>
+                                                <td>{t.M_flex.toFixed(1)}</td>
+                                                <td>{t.Ast_req} / {t.Ast_available}</td>
+                                                <td><span className={`chip ${!t.ok ? 'chip-fail' : t.Ast_extra > 0 ? 'chip-warn' : 'chip-safe'}`}>{!t.ok ? 'SECTION FAILS' : t.Ast_extra > 0 ? `+${t.Ast_extra} mm²` : 'none'}</span></td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            )}
                         </div>
 
                         {/* Column & Middle Strip Moments */}
@@ -338,8 +395,38 @@ export default function FlatSlabAnalyzer() {
                                         <td>{results.M_pos_mid.toFixed(1)}</td>
                                         <td>{Number.isNaN(results.Ast_pos_mid) ? <span className="chip chip-fail">Fails</span> : results.Ast_pos_mid.toFixed(0)}</td>
                                     </tr>
+                                    {results.M_negExt_col > 0 && (
+                                        <tr>
+                                            <td>Column (exterior support)</td>
+                                            <td>{results.colStripWidth.toFixed(2)}</td>
+                                            <td>{results.M_negExt_col.toFixed(1)}</td>
+                                            <td>{Number.isNaN(results.Ast_negExt_col) ? <span className="chip chip-fail">Fails</span> : results.Ast_negExt_col.toFixed(0)}</td>
+                                            <td colSpan={2}>exterior negative (<CodeRef clause="31.5.5.2">Cl. 31.5.5.2</CodeRef>)</td>
+                                        </tr>
+                                    )}
+                                    <tr>
+                                        <td>L2 column strip</td>
+                                        <td>{results.dir2.colStripWidth.toFixed(2)}</td>
+                                        <td>{results.dir2.M_neg_col.toFixed(1)}</td>
+                                        <td>{Number.isNaN(results.dir2.Ast_neg_col) ? <span className="chip chip-fail">Fails</span> : results.dir2.Ast_neg_col.toFixed(0)}</td>
+                                        <td>{results.dir2.M_pos_col.toFixed(1)}</td>
+                                        <td>{Number.isNaN(results.dir2.Ast_pos_col) ? <span className="chip chip-fail">Fails</span> : results.dir2.Ast_pos_col.toFixed(0)}</td>
+                                    </tr>
+                                    <tr>
+                                        <td>L2 middle strip</td>
+                                        <td>{results.dir2.midStripWidth.toFixed(2)}</td>
+                                        <td>{results.dir2.M_neg_mid.toFixed(1)}</td>
+                                        <td>{Number.isNaN(results.dir2.Ast_neg_mid) ? <span className="chip chip-fail">Fails</span> : results.dir2.Ast_neg_mid.toFixed(0)}</td>
+                                        <td>{results.dir2.M_pos_mid.toFixed(1)}</td>
+                                        <td>{Number.isNaN(results.dir2.Ast_pos_mid) ? <span className="chip chip-fail">Fails</span> : results.dir2.Ast_pos_mid.toFixed(0)}</td>
+                                    </tr>
                                 </tbody>
                             </table>
+                            <p className="ld-note">
+                                Moment coefficients (L1): negative interior {results.coefficients.dir1.negInt.toFixed(3)}, positive {results.coefficients.dir1.pos.toFixed(3)}
+                                {results.panelType !== 'interior' ? `, exterior negative ${results.coefficients.dir1.negExt.toFixed(3)} (αc = ${results.coefficients.dir1.alpha_c_ext})` : ''} × M₀.
+                                {!results.providedSteelCheck.ok && results.providedSteelCheck.messages.map(m => <span key={m}><br />⚠ {m}</span>)}
+                            </p>
                         </div>
 
                         {/* Deflection Check */}
@@ -454,22 +541,22 @@ export default function FlatSlabAnalyzer() {
                                         {results.dropChecks && (
                                             <>
                                                 <tr>
-                                                    <td>Drop Panel Depth ≥ 1.25·D (<CodeRef clause="31.4.1">Cl. 31.4</CodeRef>)</td>
-                                                    <td>{input.dropDepth}mm vs {Math.ceil(1.25 * input.D)}mm</td>
-                                                    <td><span className={`chip ${results.dropChecks.depthOk ? 'chip-safe' : 'chip-fail'}`}>{results.dropChecks.depthOk ? 'OK' : 'REVISE'}</span></td>
+                                                    <td>Drop plan size ≥ l/3 each way (<CodeRef clause="31.2.2">Cl. 31.2.2</CodeRef>)</td>
+                                                    <td>{input.dropL1}×{input.dropL2} m vs {results.dropChecks.dropL1_min.toFixed(2)}×{results.dropChecks.dropL2_min.toFixed(2)} m</td>
+                                                    <td><span className={`chip ${results.dropChecks.planOk ? 'chip-safe' : 'chip-fail'}`}>{results.dropChecks.planOk ? 'OK' : 'REVISE'}</span></td>
                                                 </tr>
                                                 <tr>
-                                                    <td>Drop Width ≥ L/6 (<CodeRef clause="31.4.1">Cl. 31.4</CodeRef>)</td>
-                                                    <td>{input.dropL1}×{input.dropL2}m vs {(input.L1 / 6).toFixed(2)}m</td>
-                                                    <td><span className={`chip ${results.dropChecks.widthOk ? 'chip-safe' : 'chip-fail'}`}>{results.dropChecks.widthOk ? 'OK' : 'REVISE'}</span></td>
-                                                </tr>
-                                                <tr>
-                                                    <td>Drop Slope ≤ 45° (<CodeRef clause="31.4.1">Cl. 31.4</CodeRef>)</td>
-                                                    <td>{results.dropChecks.slopeOk ? 'Within limit' : 'Too steep'}</td>
-                                                    <td><span className={`chip ${results.dropChecks.slopeOk ? 'chip-safe' : 'chip-fail'}`}>{results.dropChecks.slopeOk ? 'OK' : 'REVISE'}</span></td>
+                                                    <td>Drop projection ≥ D/4 (ACI 318-19 Cl. 8.2.4 — advisory, not IS 456)</td>
+                                                    <td>{results.dropChecks.projection} mm vs {results.dropChecks.projection_min} mm</td>
+                                                    <td><span className={`chip ${results.dropChecks.projectionOk ? 'chip-safe' : 'chip-warn'}`}>{results.dropChecks.projectionOk ? 'OK' : 'ADVISORY'}</span></td>
                                                 </tr>
                                             </>
                                         )}
+                                        <tr>
+                                            <td>DDM limitations (<CodeRef clause="31.4.1">Cl. 31.4.1</CodeRef>)</td>
+                                            <td>{results.ddmChecks.nSpansL1}×{results.ddmChecks.nSpansL2} spans, L<sub>long</sub>/L<sub>short</sub> = {results.ddmChecks.aspect}, LL/DL = {results.ddmChecks.loadRatio}</td>
+                                            <td><span className={`chip ${results.ddmChecks.ok ? 'chip-safe' : 'chip-fail'}`}>{results.ddmChecks.ok ? 'OK' : 'REVISE'}</span></td>
+                                        </tr>
                                         {results.barChecks && (
                                             <>
                                                 <tr>
@@ -486,6 +573,7 @@ export default function FlatSlabAnalyzer() {
                                         )}
                                     </tbody>
                                 </table>
+                                {[...results.ddmChecks.messages, ...results.warnings].map(m => <p key={m} className="ld-note">{m}</p>)}
                             </div>
                         )}
 

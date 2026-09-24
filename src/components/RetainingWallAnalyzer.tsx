@@ -53,7 +53,7 @@ export default function RetainingWallAnalyzer() {
         setInput(prev => ({ ...prev, steelGrade, fy: fyMap[steelGrade] || 500 }));
     };
 
-    const [optBounds, setOptBounds] = useState({ minB: 1500, maxB: 5000, stepB: 100, minThk: 250, maxThk: 600, stepThk: 50 });
+    const [optBounds, setOptBounds] = useState({ minB: 1500, maxB: 5000, stepB: 100, minThk: 250, maxThk: 600, stepThk: 50, minBase: 300, maxBase: 700, stepBase: 50 });
 
     const handleOptimize = () => {
         const res = optimizeRetainingWall(input, optBounds);
@@ -191,12 +191,20 @@ export default function RetainingWallAnalyzer() {
                             </div>
                         </div>
                         <div className="control-group">
-                            <label>Min / Max Thickness (mm)</label>
+                            <label>Min / Max Stem Thickness at Base (mm)</label>
                             <div className="flex-row-gap-8">
                                 <input type="number" value={optBounds.minThk} onChange={e => setOptBounds(p => ({...p, minThk: +e.target.value}))} />
                                 <input type="number" value={optBounds.maxThk} onChange={e => setOptBounds(p => ({...p, maxThk: +e.target.value}))} />
                             </div>
                         </div>
+                        <div className="control-group">
+                            <label>Min / Max Base Slab Thickness (mm)</label>
+                            <div className="flex-row-gap-8">
+                                <input type="number" value={optBounds.minBase} onChange={e => setOptBounds(p => ({...p, minBase: +e.target.value}))} />
+                                <input type="number" value={optBounds.maxBase} onChange={e => setOptBounds(p => ({...p, maxBase: +e.target.value}))} />
+                            </div>
+                        </div>
+                        <p className="ld-note">Toe projection is swept at 0.20–0.40·B; the stem top is capped at the base thickness.</p>
                         <button className="btn-primary" style={{width: '100%', marginTop: 8}} onClick={handleOptimize}>Auto-Optimize Dimensions</button>
                     </section>
                 </aside>
@@ -219,7 +227,7 @@ export default function RetainingWallAnalyzer() {
                                         <span className={`chip ${safe ? 'chip-safe' : 'chip-fail'}`}>{r.overallStatus}</span>
                                         <span className="chip chip-info">K<sub>a</sub> = {fmt(r.Ka, 3)}</span>
                                         <span className="chip chip-info">ΣV = {fmt(r.SigmaV, 1)} kN/m</span>
-                                        <span className="chip chip-info">ΣH = {fmt(r.Pa + r.Pq + r.Pa_water, 1)} kN/m</span>
+                                        <span className="chip chip-info">ΣH = {fmt(r.SigmaH, 1)} kN/m</span>
                                         <span className="chip chip-info">p<sub>max</sub> = {fmt(r.p_max, 0)} kN/m²</span>
                                     </div>
                                 </div>
@@ -235,7 +243,7 @@ export default function RetainingWallAnalyzer() {
                                         <span className="btn-icon">📋</span> Export JSON
                                     </button>
                                     <button className="btn-primary btn-preview" onClick={async () => {
-                                        const s = `CANTILEVER RETAINING WALL SUMMARY (IS 456:2000)\n${'='.repeat(50)}\nH=${fmt(input.H/1000,2)}m | B=${fmt(input.B/1000,2)}m | D_stem=${input.D_stem_base}/${input.D_stem_top}mm | D_base=${input.D_base}mm\nφ=${input.phi}° | γ_soil=${input.gamma_soil} | q=${input.q_surcharge} | SBC=${input.sbc} | μ=${input.mu}\n\nKa=${fmt(r.Ka,3)} | Pa=${fmt(r.Pa,1)} kN | Pq=${fmt(r.Pq,1)} kN | Pw=${fmt(r.Pa_water,1)} kN\nΣV=${fmt(r.SigmaV,1)} kN/m | ΣH=${fmt(r.Pa+r.Pq+r.Pa_water,1)} kN/m\n\nOverturning FoS: ${fmt(r.fos_overturning,2)} (≥1.4) ${r.overturning_ok?'OK':'FAIL'}\nSliding FoS: ${fmt(r.fos_sliding,2)} (≥1.4) ${r.sliding_ok?'OK':'FAIL'}\nBearing: p_max=${fmt(r.p_max,0)} vs SBC=${r.sbc} ${r.bearing_ok?'OK':'FAIL'}\nStem: Mu=${fmt(r.stem_Mu,1)} kN·m | Ast=${fmt(r.stem_Ast,0)} mm²/m | τv=${fmt(r.stem_tau_v,3)} vs τc=${fmt(r.stem_tau_c,3)} ${r.stem_shear_ok?'OK':'FAIL'}\nHeel: Mu=${fmt(r.heel_Mu,1)} | Ast=${fmt(r.heel_Ast,0)} | τv=${fmt(r.heel_tau_v,3)} vs τc=${fmt(r.heel_tau_c,3)} ${r.heel_shear_ok?'OK':'FAIL'}\nToe:  Mu=${fmt(r.toe_Mu,1)} | Ast=${fmt(r.toe_Ast,0)} | τv=${fmt(r.toe_tau_v,3)} vs τc=${fmt(r.toe_tau_c,3)} ${r.toe_shear_ok?'OK':'FAIL'}\nOverall: ${r.overallStatus}\n${'='.repeat(50)}`;
+                                        const s = `CANTILEVER RETAINING WALL SUMMARY (IS 456:2000)\n${'='.repeat(50)}\nH=${fmt(input.H/1000,2)}m | B=${fmt(input.B/1000,2)}m | D_stem=${input.D_stem_base}/${input.D_stem_top}mm | D_base=${input.D_base}mm\nφ=${input.phi}° | γ_soil=${input.gamma_soil} | q=${input.q_surcharge} | SBC=${input.sbc} | μ=${input.mu}\n\nKa=${fmt(r.Ka,3)} | Pa=${fmt(r.Pa,1)} kN | Pq=${fmt(r.Pq,1)} kN | Pw=${fmt(r.Pa_water,1)} kN\nΣV=${fmt(r.SigmaV,1)} kN/m | ΣH=${fmt(r.Pa+r.Pq+r.Pa_water,1)} kN/m\n\nOverturning 0.9·MR/MO: ${fmt(r.fos_overturning,2)} (≥1.4) ${r.overturning_ok?'OK':'FAIL'}\nSliding 0.9·μ·ΣW/ΣH: ${fmt(r.fos_sliding,2)} (≥1.4) ${r.sliding_ok?'OK':'FAIL'}\nBearing: p_max=${fmt(r.p_max,0)} vs SBC=${r.sbc} ${r.bearing_ok?'OK':'FAIL'}\nStem: Mu=${fmt(r.stem_Mu,1)} kN·m | Ast=${fmt(r.stem_Ast,0)} mm²/m | τv=${fmt(r.stem_tau_v,3)} vs τc=${fmt(r.stem_tau_c,3)} ${r.stem_shear_ok?'OK':'FAIL'}\nHeel: Mu=${fmt(r.heel_Mu,1)} | Ast=${fmt(r.heel_Ast,0)} | τv=${fmt(r.heel_tau_v,3)} vs τc=${fmt(r.heel_tau_c,3)} ${r.heel_shear_ok?'OK':'FAIL'}\nToe:  Mu=${fmt(r.toe_Mu,1)} | Ast=${fmt(r.toe_Ast,0)} | τv=${fmt(r.toe_tau_v,3)} vs τc=${fmt(r.toe_tau_c,3)} ${r.toe_shear_ok?'OK':'FAIL'}\nOverall: ${r.overallStatus}\n${'='.repeat(50)}`;
                                         const ok = await copyToClipboard(s);
                                         toast(ok ? '✅ Summary copied to clipboard' : '❌ Copy failed', { type: ok ? 'success' : 'error' });
                                     }} title="Copy key results to clipboard">
@@ -276,19 +284,19 @@ export default function RetainingWallAnalyzer() {
                             </thead>
                             <tbody>
                                 <tr>
-                                    <td>Overturning (about toe) — <CodeRef clause="20.1">Cl. 20.1</CodeRef></td>
+                                    <td>Overturning 0.9·M<sub>R</sub>/M<sub>O</sub> (about toe) — <CodeRef clause="20.1">Cl. 20.1</CodeRef></td>
                                     <td>{fmt(r.fos_overturning, 2)}</td>
                                     <td>≥ 1.4</td>
                                     <td><span className={`chip ${r.overturning_ok ? 'chip-safe' : 'chip-fail'}`}>{r.overturning_ok ? 'OK' : 'FAIL'}</span></td>
                                 </tr>
                                 <tr>
-                                    <td>Sliding (along base)</td>
+                                    <td>Sliding 0.9·μ·(ΣW − U)/ΣH — <CodeRef clause="20.2">Cl. 20.2</CodeRef></td>
                                     <td>{fmt(r.fos_sliding, 2)}</td>
                                     <td>≥ 1.4</td>
                                     <td><span className={`chip ${r.sliding_ok ? 'chip-safe' : 'chip-fail'}`}>{r.sliding_ok ? 'OK' : 'FAIL'}</span></td>
                                 </tr>
                                 <tr>
-                                    <td>Bearing Pressure (p<sub>max</sub>)</td>
+                                    <td>Bearing Pressure (p<sub>max</sub>, {r.bearingCase} over heel)</td>
                                     <td>{fmt(r.p_max, 0)} kN/m²</td>
                                     <td>≤ {r.sbc} kN/m²</td>
                                     <td><span className={`chip ${r.bearing_ok ? 'chip-safe' : 'chip-fail'}`}>{r.bearing_ok ? 'OK' : 'FAIL'}</span></td>
@@ -296,7 +304,7 @@ export default function RetainingWallAnalyzer() {
                             </tbody>
                         </table>
                         <div className="ld-note">
-                            Resisting moment M<sub>R</sub> = {fmt(r.M_resisting, 1)} kN·m/m · Overturning moment M<sub>O</sub> = {fmt(r.M_overturning, 1)} kN·m/m · Eccentricity e = {fmt(r.eccentricity * 1000, 0)} mm (B/6 = {fmt(r.B / 6, 0)} mm)
+                            Restoring moment (permanent loads) M<sub>R</sub> = {fmt(r.M_resisting, 1)} kN·m/m · Overturning M<sub>O</sub> = {fmt(r.M_overturning, 1)} kN·m/m{r.U > 0 ? ` (incl. uplift U = ${fmt(r.U, 1)} kN/m)` : ''} · Eccentricity e = {fmt(r.eccentricity * 1000, 0)} mm (B/6 = {fmt(r.B / 6, 0)} mm). Surcharge over the heel is not counted as restoring.
                         </div>
                     </div>
 
@@ -316,12 +324,13 @@ export default function RetainingWallAnalyzer() {
                                 <tr><td>Active earth pressure P<sub>a</sub> (soil)</td><td>{fmt(r.Pa, 1)}</td><td>{fmt(r.Pa_arm, 3)}</td><td>{fmt(r.Pa * r.Pa_arm, 1)}</td></tr>
                                 {r.Pq > 0 && <tr><td>Surcharge P<sub>q</sub></td><td>{fmt(r.Pq, 1)}</td><td>{fmt(r.Pq_arm, 3)}</td><td>{fmt(r.Pq * r.Pq_arm, 1)}</td></tr>}
                                 {r.Pa_water > 0 && <tr><td>Water pressure P<sub>w</sub></td><td>{fmt(r.Pa_water, 1)}</td><td>{fmt(r.Pa_water_arm, 3)}</td><td>{fmt(r.Pa_water * r.Pa_water_arm, 1)}</td></tr>}
-                                <tr className="row-subtotal"><td colSpan={3} style={{ textAlign: 'right' }}>Σ Overturning (horizontal)</td><td>{fmt(r.M_overturning, 1)}</td></tr>
+                                {r.U > 0 && <tr><td>Uplift U (heel → toe)</td><td>{fmt(r.U, 1)}</td><td>{fmt(r.U_arm, 3)}</td><td>{fmt(r.U * r.U_arm, 1)}</td></tr>}
+                                <tr className="row-subtotal"><td colSpan={3} style={{ textAlign: 'right' }}>Σ Overturning</td><td>{fmt(r.M_overturning, 1)}</td></tr>
                                 <tr><td>Self-weight of stem W<sub>stem</sub></td><td>{fmt(r.W_stem, 1)}</td><td>{fmt(r.B_toe / 1000 + r.D_stem_base / 2000, 3)}</td><td>{fmt(r.W_stem * (r.B_toe / 1000 + r.D_stem_base / 2000), 1)}</td></tr>
                                 <tr><td>Self-weight of base W<sub>base</sub></td><td>{fmt(r.W_base, 1)}</td><td>{fmt(r.B / 2000, 3)}</td><td>{fmt(r.W_base * r.B / 2000, 1)}</td></tr>
                                 <tr><td>Soil on heel W<sub>soil</sub></td><td>{fmt(r.W_soil, 1)}</td><td>{fmt(r.B_toe / 1000 + r.D_stem_base / 1000 + r.B_heel / 2000, 3)}</td><td>{fmt(r.W_soil * (r.B_toe / 1000 + r.D_stem_base / 1000 + r.B_heel / 2000), 1)}</td></tr>
-                                {r.W_surcharge > 0 && <tr><td>Surcharge on heel W<sub>q</sub></td><td>{fmt(r.W_surcharge, 1)}</td><td>{fmt(r.B_toe / 1000 + r.D_stem_base / 1000 + r.B_heel / 2000, 3)}</td><td>{fmt(r.W_surcharge * (r.B_toe / 1000 + r.D_stem_base / 1000 + r.B_heel / 2000), 1)}</td></tr>}
-                                <tr className="row-subtotal"><td colSpan={3} style={{ textAlign: 'right' }}>Σ Resisting (vertical)</td><td>{fmt(r.M_resisting, 1)}</td></tr>
+                                <tr className="row-subtotal"><td colSpan={3} style={{ textAlign: 'right' }}>Σ Restoring (permanent)</td><td>{fmt(r.M_resisting, 1)}</td></tr>
+                                {r.W_surcharge > 0 && <tr><td>Surcharge on heel W<sub>q</sub> (bearing only)</td><td>{fmt(r.W_surcharge, 1)}</td><td>{fmt(r.B_toe / 1000 + r.D_stem_base / 1000 + r.B_heel / 2000, 3)}</td><td>{fmt(r.W_surcharge * (r.B_toe / 1000 + r.D_stem_base / 1000 + r.B_heel / 2000), 1)}</td></tr>}
                             </tbody>
                         </table>
                     </div>
@@ -334,7 +343,9 @@ export default function RetainingWallAnalyzer() {
                                 <tr><td>Service moment at stem base (per m)</td><td>{fmt(r.stem_M_service, 1)} kN·m/m</td></tr>
                                 <tr><td>Factored moment M<sub>u</sub></td><td><strong>{fmt(r.stem_Mu, 1)} kN·m/m</strong></td></tr>
                                 <tr><td>Effective depth d</td><td>{fmt(r.stem_d, 0)} mm</td></tr>
-                                <tr><td>A<sub>st</sub> required (per m)</td><td>{fmt(r.stem_Ast, 0)} mm²/m</td></tr>
+                                <tr><td>A<sub>st</sub> required (per m)</td><td>{fmt(r.stem_Ast, 0)} mm²/m → {r.stem_bars.label}</td></tr>
+                                <tr><td>Horizontal steel (<CodeRef clause="32.5">Cl. 32.5</CodeRef>, {fmt(r.stem_horizontal.ratio * 100, 2)}%)</td><td>{r.stem_horizontal.bars.label} each face</td></tr>
+                                <tr><td>Anchorage into base (L<sub>d</sub> = {r.anchorage.Ld} mm)</td><td><span className={`chip ${r.anchorage.detail === 'insufficient' ? 'chip-fail' : 'chip-safe'}`}>{r.anchorage.detail === 'L-bar' ? `L-bar, leg ≥ ${r.anchorage.leg_req} mm` : r.anchorage.detail}</span></td></tr>
                                 <tr><td>p<sub>t</sub></td><td>{fmt(r.stem_pt, 3)} %</td></tr>
                                 <tr><td>τ<sub>v</sub> = V<sub>u</sub>/(b·d)</td><td>{fmt(r.stem_tau_v, 3)} N/mm²</td></tr>
                                 <tr><td>τ<sub>c</sub> (Table 19)</td><td>{fmt(r.stem_tau_c, 3)} N/mm²</td></tr>
@@ -348,11 +359,11 @@ export default function RetainingWallAnalyzer() {
                         <h3 className="panel-title"><span className="panel-icon">📐</span>Heel Design (tension at top)</h3>
                         <table className="result-table compact">
                             <tbody>
-                                <tr><td>Net downward force on heel</td><td>{fmt(r.heel_M_service * 2 / (r.B_heel / 1000), 1)} kN/m</td></tr>
+                                <tr><td>Net downward force on heel</td><td>{fmt(r.heel_V_service, 1)} kN/m</td></tr>
                                 <tr><td>Service moment at stem face</td><td>{fmt(r.heel_M_service, 1)} kN·m/m</td></tr>
                                 <tr><td>Factored moment M<sub>u</sub></td><td><strong>{fmt(r.heel_Mu, 1)} kN·m/m</strong></td></tr>
                                 <tr><td>Effective depth d</td><td>{fmt(r.heel_d, 0)} mm</td></tr>
-                                <tr><td>A<sub>st</sub> required (per m)</td><td>{fmt(r.heel_Ast, 0)} mm²/m</td></tr>
+                                <tr><td>A<sub>st</sub> required (per m)</td><td>{fmt(r.heel_Ast, 0)} mm²/m → {r.heel_bars.label} (top)</td></tr>
                                 <tr><td>p<sub>t</sub></td><td>{fmt(r.heel_pt, 3)} %</td></tr>
                                 <tr><td>τ<sub>v</sub></td><td>{fmt(r.heel_tau_v, 3)} N/mm²</td></tr>
                                 <tr><td>τ<sub>c</sub> (Table 19)</td><td>{fmt(r.heel_tau_c, 3)} N/mm²</td></tr>
@@ -366,11 +377,12 @@ export default function RetainingWallAnalyzer() {
                         <h3 className="panel-title"><span className="panel-icon">📐</span>Toe Design (tension at bottom)</h3>
                         <table className="result-table compact">
                             <tbody>
-                                <tr><td>Net upward force on toe</td><td>{fmt(r.toe_M_service * 2 / (r.B_toe / 1000), 1)} kN/m</td></tr>
+                                <tr><td>Net upward force on toe</td><td>{fmt(r.toe_V_service, 1)} kN/m</td></tr>
                                 <tr><td>Service moment at stem face</td><td>{fmt(r.toe_M_service, 1)} kN·m/m</td></tr>
                                 <tr><td>Factored moment M<sub>u</sub></td><td><strong>{fmt(r.toe_Mu, 1)} kN·m/m</strong></td></tr>
                                 <tr><td>Effective depth d</td><td>{fmt(r.toe_d, 0)} mm</td></tr>
-                                <tr><td>A<sub>st</sub> required (per m)</td><td>{fmt(r.toe_Ast, 0)} mm²/m</td></tr>
+                                <tr><td>A<sub>st</sub> required (per m)</td><td>{fmt(r.toe_Ast, 0)} mm²/m → {r.toe_bars.label} (bottom)</td></tr>
+                                <tr><td>Base distribution (<CodeRef clause="26.5.2.1">Cl. 26.5.2.1</CodeRef>)</td><td>{r.base_distribution.bars.label} each face</td></tr>
                                 <tr><td>p<sub>t</sub></td><td>{fmt(r.toe_pt, 3)} %</td></tr>
                                 <tr><td>τ<sub>v</sub></td><td>{fmt(r.toe_tau_v, 3)} N/mm²</td></tr>
                                 <tr><td>τ<sub>c</sub> (Table 19)</td><td>{fmt(r.toe_tau_c, 3)} N/mm²</td></tr>

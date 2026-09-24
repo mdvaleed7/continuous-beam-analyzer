@@ -1,29 +1,38 @@
 /**
  * retainingWallEngine.ts — IS 456:2000 Cantilever Retaining Wall Design
  *
- * A cantilever retaining wall is a statically DETERMINATE structure:
- *   • A vertical STEM fixed into a BASE slab (heel + toe).
- *   • Earth pressure (active) acts on the back of the stem, producing a
- *     cantilever moment at the stem-base junction.
- *   • Stability against overturning (about the toe) and sliding (along the
- *     base) is checked from the free-body of the whole wall.
- *   • Bearing pressure under the base is computed from ΣV and ΣM about the
- *     centroid of the base (trapezoidal distribution).
- *   • Stem and base are designed as rectangular RC sections per IS 456 Cl. 38.1
- *     (flexure) and Cl. 40 (shear).
- *
- * This engine is deliberately simple — no counterforts, no anchorage, no
- * water-table iteration (a single water table depth is handled). For more
- * complex cases the user should fall back to the zone-based basement wall.
+ *   • Active earth pressure (Rankine), surcharge and water on the virtual
+ *     back through the heel; submerged soil below the water table.
+ *   • Stability per IS 456:2000 Cl. 20:
+ *       overturning  0.9·M_R ≥ 1.4·M_O      (Cl. 20.1, 0.9 × dead load)
+ *       sliding      0.9·μ·(ΣW − U) ≥ 1.4·ΣH (Cl. 20.2)
+ *     with M_R from the permanent loads only (stem, base, soil over the heel);
+ *     the surcharge over the heel is variable and is not counted as
+ *     restoring. Destabilising: lateral earth, surcharge and water pressure,
+ *     and the uplift U under the base when a water table exists.
+ *   • Uplift: triangular, γw·hw at the heel to zero at the toe (retained side
+ *     only, free-draining front).
+ *   • Bearing: trapezoidal pressure from the resultant, with and without the
+ *     surcharge over the heel (worse governs); no tension permitted.
+ *   • Stem, heel and toe designed as slabs (Cl. 38.1 flexure, Cl. 40 shear)
+ *     for 1.5 × service actions; heel/toe moments from the exact trapezoidal
+ *     contact pressure and uplift.
+ *   • Stem horizontal steel per Cl. 32.5(c); base distribution steel per
+ *     Cl. 26.5.2.1; anchorage of the stem bars into the base (Cl. 26.2.1,
+ *     90° bend 8φ per Cl. 26.2.2.1).
  */
 
 import {
     getTauC,
     TAU_C_MAX,
     flexuralDesign as flexuralDesignShared,
+    selectBars,
+    developmentLength,
+    getMinSteelRatio,
     computeCost,
     type ConcreteGrade,
     type CostParameters,
+    type BarResult,
 } from '../lib/is456';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -37,7 +46,6 @@ export interface RetainingWallInput {
     B: number;            // total base width (mm)
     B_toe: number;        // toe projection from the front face of stem (mm)
     H_soil?: number;      // retained soil height from the base bottom (mm). Defaults to H.
-    // B_heel = B − B_toe − D_stem_base (derived)
     // ── Soil ────────────────────────────────────────────────────────────────
     phi: number;          // angle of internal friction of backfill (degrees)
     gamma_soil: number;   // unit weight of backfill (kN/m³)
@@ -53,7 +61,15 @@ export interface RetainingWallInput {
     steelGrade: string;   // e.g. 'Fe500'
     cover: number;        // clear cover (mm)
     // ── Load factor ─────────────────────────────────────────────────────────
-    loadFactor: number;   // 1.5 for ultimate (used for stem/base flexure)
+    loadFactor: number;   // 1.5 for ultimate (used for stem/base flexure and shear)
+}
+
+export interface AnchorageResult {
+    Ld: number;              // development length of the stem bars (mm)
+    embedment: number;       // straight vertical length inside the base (mm)
+    detail: 'straight' | 'L-bar' | 'insufficient';
+    leg_req: number;         // horizontal leg after a 90° bend (mm)
+    leg_available: number;   // mm
 }
 
 export interface RetainingWallResult {
@@ -81,80 +97,66 @@ export interface RetainingWallResult {
     cover: number;
     loadFactor: number;
 
-    // ── Earth pressure coefficients ─────────────────────────────────────────
-    Ka: number;            // active earth pressure coefficient (Rankine)
+    Ka: number;
 
-    // ── Forces (per metre length of wall) ───────────────────────────────────
-    Pa: number;            // active earth pressure resultant from soil (kN)
-    Pa_arm: number;        // lever arm of Pa above base (m)
-    Pq: number;            // surcharge pressure resultant (kN)
-    Pq_arm: number;        // lever arm of Pq above base (m)
-    Pa_water: number;      // water pressure resultant (kN), if water table present
-    Pa_water_arm: number;  // lever arm of water pressure (m)
-    Pw_soil_submerged: number; // submerged soil pressure correction (kN)
+    // ── Horizontal forces (per metre run) ───────────────────────────────────
+    Pa: number; Pa_arm: number;
+    Pq: number; Pq_arm: number;
+    Pa_water: number; Pa_water_arm: number;
+    Pw_soil_submerged: number;
+    SigmaH: number;
 
-    // ── Resisting vertical forces (kN) and moments about toe (kN·m) ─────────
-    W_stem: number;        // self-weight of stem
-    W_base: number;        // self-weight of base slab
-    W_soil: number;        // weight of soil on the heel
-    W_surcharge: number;   // weight of surcharge on the heel (if any)
-    SigmaV: number;        // total vertical force = ΣW
-    M_resisting: number;   // Σ resisting moments about the toe
-    M_overturning: number; // Σ overturning moments about the toe
+    // ── Vertical forces ─────────────────────────────────────────────────────
+    W_stem: number;
+    W_base: number;
+    W_soil: number;        // soil over the heel, height H_soil − D_base
+    W_surcharge: number;   // surcharge over the heel (bearing only — not restoring)
+    U: number;             // uplift under the base (kN/m)
+    U_arm: number;         // lever arm of U about the toe (m)
+    W_dead: number;        // stem + base + soil
+    SigmaV: number;        // W_dead + W_surcharge − U (bearing, with surcharge)
+    M_resisting: number;   // moment of the permanent loads about the toe
+    M_overturning: number; // moment of lateral forces + uplift about the toe
 
-    // ── Stability factors of safety ─────────────────────────────────────────
-    fos_overturning: number;   // M_resisting / M_overturning  (≥ 1.4 typical)
-    fos_sliding: number;       // μ·ΣV / ΣH                    (≥ 1.4 typical; passive ignored)
+    // ── Stability (IS 456 Cl. 20) ───────────────────────────────────────────
+    fos_overturning: number;   // 0.9·M_R / M_O  (≥ 1.4)
+    fos_sliding: number;       // 0.9·μ·(W_dead − U) / ΣH  (≥ 1.4)
     overturning_ok: boolean;
     sliding_ok: boolean;
 
-    // ── Bearing pressure ────────────────────────────────────────────────────
-    x_bar: number;         // distance of resultant ΣV from the toe (m)
-    eccentricity: number;  // eccentricity from base centreline (m)
-    p_toe: number;         // bearing pressure at toe (kN/m²)
-    p_heel: number;        // bearing pressure at heel (kN/m²)
-    p_max: number;         // max(p_toe, p_heel)
-    bearing_ok: boolean;   // p_max ≤ sbc
+    // ── Bearing pressure (governing of with / without heel surcharge) ───────
+    V_bearing: number;     // vertical load of the governing case (kN/m)
+    x_bar: number;
+    eccentricity: number;
+    p_toe: number;
+    p_heel: number;
+    p_max: number;
+    bearing_ok: boolean;
+    bearingCase: 'with surcharge' | 'without surcharge';
 
-    // ── Stem design (cantilever, fixed at base) ─────────────────────────────
-    stem_M_service: number;  // service moment at stem base per m (kN·m/m)
-    stem_Mu: number;         // factored moment (kN·m/m)
-    stem_d: number;          // effective depth (mm)
-    stem_Ast: number;        // required steel area (mm²/m)
-    stem_pt: number;         // % steel
-    stem_tau_v: number;      // shear stress at stem base (N/mm²)
-    stem_tau_c: number;      // permissible shear stress (N/mm²)
-    stem_shear_ok: boolean;
+    // ── Stem ────────────────────────────────────────────────────────────────
+    stem_M_service: number; stem_Mu: number; stem_d: number; stem_Ast: number; stem_pt: number;
+    stem_bars: BarResult;
+    stem_tau_v: number; stem_tau_c: number; stem_shear_ok: boolean;
+    stem_horizontal: { ratio: number; Ast_per_face: number; bars: BarResult };
+    anchorage: AnchorageResult;
 
-    // ── Base design ─────────────────────────────────────────────────────────
-    // Heel: tension at TOP — moment from (soil weight + surcharge + self-weight
-    //       of heel) − (upward bearing pressure over the heel).
-    // Toe:  tension at BOTTOM — moment from (upward bearing pressure over the toe)
-    //       − (self-weight of toe).
-    heel_M_service: number;  // net moment at stem face on the heel (kN·m/m)
-    heel_Mu: number;
-    heel_d: number;
-    heel_Ast: number;
-    heel_pt: number;
-    heel_tau_v: number;
-    heel_tau_c: number;
-    heel_shear_ok: boolean;
+    // ── Base ────────────────────────────────────────────────────────────────
+    heel_M_service: number; heel_Mu: number; heel_d: number; heel_Ast: number; heel_pt: number;
+    heel_bars: BarResult; heel_V_service: number;
+    heel_tau_v: number; heel_tau_c: number; heel_shear_ok: boolean;
+    toe_M_service: number; toe_Mu: number; toe_d: number; toe_Ast: number; toe_pt: number;
+    toe_bars: BarResult; toe_V_service: number;
+    toe_tau_v: number; toe_tau_c: number; toe_shear_ok: boolean;
+    base_distribution: { Ast_per_face: number; bars: BarResult };
 
-    toe_M_service: number;   // net moment at stem face on the toe (kN·m/m)
-    toe_Mu: number;
-    toe_d: number;
-    toe_Ast: number;
-    toe_pt: number;
-    toe_tau_v: number;
-    toe_tau_c: number;
-    toe_shear_ok: boolean;
+    steelWeight_kg: number;   // per metre run (provided bars)
+    concreteVol: number;      // m³ per metre run
 
     overallStatus: 'SAFE' | 'REVISE';
-    tau_c_max: number;       // Table 20 max shear stress for the grade
-    messages: string[];      // human-readable check messages
-    
-    // ── SFD/BMD points for rendering ────────────────────────────────────────
-    forcePoints: { y: number; V: number; M: number; p: number }[]; // y is depth from top of wall (0 to H_stem)
+    tau_c_max: number;
+    messages: string[];
+    forcePoints: { y: number; V: number; M: number; p: number }[];
 }
 
 // ─── Main Analysis ───────────────────────────────────────────────────────────
@@ -165,13 +167,13 @@ export function analyzeRetainingWall(input: RetainingWallInput): RetainingWallRe
         phi, gamma_soil, gamma_concrete, q_surcharge, mu, sbc, waterTableDepth,
         fck, fy, grade, steelGrade, cover, loadFactor,
     } = input;
-
     const messages: string[] = [];
+    const gradeC = grade as ConcreteGrade;
 
     // ── Derived geometry ────────────────────────────────────────────────────
-    const H_stem = H - D_base;                 // stem height (mm)
-    const B_heel = B - B_toe - D_stem_base;    // heel projection (mm)
-    const H_soil = input.H_soil ?? H;          // soil height (mm)
+    const H_stem = H - D_base;
+    const B_heel = B - B_toe - D_stem_base;
+    const H_soil = input.H_soil ?? H;
     const H_m = H / 1000;
     const H_soil_m = H_soil / 1000;
     const H_stem_m = H_stem / 1000;
@@ -181,31 +183,24 @@ export function analyzeRetainingWall(input: RetainingWallInput): RetainingWallRe
     const D_base_m = D_base / 1000;
     const D_stem_base_m = D_stem_base / 1000;
     const D_stem_top_m = D_stem_top / 1000;
+    if (B_heel < 0) messages.push('Heel projection is negative — B < B_toe + stem thickness');
 
     // ── Active earth pressure coefficient (Rankine, horizontal backfill) ────
     const phi_rad = phi * Math.PI / 180;
     const Ka = (1 - Math.sin(phi_rad)) / (1 + Math.sin(phi_rad));
 
-    // ── Water table handling ────────────────────────────────────────────────
-    // If waterTableDepth is between 0 and H_stem, soil above WT is moist (γ_soil)
-    // and soil below WT is submerged (γ' = γ_soil − γ_water). For simplicity we
-    // use γ_water = 9.81 kN/m³. The water table is measured from the TOP of the
-    // backfill. 0 = dry (no water).
-    // Water table is measured from the TOP of the backfill.
+    // ── Lateral forces on the virtual back (full height H_soil) ─────────────
     const gamma_water = 9.81;
-    let Pa = 0, Pa_arm = 0;
-    let Pa_water = 0, Pa_water_arm = 0;
-    let Pw_soil_submerged = 0;
-    const wt_m = waterTableDepth > 0 ? waterTableDepth / 1000 : H_soil_m + 1; // +1 → "no WT"
-
-    if (waterTableDepth <= 0 || wt_m >= H_soil_m) {
-        // Fully dry
+    let Pa = 0, Pa_arm = 0, Pa_water = 0, Pa_water_arm = 0, Pw_soil_submerged = 0;
+    const wt_m = waterTableDepth > 0 ? waterTableDepth / 1000 : H_soil_m + 1;
+    const hasWater = waterTableDepth > 0 && wt_m < H_soil_m;
+    const hw = hasWater ? H_soil_m - wt_m : 0;          // water height above the base underside
+    if (!hasWater) {
         Pa = 0.5 * Ka * gamma_soil * H_soil_m * H_soil_m;
         Pa_arm = H_soil_m / 3;
     } else {
-        const h_dry = wt_m;                                  // dry height
-        const h_wet = H_soil_m - wt_m;                       // submerged height
-        const gamma_sub = gamma_soil - gamma_water;          // submerged unit weight
+        const h_dry = wt_m, h_wet = hw;
+        const gamma_sub = gamma_soil - gamma_water;
         const Pa_dry = 0.5 * Ka * gamma_soil * h_dry * h_dry;
         const Pa_dry_arm = h_wet + h_dry / 3;
         const Pa_wet_rect = Ka * gamma_soil * h_dry * h_wet;
@@ -218,107 +213,71 @@ export function analyzeRetainingWall(input: RetainingWallInput): RetainingWallRe
         Pa_water_arm = h_wet / 3;
         Pw_soil_submerged = Pa_wet;
     }
-
-    // Surcharge
     const Pq = Ka * q_surcharge * H_soil_m;
     const Pq_arm = H_soil_m / 2;
+    const SigmaH = Pa + Pq + Pa_water;
+    const M_H = Pa * Pa_arm + Pq * Pq_arm + Pa_water * Pa_water_arm;
 
-    // ── Resisting vertical forces (per metre) — about the TOE ───────────────
-    // Take the heel/soil weight over the heel projection.
-    // Stem: trapezoid if tapered, else rectangle. Centroid from the toe.
-    const stem_area = 0.5 * (D_stem_base_m + D_stem_top_m) * H_stem_m; // m²
-    const W_stem = stem_area * gamma_concrete; // kN/m
-    // Stem centroid measured from the toe (front face):
-    // the stem sits at B_toe + D_stem_base/2 from the toe (approx for trapezoid
-    // the centroid x-offset within the stem is small; use D_stem_base/2).
+    // ── Vertical forces about the toe ───────────────────────────────────────
+    const W_stem = 0.5 * (D_stem_base_m + D_stem_top_m) * H_stem_m * gamma_concrete;
     const x_stem = B_toe_m + D_stem_base_m / 2;
-
     const W_base = B_m * D_base_m * gamma_concrete;
     const x_base = B_m / 2;
-
-    // Soil on the heel: (B_heel × H) × γ_soil, centroid at B_toe + D_stem_base + B_heel/2
-    // Soil on the heel
-    const W_soil = B_heel_m * H_soil_m * gamma_soil;
+    const h_soil_heel = Math.max(0, H_soil_m - D_base_m);   // soil above the heel
+    const W_soil = Math.max(0, B_heel_m) * h_soil_heel * gamma_soil;
     const x_soil = B_toe_m + D_stem_base_m + B_heel_m / 2;
+    const W_surcharge = Math.max(0, B_heel_m) * q_surcharge;
+    const x_surcharge = x_soil;
+    // Uplift: γw·hw at the heel to 0 at the toe → U = γw·hw·B/2 at 2B/3 from the toe.
+    const U = 0.5 * gamma_water * hw * B_m;
+    const U_arm = 2 * B_m / 3;
 
-    // Surcharge on the heel (if present)
-    const W_surcharge = B_heel_m * q_surcharge;
-    const x_surcharge = x_soil; // same centroid as the heel soil
+    const W_dead = W_stem + W_base + W_soil;
+    const M_resisting = W_stem * x_stem + W_base * x_base + W_soil * x_soil;
+    const M_overturning = M_H + U * U_arm;
 
-    const SigmaV = W_stem + W_base + W_soil + W_surcharge;
-
-    // Resisting moments about the toe
-    const M_resisting = W_stem * x_stem + W_base * x_base + W_soil * x_soil + W_surcharge * x_surcharge;
-
-    // Overturning moments about the toe
-    const M_overturning = Pa * Pa_arm + Pq * Pq_arm + Pa_water * Pa_water_arm;
-
-    // ── Stability checks ────────────────────────────────────────────────────
-    const fos_overturning = M_overturning > 0 ? M_resisting / M_overturning : Infinity;
-    const SigmaH = Pa + Pq + Pa_water;
-    const fos_sliding = SigmaH > 0 ? (mu * SigmaV) / SigmaH : Infinity;
+    // ── Stability — IS 456 Cl. 20.1 / 20.2 ──────────────────────────────────
+    const fos_overturning = M_overturning > 0 ? 0.9 * M_resisting / M_overturning : Infinity;
+    const fos_sliding = SigmaH > 0 ? 0.9 * mu * Math.max(0, W_dead - U) / SigmaH : Infinity;
     const overturning_ok = fos_overturning >= 1.4;
     const sliding_ok = fos_sliding >= 1.4;
-    if (!overturning_ok) messages.push(`Overturning FoS ${fos_overturning.toFixed(2)} < 1.4`);
-    if (!sliding_ok) messages.push(`Sliding FoS ${fos_sliding.toFixed(2)} < 1.4`);
+    if (!overturning_ok) messages.push(`Overturning: 0.9·M_R/M_O = ${fos_overturning.toFixed(2)} < 1.4 (IS 456 Cl. 20.1)`);
+    if (!sliding_ok) messages.push(`Sliding: 0.9·μ·ΣW/ΣH = ${fos_sliding.toFixed(2)} < 1.4 (IS 456 Cl. 20.2) — widen the base or add a shear key`);
 
-    // ── Bearing pressure (trapezoidal, eccentric load) ──────────────────────
-    // Resultant ΣV acts at x_bar from the toe. Eccentricity from base centre.
-    //
-    // AUDIT FIX (2026-07-04): the previous code computed
-    //     x_bar = M_resisting / ΣV
-    // which is the centroid of the VERTICAL forces ONLY. The lateral
-    // (overturning) forces shift the resultant toward the toe (away from the
-    // heel), so the correct formula is
-    //     x_bar = (M_resisting − M_overturning) / ΣV
-    // This is the standard retaining-wall resultant formula (see any textbook,
-    // e.g. Reynolds's Reinforced Concrete Designer's Handbook §8.3.2, or IS 1904
-    // bearing-pressure eccentricity check).
-    //
-    // For a wall in active earth pressure, M_overturning > 0 and tends to lift
-    // the heel, so x_bar decreases (resultant moves toward the toe). The
-    // previous formula gave an x_bar that was too large (resultant too close
-    // to the heel), producing an unsafe underestimate of toe pressure and an
-    // overestimate of heel pressure.
-    const x_bar = SigmaV > 0 ? (M_resisting - M_overturning) / SigmaV : 0;
-    // Eccentricity measured from the base centre, POSITIVE TOWARD HEEL.
-    //   x_bar < B/2  →  resultant on toe side  →  e < 0  →  toe pressure higher
-    //   x_bar > B/2  →  resultant on heel side →  e > 0  →  heel pressure higher
-    const eccentricity = x_bar - B_m / 2;
-    // Bearing pressure distribution (Meyerhof / IS 1904):
-    //   p(x) = (ΣV/B)·(1 + (6·e/B)·(1 − 2·x/B))    (x measured from TOE)
-    // where e is positive toward the HEEL (the convention used above). At x=0
-    // (toe) this reduces to p_toe = (ΣV/B)·(1 − 6e/B), and at x=B (heel) to
-    // p_heel = (ΣV/B)·(1 + 6e/B). The previous code had the signs of the
-    // ±6e/B terms reversed, so when the resultant was on the toe side (the
-    // typical retaining-wall case) it reported the heel pressure as the larger
-    // value — physically backwards and unsafe for stem/heel/toe flexure design.
-    const p_avg = SigmaV / B_m;
-    const p_toe = p_avg - p_avg * (6 * eccentricity / B_m);  // toe (front) — LOWER when e>0 (resultant on heel)
-    const p_heel = p_avg + p_avg * (6 * eccentricity / B_m); // heel (back, under soil) — HIGHER when e>0
-    // Note: if 6e/B > 1 the pressure at the toe goes into tension — we clip to 0
-    // and report a REVISE (the pressure distribution becomes triangular).
-    const p_max = Math.max(p_toe, Math.max(p_heel, 0));
-    const p_min = Math.min(p_toe, Math.min(p_heel, 0));
-    const bearing_ok = p_max <= sbc && p_min >= 0;
+    // ── Bearing pressure — with and without the heel surcharge ──────────────
+    const bearingOf = (withSurcharge: boolean) => {
+        const V = W_dead + (withSurcharge ? W_surcharge : 0) - U;
+        const Mnet = M_resisting + (withSurcharge ? W_surcharge * x_surcharge : 0) - M_overturning;
+        const xb = V > 0 ? Mnet / V : 0;
+        const e = xb - B_m / 2;                      // positive toward the heel
+        const pAvg = V / B_m;
+        const pToe = pAvg * (1 - 6 * e / B_m);
+        const pHeel = pAvg * (1 + 6 * e / B_m);
+        // contact pressure at x from the toe (linear)
+        const pAt = (x: number) => pToe + (pHeel - pToe) * x / B_m;
+        return { V, xb, e, pToe, pHeel, pAt, withSurcharge };
+    };
+    const bWith = bearingOf(true);
+    const bWithout = bearingOf(false);
+    const worse = Math.max(bWith.pToe, bWith.pHeel) >= Math.max(bWithout.pToe, bWithout.pHeel) ? bWith : bWithout;
+    const minP = Math.min(bWith.pToe, bWith.pHeel, bWithout.pToe, bWithout.pHeel);
+    const p_max = Math.max(worse.pToe, worse.pHeel);
+    const bearing_ok = p_max <= sbc && minP >= 0 && worse.V > 0;
     if (p_max > sbc) messages.push(`Bearing p_max ${p_max.toFixed(0)} > SBC ${sbc} kN/m²`);
-    if (p_min < 0) messages.push(`Tension at toe (e=${(eccentricity*1000).toFixed(0)}mm > B/6) — revise base`);
+    if (minP < 0) messages.push(`Tension under the base (resultant outside the middle third) — revise base`);
 
-    // ── Stem flexure & SFD/BMD Numerical Integration ────────────────────────
+    // ── Stem pressure integration (SFD / BMD) ───────────────────────────────
     const forcePoints: { y: number, V: number, M: number, p: number }[] = [];
     const n_steps = 100;
     const dy = H_stem_m / n_steps;
-    const y_soil = H_m - H_soil_m; // depth of soil surface from top of stem
+    const y_soil = H_m - H_soil_m;
     const wt_depth_from_stem_top = y_soil + (waterTableDepth > 0 ? waterTableDepth / 1000 : Infinity);
-
-    let V = 0;
-    let M = 0;
-
+    let V = 0, M = 0;
     for (let i = 0; i <= n_steps; i++) {
         const y = i * dy;
         let p = 0;
         if (y > y_soil) {
-            const z = y - y_soil; 
+            const z = y - y_soil;
             if (y > wt_depth_from_stem_top) {
                 const z_dry = wt_depth_from_stem_top - y_soil;
                 const z_wet = y - wt_depth_from_stem_top;
@@ -326,91 +285,152 @@ export function analyzeRetainingWall(input: RetainingWallInput): RetainingWallRe
             } else {
                 p = Ka * gamma_soil * z;
             }
-            p += Ka * q_surcharge; // Surcharge is uniform below y_soil
+            p += Ka * q_surcharge;
         }
-        
         if (i > 0) {
             const p_prev = forcePoints[i - 1].p;
-            const p_avg = (p + p_prev) / 2;
-            const dV = p_avg * dy;
+            const dV = (p + p_prev) / 2 * dy;
             M += forcePoints[i - 1].V * dy + dV * (dy / 2);
             V += dV;
         }
         forcePoints.push({ y, V, M, p });
     }
 
+    // ── Slab design helper: flexure + bars with d from the selected bar ─────
+    const DIAS = [10, 12, 16, 20, 25];
+    const designSlab = (Mu: number, Dmm: number) => {
+        let dia = 12;
+        let d = Dmm - cover - dia / 2;
+        let flex = flexuralDesignShared(Mu, 1000, d, fck, fy, Dmm);
+        let bars = selectBars(flex.Ast_req, DIAS, undefined, 1000, d);
+        if (bars.dia !== dia) {
+            dia = bars.dia;
+            d = Dmm - cover - dia / 2;
+            flex = flexuralDesignShared(Mu, 1000, d, fck, fy, Dmm);
+            bars = selectBars(flex.Ast_req, DIAS, undefined, 1000, d);
+        }
+        return { d, flex, bars };
+    };
+
+    // ── Stem ────────────────────────────────────────────────────────────────
     const stem_M_service = forcePoints[n_steps].M;
     const stem_Mu = loadFactor * stem_M_service;
-    const stem_d = D_stem_base - cover - 12 / 2; 
-    const stem_flex = flexuralDesignShared(stem_Mu, 1000, stem_d, fck, fy, D_stem_base);
-    const stem_Ast = stem_flex.Ast_req;
-    const stem_pt = stem_flex.pt ?? 0;
-
+    const stem = designSlab(stem_Mu, D_stem_base);
+    const stem_d = stem.d;
+    const stem_Ast = stem.flex.Ast_req;
+    const stem_pt = 100 * stem.bars.Ast_provided / (1000 * stem_d);
     const stem_Vu = loadFactor * forcePoints[n_steps].V;
     const stem_tau_v = (stem_Vu * 1000) / (1000 * stem_d);
-    const stem_tau_c = getTauC(stem_pt, grade as ConcreteGrade);
+    const stem_tau_c = getTauC(stem_pt, gradeC);
     const stem_shear_ok = stem_tau_v <= stem_tau_c;
 
-    // ── Heel design (tension at TOP) ────────────────────────────────────────
-    // Net downward pressure on heel = (soil weight + surcharge + heel self-weight)
-    //   − (upward bearing pressure over the heel).
-    // Heel cantilever length = B_heel, per metre width.
-    const heel_self_wt = B_heel_m * D_base_m * gamma_concrete;
-    const heel_soil_wt = B_heel_m * H_soil_m * gamma_soil;
-    const heel_surcharge_wt = B_heel_m * q_surcharge;
-    // Average bearing pressure over the heel (linear interp from p_heel at the
-    // back to p_stem_back at the stem back face):
-    const p_at_heel_back = p_heel; // at the very back of the heel
-    // The stem back face is at B_toe + D_stem_base from the toe. Pressure there:
-    //   p(x) = p_avg·(1 − (6e/B)·(1 − 2x/B))   (x from toe, e positive toward heel)
-    // AUDIT FIX (2026-07-04): the sign of the (6e/B)·(1 − 2x/B) correction term
-    // was previously +, which made the interpolated pressures inconsistent with
-    // the (now-corrected) p_toe / p_heel endpoint values. It is now − so the
-    // interpolation matches the bearing-pressure distribution derived above.
-    const x_stem_back = B_toe_m + D_stem_base_m;
-    const p_at_stem_back = p_avg - p_avg * (6 * eccentricity / B_m) * (1 - 2 * x_stem_back / B_m);
-    const p_heel_avg = (p_at_heel_back + p_at_stem_back) / 2;
-    const heel_upward = p_heel_avg * B_heel_m;
-    const heel_net_down = heel_self_wt + heel_soil_wt + heel_surcharge_wt - heel_upward;
-    // Moment at the stem back face (cantilever fixed there):
-    const heel_M_service = Math.max(0, heel_net_down * B_heel_m / 2); // kN·m/m
+    // Stem horizontal steel — Cl. 32.5(c): 0.20 % (deformed bars ≤ 16 mm,
+    // fy ≥ 415) or 0.25 % of the gross section, half on each face; spacing
+    // ≤ min(3t, 450) (Cl. 32.5 d).
+    const hRatio = fy >= 415 ? 0.0020 : 0.0025;
+    const hPerFace = hRatio * 1000 * D_stem_base / 2;
+    const hSpacings = [100, 125, 150, 175, 200, 250, 300, 350, 400, 450].filter(sp => sp <= Math.min(3 * D_stem_top, 450));
+    const stem_horizontal = {
+        ratio: hRatio,
+        Ast_per_face: Math.round(hPerFace),
+        bars: selectBars(hPerFace, [8, 10, 12, 16], hSpacings.length ? hSpacings : [100], 1000),
+    };
+
+    // ── Heel & toe — exact trapezoidal pressure + uplift, both bearing cases ─
+    const u = (x: number) => (hw > 0 ? gamma_water * hw * x / B_m : 0);    // uplift at x from the toe
+    const xs_back = B_toe_m + D_stem_base_m;          // stem back face
+    const xs_front = B_toe_m;                          // stem front face
+    // Heel: cantilever from the stem back face; s = distance from the face.
+    const heelActions = (b: ReturnType<typeof bearingOf>) => {
+        const Lh = Math.max(0, B_heel_m);
+        const wDown = gamma_concrete * D_base_m + gamma_soil * h_soil_heel + (b.withSurcharge ? q_surcharge : 0);
+        const p1 = b.pAt(xs_back) + u(xs_back), p2 = b.pAt(B_m) + u(B_m);   // upward at face / heel end
+        const Mdown = wDown * Lh * Lh / 2;
+        const Mup = p1 * Lh * Lh / 2 + (p2 - p1) * Lh * Lh / 3;
+        const Vnet = wDown * Lh - (p1 + p2) / 2 * Lh;
+        return { M: Mdown - Mup, V: Vnet };
+    };
+    // Toe: cantilever from the stem front face toward the toe.
+    const toeActions = (b: ReturnType<typeof bearingOf>) => {
+        const Lt = B_toe_m;
+        const p3 = b.pAt(xs_front) + u(xs_front), p0 = b.pAt(0) + u(0);   // at face / toe end
+        const Mup = p3 * Lt * Lt / 2 + (p0 - p3) * Lt * Lt / 3;
+        const Mdown = gamma_concrete * D_base_m * Lt * Lt / 2;
+        const Vnet = (p3 + p0) / 2 * Lt - gamma_concrete * D_base_m * Lt;
+        return { M: Mup - Mdown, V: Vnet };
+    };
+    const heelA = [heelActions(bWith), heelActions(bWithout)].reduce((a, b) => (b.M > a.M ? b : a));
+    const toeA = [toeActions(bWith), toeActions(bWithout)].reduce((a, b) => (b.M > a.M ? b : a));
+
+    const heel_M_service = Math.max(0, heelA.M);
     const heel_Mu = loadFactor * heel_M_service;
-    const heel_d = D_base - cover - 12 / 2; // top steel
-    const heel_flex = flexuralDesignShared(heel_Mu, 1000, heel_d, fck, fy, D_base);
-    const heel_Ast = heel_flex.Ast_req;
-    const heel_pt = heel_flex.pt ?? 0;
-    const heel_Vu = loadFactor * Math.abs(heel_net_down);
+    const heel = designSlab(heel_Mu, D_base);
+    const heel_d = heel.d;
+    const heel_Ast = heel.flex.Ast_req;
+    const heel_pt = 100 * heel.bars.Ast_provided / (1000 * heel_d);
+    const heel_Vu = loadFactor * Math.abs(heelA.V);
     const heel_tau_v = (heel_Vu * 1000) / (1000 * heel_d);
-    const heel_tau_c = getTauC(heel_pt, grade as ConcreteGrade);
+    const heel_tau_c = getTauC(heel_pt, gradeC);
     const heel_shear_ok = heel_tau_v <= heel_tau_c;
 
-    // ── Toe design (tension at BOTTOM) ──────────────────────────────────────
-    // Net upward pressure on toe = (bearing pressure over the toe)
-    //   − (toe self-weight).
-    const toe_self_wt = B_toe_m * D_base_m * gamma_concrete;
-    const p_at_toe_front = p_toe;
-    // AUDIT FIX (2026-07-04): same sign correction as p_at_stem_back above.
-    const p_at_stem_front = p_avg - p_avg * (6 * eccentricity / B_m) * (1 - 2 * B_toe_m / B_m);
-    const p_toe_avg = (p_at_toe_front + p_at_stem_front) / 2;
-    const toe_upward = p_toe_avg * B_toe_m;
-    const toe_net_up = toe_upward - toe_self_wt;
-    const toe_M_service = Math.max(0, toe_net_up * B_toe_m / 2);
+    const toe_M_service = Math.max(0, toeA.M);
     const toe_Mu = loadFactor * toe_M_service;
-    const toe_d = D_base - cover - 12 / 2; // bottom steel
-    const toe_flex = flexuralDesignShared(toe_Mu, 1000, toe_d, fck, fy, D_base);
-    const toe_Ast = toe_flex.Ast_req;
-    const toe_pt = toe_flex.pt ?? 0;
-    const toe_Vu = loadFactor * Math.abs(toe_net_up);
+    const toe = designSlab(toe_Mu, D_base);
+    const toe_d = toe.d;
+    const toe_Ast = toe.flex.Ast_req;
+    const toe_pt = 100 * toe.bars.Ast_provided / (1000 * toe_d);
+    const toe_Vu = loadFactor * Math.abs(toeA.V);
     const toe_tau_v = (toe_Vu * 1000) / (1000 * toe_d);
-    const toe_tau_c = getTauC(toe_pt, grade as ConcreteGrade);
+    const toe_tau_c = getTauC(toe_pt, gradeC);
     const toe_shear_ok = toe_tau_v <= toe_tau_c;
 
-    // ── Overall status ──────────────────────────────────────────────────────
+    // Base distribution steel — Cl. 26.5.2.1, half on each face.
+    const distPerFace = getMinSteelRatio(fy) * 1000 * D_base / 2;
+    const base_distribution = {
+        Ast_per_face: Math.round(distPerFace),
+        bars: selectBars(distPerFace, [8, 10, 12], undefined, 1000, D_base - cover, true),
+    };
+
+    // ── Anchorage of the stem bars into the base (Cl. 26.2.1 / 26.2.2.1) ───
+    const stemDia = stem.bars.dia;
+    const stressRatio = stem.bars.Ast_provided > 0 ? Math.min(1, stem_Ast / stem.bars.Ast_provided) : 1;
+    const Ld = developmentLength(stemDia, fy, grade, true, false, stressRatio);
+    const embedment = D_base - cover - toe.bars.dia;
+    let anchorDetail: AnchorageResult['detail'] = 'straight';
+    let leg_req = 0;
+    const leg_available = (B_toe + D_stem_base) - cover;
+    if (embedment < Ld) {
+        // horizontal leg after the 90° bend (anchorage value 8φ), at least the
+        // 4φ extension of a standard bend
+        leg_req = Math.max(4 * stemDia, Ld - embedment - 8 * stemDia);
+        anchorDetail = leg_req <= leg_available ? 'L-bar' : 'insufficient';
+    }
+    const anchorage: AnchorageResult = {
+        Ld: Math.round(Ld), embedment: Math.round(embedment), detail: anchorDetail,
+        leg_req: Math.round(leg_req), leg_available: Math.round(leg_available),
+    };
+    if (anchorDetail === 'insufficient') messages.push(`Stem bars cannot be anchored in the base (Ld ${Math.round(Ld)} mm) — deepen the base`);
+
+    // ── Bars adequacy ───────────────────────────────────────────────────────
+    const barsOk = [stem.bars, heel.bars, toe.bars].every(b => b.adequate !== false);
+    if (!barsOk) messages.push('Required steel exceeds the densest bar arrangement — increase thickness');
+
+    // ── Quantities per metre run ────────────────────────────────────────────
+    const concreteVol = B_m * D_base_m + 0.5 * (D_stem_base_m + D_stem_top_m) * H_stem_m;
+    const mm2m =
+        stem.bars.Ast_provided * (H_stem_m + embedment / 1000 + leg_req / 1000)
+        + stem_horizontal.bars.Ast_provided * 2 * H_stem_m                 // both faces, over the height
+        + heel.bars.Ast_provided * (Math.max(0, B_heel_m) + D_stem_base_m)
+        + toe.bars.Ast_provided * (B_toe_m + D_stem_base_m)
+        + base_distribution.bars.Ast_provided * 2 * B_m;
+    const steelWeight_kg = mm2m * 7850 / 1e6;
+
     const overallStatus: 'SAFE' | 'REVISE' = (
-        overturning_ok && sliding_ok && bearing_ok &&
-        !stem_flex.isDoubly && stem_shear_ok &&
-        !heel_flex.isDoubly && heel_shear_ok &&
-        !toe_flex.isDoubly && toe_shear_ok
+        overturning_ok && sliding_ok && bearing_ok && B_heel >= 0 &&
+        !stem.flex.isDoubly && stem_shear_ok &&
+        !heel.flex.isDoubly && heel_shear_ok &&
+        !toe.flex.isDoubly && toe_shear_ok &&
+        barsOk && anchorDetail !== 'insufficient'
     ) ? 'SAFE' : 'REVISE';
 
     return {
@@ -418,18 +438,27 @@ export function analyzeRetainingWall(input: RetainingWallInput): RetainingWallRe
         phi, gamma_soil, gamma_concrete, q_surcharge, mu, sbc, waterTableDepth,
         fck, fy, grade, steelGrade, cover, loadFactor,
         Ka,
-        Pa, Pa_arm, Pq, Pq_arm, Pa_water, Pa_water_arm, Pw_soil_submerged,
-        W_stem, W_base, W_soil, W_surcharge, SigmaV,
+        Pa, Pa_arm, Pq, Pq_arm, Pa_water, Pa_water_arm, Pw_soil_submerged, SigmaH,
+        W_stem, W_base, W_soil, W_surcharge, U, U_arm, W_dead,
+        SigmaV: bWith.V,
         M_resisting, M_overturning,
         fos_overturning, fos_sliding, overturning_ok, sliding_ok,
-        x_bar, eccentricity, p_toe, p_heel, p_max, bearing_ok,
-        stem_M_service, stem_Mu, stem_d, stem_Ast, stem_pt, stem_tau_v, stem_tau_c, stem_shear_ok,
-        heel_M_service, heel_Mu, heel_d, heel_Ast, heel_pt, heel_tau_v, heel_tau_c, heel_shear_ok,
-        toe_M_service, toe_Mu, toe_d, toe_Ast, toe_pt, toe_tau_v, toe_tau_c, toe_shear_ok,
+        V_bearing: worse.V,
+        x_bar: worse.xb, eccentricity: worse.e, p_toe: worse.pToe, p_heel: worse.pHeel, p_max, bearing_ok,
+        bearingCase: worse.withSurcharge ? 'with surcharge' : 'without surcharge',
+        stem_M_service, stem_Mu, stem_d, stem_Ast, stem_pt, stem_bars: stem.bars,
+        stem_tau_v, stem_tau_c, stem_shear_ok, stem_horizontal, anchorage,
+        heel_M_service, heel_Mu, heel_d, heel_Ast, heel_pt, heel_bars: heel.bars, heel_V_service: heelA.V,
+        heel_tau_v, heel_tau_c, heel_shear_ok,
+        toe_M_service, toe_Mu, toe_d, toe_Ast, toe_pt, toe_bars: toe.bars, toe_V_service: toeA.V,
+        toe_tau_v, toe_tau_c, toe_shear_ok,
+        base_distribution,
+        steelWeight_kg: Math.round(steelWeight_kg * 10) / 10,
+        concreteVol,
         overallStatus,
-        tau_c_max: TAU_C_MAX[grade as ConcreteGrade] ?? 2.8,
+        tau_c_max: TAU_C_MAX[gradeC] ?? 2.8,
         messages,
-        forcePoints
+        forcePoints,
     };
 }
 
@@ -437,15 +466,20 @@ export function analyzeRetainingWall(input: RetainingWallInput): RetainingWallRe
 
 export interface RetainingWallOptimizeParams {
     minB: number; maxB: number; stepB: number;       // base width (mm)
-    minThk: number; maxThk: number; stepThk: number; // stem base + base slab thickness (mm)
+    minThk: number; maxThk: number; stepThk: number; // stem thickness at the base (mm)
+    // Base slab thickness sweep (mm). Defaults to the stem range.
+    minBase?: number; maxBase?: number; stepBase?: number;
+    // Toe projection as a fraction of B. Default [0.2, 0.25, 0.3, 0.35, 0.4].
+    toeRatios?: number[];
 }
 
 export interface OptimumRetainingWallDesign {
     B: number;
     B_toe: number;
-    thk: number;            // stem_base + base slab thickness
+    thk: number;            // stem thickness at the base (mm)
+    D_base: number;         // base slab thickness (mm)
     concreteVol: number;    // m³ per metre run
-    steelWeight: number;    // kg per metre run (sum of stem + heel + toe Ast × length)
+    steelWeight: number;    // kg per metre run (provided bars)
     costTotal_INR: number;  // total cost per metre run (₹)
     result: RetainingWallResult;
 }
@@ -463,23 +497,11 @@ export type RetainingWallProgressCallback = (
 ) => void;
 
 /**
- * Optimize the cantilever retaining wall by sweeping base width B and stem/base
- * thickness thk. The toe projection is set to B/3 (rounded to 50 mm) — a common
- * heuristic that leaves the heel to carry the soil weight.
- *
- * AUDIT FIX OPT-2 (2026-07-04): the previous optimizer only minimized CONCRETE
- * VOLUME, ignoring steel entirely. A wall with a thin stem + heavy rebar would
- * be preferred over a wall with a slightly thicker stem + light rebar, even if
- * the latter was cheaper. The fix computes a proper INR cost using the shared
- * `computeCost` helper (concrete + steel + formwork), consistent with the
- * slab/flat-slab/waffle-slab optimizers.
- *
- * Steel weight per metre run = Σ (Ast [mm²/m] × length [m] × 7850 / 1e6) over:
- *   • Stem (height H_stem, Ast = stem_Ast)
- *   • Heel (length B_heel, Ast = heel_Ast)
- *   • Toe (length B_toe, Ast = toe_Ast)
- * All three are per-metre-width Ast values from `analyzeRetainingWall`, so the
- * weight is kg per metre run of wall.
+ * Minimum-cost cantilever retaining wall: sweeps base width B, toe fraction,
+ * stem thickness and base-slab thickness independently. The stem top
+ * thickness is capped at the base thickness (no inverted taper).
+ * Cost = concrete + provided steel (stem vertical + horizontal, heel, toe,
+ * base distribution) + formwork (both stem faces + base edges).
  */
 export function optimizeRetainingWall(
     baseInput: RetainingWallInput,
@@ -488,90 +510,60 @@ export function optimizeRetainingWall(
     onProgress?: RetainingWallProgressCallback,
 ): RetainingWallOptimizeResult {
     const results: OptimumRetainingWallDesign[] = [];
-    let total = 0;
     let feasible = 0;
 
     const { minB, maxB, stepB, minThk, maxThk, stepThk } = bounds;
-
-    // AUDIT FIX OPT-2: avoid floating-point accumulation in the sweep loops by
-    // computing the integer number of steps and using an index-based iteration.
-    const numB = Math.max(1, Math.floor((maxB - minB) / stepB) + 1);
-    const numThk = Math.max(1, Math.floor((maxThk - minThk) / stepThk) + 1);
-    total = numB * numThk;
+    const minBase = bounds.minBase ?? minThk, maxBase = bounds.maxBase ?? maxThk, stepBase = bounds.stepBase ?? stepThk;
+    const toeRatios = bounds.toeRatios ?? [0.2, 0.25, 0.3, 0.35, 0.4];
+    const steps = (lo: number, hi: number, st: number) => Math.max(1, Math.round((hi - lo) / st) + 1);
+    const numB = steps(minB, maxB, stepB);
+    const numThk = steps(minThk, maxThk, stepThk);
+    const numBase = steps(minBase, maxBase, stepBase);
+    const total = numB * numThk * numBase * toeRatios.length;
     let done = 0;
 
     for (let iB = 0; iB < numB; iB++) {
         const currentB = minB + iB * stepB;
         for (let iT = 0; iT < numThk; iT++) {
             const thk = minThk + iT * stepThk;
-            done++;
-
-            // Toe projection heuristic: usually 1/3 of B, rounded to 50 mm
-            const currentToe = Math.round((currentB / 3) / 50) * 50;
-
-            const trialInput: RetainingWallInput = {
-                ...baseInput,
-                B: currentB,
-                B_toe: currentToe,
-                D_stem_base: thk,
-                D_base: thk,
-            };
-
-            try {
-                const r = analyzeRetainingWall(trialInput);
-
-                if (r.overallStatus === 'SAFE') {
-                    feasible++;
-
-                    // Concrete volume per metre run (m³/m):
-                    //   base slab: B × D_base × 1 m
-                    //   stem (trapezoid): 0.5 × (D_stem_base + D_stem_top) × H_stem × 1 m
-                    const concreteVol =
-                        (r.B * r.D_base) / 1e6 +
-                        (0.5 * (r.D_stem_base + r.D_stem_top) * r.H_stem) / 1e6;
-
-                    // Steel weight per metre run (kg/m):
-                    //   stem: Ast [mm²/m] × H_stem [m] × 7850 / 1e6
-                    //   heel: Ast [mm²/m] × B_heel [m] × 7850 / 1e6
-                    //   toe:  Ast [mm²/m] × B_toe [m] × 7850 / 1e6
-                    // (All three Ast values are per-metre-width from the engine.)
-                    const steelWeight =
-                        (r.stem_Ast * (r.H_stem / 1000) +
-                         r.heel_Ast * (r.B_heel / 1000) +
-                         r.toe_Ast  * (r.B_toe  / 1000)) * 7850 / 1e6;
-
-                    // Formwork area per metre run (m²/m):
-                    //   both faces of stem + base top surface
-                    //   ≈ 2 × H_stem + B   (rough but reasonable for ranking)
-                    const formworkArea = 2 * (r.H_stem / 1000) + (r.B / 1000);
-
-                    const costTotal_INR = computeCost(
-                        concreteVol, steelWeight, formworkArea, costParams,
-                    );
-
-                    results.push({
+            for (let iD = 0; iD < numBase; iD++) {
+                const dBase = minBase + iD * stepBase;
+                for (const tr of toeRatios) {
+                    done++;
+                    const currentToe = Math.round((currentB * tr) / 50) * 50;
+                    if (currentB - currentToe - thk < 0) continue;
+                    const trialInput: RetainingWallInput = {
+                        ...baseInput,
                         B: currentB,
                         B_toe: currentToe,
-                        thk,
-                        concreteVol,
-                        steelWeight,
-                        costTotal_INR,
-                        result: r,
-                    });
+                        D_stem_base: thk,
+                        D_stem_top: Math.min(baseInput.D_stem_top, thk),
+                        D_base: dBase,
+                    };
+                    try {
+                        const r = analyzeRetainingWall(trialInput);
+                        if (r.overallStatus === 'SAFE') {
+                            feasible++;
+                            const formworkArea = 2 * (r.H_stem / 1000) + 2 * (r.D_base / 1000);
+                            const costTotal_INR = computeCost(r.concreteVol, r.steelWeight_kg, formworkArea, costParams);
+                            results.push({
+                                B: currentB, B_toe: currentToe, thk, D_base: dBase,
+                                concreteVol: r.concreteVol, steelWeight: r.steelWeight_kg,
+                                costTotal_INR, result: r,
+                            });
+                        }
+                    } catch {
+                        // skip invalid combo
+                    }
+                    if (onProgress && (done % Math.max(1, Math.floor(total / 20)) === 0 || done === total)) {
+                        onProgress(done, total, feasible);
+                    }
                 }
-            } catch {
-                // skip invalid combo
-            }
-
-            if (onProgress && (done % Math.max(1, Math.floor(total / 20)) === 0 || done === total)) {
-                onProgress(done, total, feasible);
             }
         }
     }
 
-    // Sort by total cost ascending
     results.sort((a, b) => a.costTotal_INR - b.costTotal_INR);
-
     return {
         totalTrials: total,
         feasibleCount: feasible,

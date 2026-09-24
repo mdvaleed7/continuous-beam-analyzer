@@ -263,12 +263,14 @@ describe('RW-XBAR-001 — resultant position formula (audit 2026-07-04)', () => 
     test('x_bar includes overturning moment (not just M_resisting / ΣV)', () => {
         const r = analyzeRetainingWall(baseRetainingWall());
 
-        // Hand-derive the expected x_bar.
-        // The wall has lateral earth pressure → M_overturning > 0.
-        // The previous (buggy) formula was x_bar_buggy = M_resisting / ΣV.
-        // The correct formula is x_bar_correct = (M_resisting − M_overturning) / ΣV.
-        const x_bar_buggy = r.M_resisting / r.SigmaV;
-        const x_bar_correct = (r.M_resisting - r.M_overturning) / r.SigmaV;
+        // Hand-derive the expected x_bar for the governing bearing case of
+        // this wall (without the heel surcharge: V = W_dead − U).
+        // The previous (buggy) formula was x_bar_buggy = M_resisting / V.
+        // The correct formula is x_bar_correct = (M_resisting − M_overturning) / V.
+        expect(r.bearingCase).toBe('without surcharge');
+        const V = r.W_dead - r.U;
+        const x_bar_buggy = r.M_resisting / V;
+        const x_bar_correct = (r.M_resisting - r.M_overturning) / V;
 
         // Sanity: overturning > 0 for any wall with earth pressure
         expect(r.M_overturning).toBeGreaterThan(0);
@@ -317,7 +319,7 @@ describe('RW-PBEAR-001 — bearing pressure sign convention (audit 2026-07-04)',
     test('bearing pressure magnitudes match Meyerhof formula p = (ΣV/B)·(1 ± 6e/B)', () => {
         const r = analyzeRetainingWall(baseRetainingWall());
         const B_m = r.B / 1000;
-        const p_avg = r.SigmaV / B_m;
+        const p_avg = r.V_bearing / B_m;   // vertical load of the governing bearing case
         const e = r.eccentricity; // positive toward heel
         const factor = 6 * e / B_m;
 

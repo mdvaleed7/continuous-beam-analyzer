@@ -18,6 +18,10 @@ import {
     computeCost,
     computeRequiredDepthForBM,
     WALL_MIN_THICKNESS,
+    crackWidthAnnexF,
+    sectionMomentCapacityAtAxial,
+    slabDepthFactorK,
+    type CrackWidthResult,
     type ConcreteGrade,
     type SteelGrade,
     type Governs,
@@ -73,6 +77,17 @@ export interface WallConfig {
     maxThk?: number;
     thkStep?: number;
     endCond?: string;
+    // Vertical load from the structure above at the top of the wall (kN/m, service).
+    axialLoad?: number;
+    // Crack width control (IS 456 Cl. 35.3.2 / Annex F). Default on; limits
+    // 0.2 mm on the earth face (contact with soil / ground water), 0.3 mm inside.
+    checkCrackWidth?: boolean;
+    crackWidthLimitEarth?: number;
+    crackWidthLimitInner?: number;
+    // Check the construction stage: backfill placed before the floors are cast
+    // (wall acts as a cantilever from the base). Default off — then the
+    // drawings must require backfilling only after the floors are cast.
+    checkConstructionStage?: boolean;
     [key: string]: unknown;
 }
 
@@ -110,8 +125,23 @@ interface ZoneDesign {
     flex_hogging: FlexuralDesign;
     flex_sagging: FlexuralDesign;
     shear: ShearDesign;
+    shear_k: number;           // Cl. 40.2.1.1 depth factor
+    shearOk: boolean;          // τv ≤ k·τc (no links in the wall)
+    // governing shear section: support end, tension face (h = earth, s = inner), d (mm)
+    shearAt: { at: 'top' | 'bottom'; face: 'h' | 's'; d: number };
     mainBars_hogging: BarSelection;
     mainBars_sagging: BarSelection;
+    distBars: BarSelection;    // horizontal steel per face (Cl. 32.5 c)
+    crack: {                    // Ms = service moment M/γf (in-service, propped)
+        hogging: CrackWidthResult & { Ms: number; limit: number; ok: boolean };
+        sagging: CrackWidthResult & { Ms: number; limit: number; ok: boolean };
+    };
+    pm: {                       // axial + bending with slenderness (Cl. 32.2 / 39)
+        Pu: number; He: number; slenderness: number; slendernessOk: boolean; ea: number;
+        Mu_h: number; cap_h: number; Mu_s: number; cap_s: number; ok: boolean;
+    };
+    construction: { M: number; V: number } | null;  // cantilever stage (factored), when checked
+    ok: boolean;               // every check in the zone passes
     pressureTop: PressurePoint;
     pressureBot: PressurePoint;
 }
@@ -286,11 +316,12 @@ function lateralPressure(depth_m: number, params: PressureParams): PressurePoint
 function computePressureMesh(config: WallConfig): PressureMesh {
     const { zones, soilParams, material, loadFactor = 1.5 } = config;
     const nZones = zones.length;
-    const K0 = computeK0(soilParams.phi || 30);
+    // `??` (not `||`) so φ = 0 (clay) gives K0 = 1 instead of silently becoming 30°.
+    const K0 = computeK0(soilParams.phi ?? 30);
 
     const pressureParams: PressureParams = {
         K0,
-        gamma_soil: soilParams.gamma_soil || 18,
+        gamma_soil: soilParams.gamma_soil ?? 18,
         gamma_water: soilParams.gamma_water ?? 9.81,
         waterTableDepth: soilParams.waterTableDepth ?? 999,
         groundLevelDepth: soilParams.groundLevelDepth || 0,
@@ -560,6 +591,51 @@ export function analyzeWall(config: WallConfig): WallAnalysisResult {
     const maxBarDia = Math.max(...barDias);
 
     // Per-zone IS 456 design
+    const cover = material.cover || 40;
+    const fck = material.fck, fy = material.fy;
+    const GAMMA_CONCRETE = 25;
+    const axialTop = Math.max(0, Number(config.axialLoad) || 0);          // kN/m, service
+    const checkCrack = config.checkCrackWidth !== false;
+    const crackLimitEarth = Number(config.crackWidthLimitEarth ?? 0.2);    // mm — Cl. 35.3.2 (contact with soil / ground water)
+    const crackLimitInner = Number(config.crackWidthLimitInner ?? 0.3);    // mm — Cl. 35.3.2 general
+    const consStage = config.checkConstructionStage === true;
+
+    // Construction stage: wall backfilled before the floors are cast acts as a
+    // vertical cantilever fixed at the base (factored pressure profile).
+    //   V_c(z) = ∫0^z p dζ,   M_c(z) = ∫0^z p(ζ)(z − ζ) dζ
+    const cantileverAt = (z: number) => {
+        let V = 0, M = 0;
+        for (let k = 0; k < pressureProfile.length - 1; k++) {
+            const a = pressureProfile[k], b = pressureProfile[k + 1];
+            const za = a.depth, zb = Math.min(b.depth, z);
+            if (zb <= za + 1e-12) { if (a.depth >= z) break; continue; }
+            const pa = a.combined;
+            const pb = b.depth > za ? a.combined + (b.combined - a.combined) * (zb - za) / (b.depth - za) : b.combined;
+            const h = zb - za;
+            const F = 0.5 * (pa + pb) * h;
+            const ybar = (pa + pb) > 0 ? h * (pa + 2 * pb) / (3 * (pa + pb)) : h / 2;
+            V += F;
+            M += F * (z - (za + ybar));
+            if (b.depth >= z) break;
+        }
+        return { V, M };
+    };
+    // Self-weight above depth z (kN/m)
+    const selfWeightAbove = (z: number) => {
+        let W = 0;
+        for (let i = 0; i < nZones; i++) {
+            const top = cumDepths[i], bot = Math.min(cumDepths[i + 1], z);
+            if (bot <= top) break;
+            const tTop = config.isTapered ? (zones[i].thicknessTop || zones[i].thickness) : zones[i].thickness;
+            const tBot = config.isTapered ? (zones[i].thicknessBot || zones[i].thickness) : zones[i].thickness;
+            const tAvg = (tTop + tBot) / 2;
+            W += (tAvg / 1000) * (bot - top) * GAMMA_CONCRETE;
+        }
+        return W;
+    };
+    const kSlab = slabDepthFactorK;
+    const distRatio = fy >= 415 ? 0.0020 : 0.0025;     // Cl. 32.5(c), deformed bars ≤ 16 mm
+
     const zoneDesigns: ZoneDesign[] = [];
     for (let i = 0; i < nZones; i++) {
         const segs = segByZone[i];
@@ -567,49 +643,38 @@ export function analyzeWall(config: WallConfig): WallAnalysisResult {
         const tTop = isTapered ? (zones[i].thicknessTop || zones[i].thickness) : zones[i].thickness;
         const tBot = isTapered ? (zones[i].thicknessBot || zones[i].thickness) : zones[i].thickness;
         const t_mm = isTapered ? (tTop + tBot) / 2 : zones[i].thickness;
-        const cover = material.cover || 40;
-        // CALC-004: the initial effective depth must be CONSERVATIVE. Previously a
-        // 12 mm bar was hard-coded, which over-estimates d whenever the design ends
-        // up needing larger bars (16/20/25 mm) — a larger bar lowers its own centroid,
-        // reducing d and therefore the moment capacity for the same Ast. Seeding the
-        // first-pass d with the LARGEST available bar diameter gives the smallest
-        // (worst-case) d, so the subsequent bar selection can only improve on it,
-        // never violate it. The true per-face d is recomputed from the actually
-        // selected bar below.
-        let barDia = maxBarDia; // largest available bar → conservative (smallest d)
-        let d_mm = t_mm - cover - barDia / 2;
+        // Conservative first-pass d with the largest available bar (CALC-004);
+        // refined below from the bars actually selected.
+        const barDia = maxBarDia;
+        const d_mm = t_mm - cover - barDia / 2;
         const h_m = zones[i].height;
         const zoneTopDepth = cumDepths[i];
 
-        // The beam engine works in normalized units where:
-        //   V_physical = V_normalized × L_ref
-        //   M_physical = M_normalized × L_ref²
-        //   x_normalized = x_physical / L_ref
-        // A design zone may span more than one analysis segment (when the water
-        // table cuts through it), so these helpers locate the right segment.
-        const Vphys = (xFromZoneTop: number): number => {
+        // Shear and moment (physical units) at a distance x below the zone top.
+        const forcesAt = (xFromZoneTop: number): { V: number; M: number } => {
             const depth = zoneTopDepth + xFromZoneTop;
             for (const k of segs) {
                 const s = segDepths[k];
                 if (depth >= s.top - 1e-9 && depth <= s.bot + 1e-9) {
-                    return beamResult.spans[k].V((depth - s.top) / L_ref) * L_ref;
+                    const xi = (depth - s.top) / L_ref;
+                    return { V: beamResult.spans[k].V(xi) * L_ref, M: beamResult.spans[k].M(xi) * L_ref * L_ref };
                 }
             }
-            const kl = segs[segs.length - 1];
-            return beamResult.spans[kl].V(beamResult.spans[kl].alpha.fl()) * L_ref;
+            const sp = beamResult.spans[segs[segs.length - 1]];
+            const aL = sp.alpha.fl();
+            return { V: sp.V(aL) * L_ref, M: sp.M(aL) * L_ref * L_ref };
         };
 
         const firstSp = beamResult.spans[segs[0]];
         const lastSp = beamResult.spans[segs[segs.length - 1]];
+        const ML = firstSp.MLeft * L_ref * L_ref;
+        const MR = lastSp.MRight * L_ref * L_ref;
+        const VL = firstSp.VLeft * L_ref;
+        const VR = lastSp.VRight * L_ref;
 
-        const ML = firstSp.MLeft * L_ref * L_ref;   // kN·m/m (top of zone)
-        const MR = lastSp.MRight * L_ref * L_ref;   // kN·m/m (bottom of zone)
-        const VL = firstSp.VLeft * L_ref;           // kN/m (top of zone)
-        const VR = lastSp.VRight * L_ref;           // kN/m (bottom of zone)
-
-        // Governing moments strictly separated by face — scan every segment
-        let M_hogging = 0; // Earth face tension (negative BMD)
-        let M_sagging = 0; // Inner face tension (positive BMD)
+        // Governing moments separated by face — earth face (hogging) / inner face (sagging)
+        let M_hogging = 0;
+        let M_sagging = 0;
         const nSteps = 40;
         for (const k of segs) {
             const sp = beamResult.spans[k];
@@ -620,69 +685,174 @@ export function analyzeWall(config: WallConfig): WallAnalysisResult {
                 else if (M_val < 0) M_hogging = Math.max(M_hogging, Math.abs(M_val));
             }
         }
+        const M_hogging_propped = M_hogging;
+
+        // Construction stage: the earth face carries the cantilever moment,
+        // largest at the bottom of each zone.
+        let construction: { M: number; V: number } | null = null;
+        if (consStage) {
+            const c = cantileverAt(cumDepths[i + 1]);
+            construction = { M: c.M, V: c.V };
+            M_hogging = Math.max(M_hogging, c.M);
+        }
         const M_gov = Math.max(M_hogging, M_sagging);
 
-        // Governing shear: at d from the more heavily loaded support face.
-        // BUG-W3 FIX: when d_m ≥ h_m (zone shorter than effective depth — rare
-        // for sub-250 mm zones), evaluate at the support FACE instead of
-        // clamping to min(d_m, h_m)=h_m which collapsed to the wrong support.
-        let d_m = d_mm / 1000;
-        let V_gov: number;
-        const dEff_m = Math.min(d_m, h_m);
-        if (Math.abs(VL) >= Math.abs(VR)) {
-            // Critical near top support: at distance d from top, but not past h_m
-            V_gov = Math.abs(Vphys(dEff_m >= h_m ? 0 : dEff_m));
-        } else {
-            // Critical near bottom support: at distance d from bottom
-            V_gov = Math.abs(Vphys(dEff_m >= h_m ? h_m : h_m - dEff_m));
-        }
-
-        // Flexural design for both faces
-        let flex_hogging = flexuralDesign(M_hogging, b, d_mm, material.fck, material.fy, t_mm, true);
-        let flex_sagging = flexuralDesign(M_sagging, b, d_mm, material.fck, material.fy, t_mm, true);
-        
-        // Select bar arrangement
+        // Flexural design + bar selection with d from the selected bar
+        let flex_hogging = flexuralDesign(M_hogging, b, d_mm, fck, fy, t_mm, true);
+        let flex_sagging = flexuralDesign(M_sagging, b, d_mm, fck, fy, t_mm, true);
         let mainBars_hogging = selectBars(flex_hogging.Ast_req, barDias, spacings, b);
         let mainBars_sagging = selectBars(flex_sagging.Ast_req, barDias, spacings, b);
-        
-        // Iteration for actual d based on selected bars
         let d_hogging = t_mm - cover - mainBars_hogging.dia / 2;
         let d_sagging = t_mm - cover - mainBars_sagging.dia / 2;
-        
         if (mainBars_hogging.dia !== barDia || mainBars_sagging.dia !== barDia) {
-            // Recompute V_gov with true d of the tension face
-            let d_critical = Math.abs(VL) >= Math.abs(VR) ? d_sagging : d_hogging;
-            let d_m_crit = d_critical / 1000;
-            const dEff_m_crit = Math.min(d_m_crit, h_m);
-            if (Math.abs(VL) >= Math.abs(VR)) {
-                V_gov = Math.abs(Vphys(dEff_m_crit >= h_m ? 0 : dEff_m_crit));
-            } else {
-                V_gov = Math.abs(Vphys(dEff_m_crit >= h_m ? h_m : h_m - dEff_m_crit));
-            }
-            
-            // Recompute flexure and select bars with true d per face
-            flex_hogging = flexuralDesign(M_hogging, b, d_hogging, material.fck, material.fy, t_mm, true);
-            flex_sagging = flexuralDesign(M_sagging, b, d_sagging, material.fck, material.fy, t_mm, true);
+            flex_hogging = flexuralDesign(M_hogging, b, d_hogging, fck, fy, t_mm, true);
+            flex_sagging = flexuralDesign(M_sagging, b, d_sagging, fck, fy, t_mm, true);
             mainBars_hogging = selectBars(flex_hogging.Ast_req, barDias, spacings, b);
             mainBars_sagging = selectBars(flex_sagging.Ast_req, barDias, spacings, b);
-            
-            // Re-update d after re-selection just in case
             d_hogging = t_mm - cover - mainBars_hogging.dia / 2;
             d_sagging = t_mm - cover - mainBars_sagging.dia / 2;
         }
 
-        const d_critical_shear = Math.abs(VL) >= Math.abs(VR) ? d_sagging : d_hogging;
+        const setBars = (face: 'h' | 's', bars: BarSelection) => {
+            if (face === 'h') { mainBars_hogging = bars; d_hogging = t_mm - cover - bars.dia / 2; }
+            else { mainBars_sagging = bars; d_sagging = t_mm - cover - bars.dia / 2; }
+        };
+        const barsOf = (face: 'h' | 's') => face === 'h' ? mainBars_hogging : mainBars_sagging;
+        const dOf = (face: 'h' | 's') => face === 'h' ? d_hogging : d_sagging;
 
-        // Shear design: use the tension steel area at the critical section.
-        // If shear governs near the support (sagging region), use inner-face steel.
-        // If near mid-span/bottom (hogging region), use earth-face steel.
-        const shearAst = Math.abs(VL) >= Math.abs(VR)
-            ? mainBars_sagging.Ast_provided   // critical near top support (sagging zone)
-            : mainBars_hogging.Ast_provided;  // critical near bottom support (hogging zone)
-        // For walls, supports are at top/bottom, so critical section is in hogging region.
-        const shear = shearDesign(V_gov, b, d_critical_shear, shearAst, material.fck, material.fy, material.grade);
-        
-        const EI_val = zoneEIs[i];
+        // Crack width — IS 456 Annex F on the service moments (M/γf). Earth face
+        // in contact with soil / ground water: 0.2 mm; inner face 0.3 mm
+        // (Cl. 35.3.2). The propped (in-service) moments are used.
+        const crackOf = (face: 'h' | 's') => {
+            const bars = barsOf(face);
+            const M = face === 'h' ? M_hogging_propped : M_sagging;
+            return crackWidthAnnexF(M / loadFactor, b, t_mm, dOf(face), bars.Ast_provided, bars.dia, bars.spacing, cover, fck, fy);
+        };
+        const crackFails = (face: 'h' | 's') => {
+            const M = face === 'h' ? M_hogging_propped : M_sagging;
+            if (!checkCrack || M <= 0) return false;
+            const cw = crackOf(face);
+            return cw.w > (face === 'h' ? crackLimitEarth : crackLimitInner) || !cw.fs_ok;
+        };
+
+        // Shear without links — the wall is designed as a vertical slab:
+        // τv ≤ k·τc (Cl. 40.2.1.1), at d from the face of BOTH supports of the
+        // zone (Cl. 22.6.2.1), with pt of the face in tension at that section
+        // (Table 19). The tension face follows the sign of M there: sagging
+        // (inner face) below a pinned top, hogging (earth face) at continuous
+        // supports and at the fixed base.
+        const k_shear = kSlab(t_mm);
+        const shearCases = () => {
+            const cases: { V: number; face: 'h' | 's'; at: 'top' | 'bottom' }[] = [];
+            for (const at of ['top', 'bottom'] as const) {
+                const sec = (face: 'h' | 's') => {
+                    const dm = dOf(face) / 1000;
+                    const x = dm >= h_m ? (at === 'top' ? 0 : h_m) : (at === 'top' ? dm : h_m - dm);
+                    return forcesAt(x);
+                };
+                const fh = sec('h'), fs = sec('s');
+                let face: 'h' | 's';
+                if (fh.M < 0 && !(fs.M > 0)) face = 'h';
+                else if (fs.M > 0 && !(fh.M < 0)) face = 's';
+                else face = mainBars_hogging.Ast_provided <= mainBars_sagging.Ast_provided ? 'h' : 's';
+                cases.push({ V: Math.abs(face === 'h' ? fh.V : fs.V), face, at });
+            }
+            // Construction stage: cantilever shear at d above the base, earth face in tension
+            if (consStage) {
+                const dm = Math.min(d_hogging / 1000, h_m);
+                cases.push({ V: cantileverAt(cumDepths[i + 1] - dm).V, face: 'h', at: 'bottom' });
+            }
+            return cases;
+        };
+        // Least pt (%) giving τc ≥ target (Table 19, τc rising with pt up to 3 %)
+        const ptForTauC = (target: number): number | null => {
+            if (getTauC(3.0, fck) < target) return null;
+            let lo = 0.15, hi = 3.0;
+            if (getTauC(lo, fck) >= target) return lo;
+            for (let it = 0; it < 40; it++) {
+                const mid = 0.5 * (lo + hi);
+                if (getTauC(mid, fck) < target) lo = mid; else hi = mid;
+            }
+            return hi;
+        };
+
+        // Where the crack width or τc falls short, the tension bars of that face
+        // are increased (a zone that still fails needs a thicker section).
+        for (let pass = 0; pass < 6; pass++) {
+            let changed = false;
+            for (const face of ['h', 's'] as const) {
+                for (let it = 0; it < 25 && crackFails(face) && barsOf(face).adequate !== false; it++) {
+                    setBars(face, selectBars(barsOf(face).Ast_provided * 1.1, barDias, spacings, b));
+                    changed = true;
+                }
+            }
+            for (const c of shearCases()) {
+                const d = dOf(c.face);
+                const tau_v = c.V * 1e3 / (b * d);
+                const pt = ptForTauC(tau_v / k_shear);
+                if (pt === null) continue;                        // needs a thicker section
+                const AstReq = pt * b * d / 100;
+                if (barsOf(c.face).Ast_provided < AstReq - 1e-6 && barsOf(c.face).adequate !== false) {
+                    setBars(c.face, selectBars(AstReq, barDias, spacings, b));
+                    changed = true;
+                }
+            }
+            if (!changed) break;
+        }
+
+        const crH = crackOf('h'), crS = crackOf('s');
+        const crack = {
+            hogging: { ...crH, Ms: M_hogging_propped / loadFactor, limit: crackLimitEarth, ok: !crackFails('h') },
+            sagging: { ...crS, Ms: M_sagging / loadFactor, limit: crackLimitInner, ok: !crackFails('s') },
+        };
+
+        // Governing shear case: the largest τv / (k·τc)
+        let shear = shearDesign(0, b, d_sagging, mainBars_sagging.Ast_provided, fck, fy, material.grade);
+        let V_gov = 0, shearRatio = -1;
+        let shearAt: ZoneDesign['shearAt'] = { at: 'bottom', face: 'h', d: d_hogging };
+        for (const c of shearCases()) {
+            const sd = shearDesign(c.V, b, dOf(c.face), barsOf(c.face).Ast_provided, fck, fy, material.grade);
+            const ratio = sd.tau_v / (k_shear * sd.tau_c);
+            if (ratio > shearRatio) { shearRatio = ratio; shear = sd; V_gov = c.V; shearAt = { at: c.at, face: c.face, d: dOf(c.face) }; }
+        }
+        const shearOk = shear.tau_v <= k_shear * shear.tau_c;
+
+        // Axial load + bending with slenderness — IS 456 Cl. 32.2 / Cl. 39.
+        const Pu = loadFactor * (axialTop + selfWeightAbove(cumDepths[i + 1]));
+        const He = 0.75 * h_m;                                  // Cl. 32.2.3(a), floors restrain rotation
+        const slenderness = He * 1000 / t_mm;
+        const ea = (He * 1000) ** 2 / (2500 * t_mm);            // mm, Cl. 32.2.5
+        const emin = 0.05 * t_mm;                               // mm, Cl. 32.2.4
+        const Mu_h = Math.max(M_hogging, Pu * emin / 1000) + Pu * ea / 1000;
+        const Mu_s = Math.max(M_sagging, Pu * emin / 1000) + Pu * ea / 1000;
+        const cap_h = sectionMomentCapacityAtAxial(b, t_mm, [
+            { As: mainBars_sagging.Ast_provided, y: cover + mainBars_sagging.dia / 2 },
+            { As: mainBars_hogging.Ast_provided, y: d_hogging },
+        ], fck, fy, Pu);
+        const cap_s = sectionMomentCapacityAtAxial(b, t_mm, [
+            { As: mainBars_hogging.Ast_provided, y: cover + mainBars_hogging.dia / 2 },
+            { As: mainBars_sagging.Ast_provided, y: d_sagging },
+        ], fck, fy, Pu);
+        const pm = {
+            Pu: Math.round(Pu * 10) / 10, He: Math.round(He * 1000) / 1000,
+            slenderness: Math.round(slenderness * 10) / 10, slendernessOk: slenderness <= 30,
+            ea: Math.round(ea * 10) / 10,
+            Mu_h: Math.round(Mu_h * 100) / 100, cap_h: Math.round(cap_h * 100) / 100,
+            Mu_s: Math.round(Mu_s * 100) / 100, cap_s: Math.round(cap_s * 100) / 100,
+            ok: slenderness <= 30 && cap_h >= Mu_h - 1e-6 && cap_s >= Mu_s - 1e-6,
+        };
+
+        // Horizontal (distribution) steel — Cl. 32.5(c), half on each face
+        const distPerFace = distRatio * 1000 * t_mm / 2;
+        const distSpacings = spacings.filter(sp => sp <= Math.min(3 * t_mm, 450));
+        const distBars = selectBars(distPerFace, [8, 10, 12, 16], distSpacings.length ? distSpacings : spacings, b);
+
+        const barsOk = mainBars_hogging.adequate !== false && mainBars_sagging.adequate !== false;
+        const zoneOk = !flex_hogging.isDoubly && !flex_sagging.isDoubly
+            && flex_hogging.governs !== 'maximum' && flex_sagging.governs !== 'maximum'
+            && barsOk && shearOk && shear.status !== 'FAIL'
+            && crack.hogging.ok && crack.sagging.ok && pm.ok
+            && t_mm >= WALL_MIN_THICKNESS;
 
         zoneDesigns.push({
             zone: i + 1,
@@ -690,10 +860,10 @@ export function analyzeWall(config: WallConfig): WallAnalysisResult {
             thickness: t_mm,
             d_hogging,
             d_sagging,
-            EI: EI_val,
+            EI: zoneEIs[i],
             M_left: ML,
             M_right: MR,
-            M_max_span: M_sagging, // BUG-W2 FIX: was M_gov (= max hogging,sagging), duplicating M_governing below. Field name means max in-span (sagging) moment.
+            M_max_span: M_sagging,
             M_hogging,
             M_sagging,
             M_governing: M_gov,
@@ -702,101 +872,44 @@ export function analyzeWall(config: WallConfig): WallAnalysisResult {
             V_governing: V_gov,
             flex_hogging,
             flex_sagging,
-            shear: shear,
+            shear,
+            shear_k: k_shear,
+            shearOk,
+            shearAt,
             mainBars_hogging,
             mainBars_sagging,
+            distBars,
+            crack,
+            pm,
+            construction,
+            ok: zoneOk,
             pressureTop: zonePressures[i].top,
             pressureBot: zonePressures[i].bottom,
         });
     }
 
-    // ── Total quantities & comprehensive feasibility checks ─────────────────
-    //
-    // A wall section is considered FEASIBLE only when ALL of the following
-    // IS 456:2000 structural requirements are satisfied in every zone:
-    //
-    //   1. FLEXURAL CAPACITY (IS 456 Cl. 38.1):
-    //      The applied moment Mu must not exceed the limiting moment Mu,lim
-    //      for a singly-reinforced section:
-    //        Mu,lim = coeff × fck × b × d²
-    //      where coeff depends on the steel grade (Fe415→0.138, Fe500→0.133, etc.).
-    //      If Mu > Mu,lim the section requires compression reinforcement
-    //      (isDoubly = true), which is not acceptable for basement walls.
-    //      Equivalently, utilization = Mu / Mu,lim must be ≤ 1.0.
-    //
-    //   2. MAXIMUM REINFORCEMENT (IS 456 Cl. 26.5.1.1):
-    //      Ast,max = 4% of gross cross-section (b × t).
-    //      If the required Ast exceeds this, the section is under-designed
-    //      (governs === 'maximum'). Thickness must be increased.
-    //
-    //   3. SHEAR CAPACITY (IS 456 Cl. 40.2.3):
-    //      τv = Vu / (b × d) must not exceed τc,max (IS 456 Table 20).
-    //      If τv > τc,max, no amount of shear reinforcement can save the
-    //      section (shear.status === 'FAIL'). Thickness must be increased.
-    //
-    //   4. MINIMUM WALL THICKNESS (IS 456 Cl. 32.2.3):
-    //      t ≥ 150 mm (unconditional code minimum for RC walls).
-    //
-    let totalConcreteVol = 0; // m³ per m run
-    let totalSteelWeight = 0; // kg per m run
+    // ── Totals & feasibility ─────────────────────────────────────────────────
+    // A zone is feasible when: Mu ≤ Mu,lim on both faces (Cl. 38.1), Ast ≤ 4 %
+    // (Cl. 26.5.1.1), bars can supply the steel, τv ≤ k·τc without links
+    // (Cl. 40.2.1.1), crack width within Cl. 35.3.2 (Annex F), axial + bending
+    // with slenderness (Cl. 32.2 / 39) and t ≥ 150 mm (Cl. 32.2.3).
+    let totalConcreteVol = 0;
+    let totalSteelWeight = 0;
     let feasible = true;
     let governingZone: number | null = null;
     let maxUtilization = 0;
-
     for (const zd of zoneDesigns) {
-        // ── Material quantities (per m run of wall) ──
-        totalConcreteVol += (zd.thickness / 1000) * zd.height * 1;
-        // IMPROVEMENT 2026-07-04 v4: include DISTRIBUTION steel in the weight.
-        // The previous formula only counted the main flexural steel (hogging +
-        // sagging). IS 456 cl. 26.5.2.1 also requires horizontal distribution
-        // steel at 0.12% (Fe415/Fe500) of the gross section (b × t), running
-        // horizontally on BOTH faces. For a 1 m strip, the distribution steel
-        // per face = 0.0012 × 1000 × t [mm²/m]; both faces = 0.0024 × 1000 × t.
-        // Total distribution steel weight per zone = (Ast_dist_both [mm²/m] / 1e6)
-        //   × zone_height [m] × 7850 [kg/m³].
-        const mainSteelWeight = ((zd.mainBars_hogging.Ast_provided + zd.mainBars_sagging.Ast_provided) / 1e6) * zd.height * 1 * 7850;
-        // Distribution steel: 0.12% of b×t per face, both faces, horizontal bars
-        // running the full height of the zone.
-        const Ast_dist_both_faces = 2 * 0.0012 * 1000 * zd.thickness; // mm²/m (both faces)
-        const distSteelWeight = (Ast_dist_both_faces / 1e6) * zd.height * 1 * 7850;
+        totalConcreteVol += (zd.thickness / 1000) * zd.height;
+        const mainSteelWeight = ((zd.mainBars_hogging.Ast_provided + zd.mainBars_sagging.Ast_provided) / 1e6) * zd.height * 7850;
+        const distSteelWeight = (2 * zd.distBars.Ast_provided / 1e6) * zd.height * 7850;
         totalSteelWeight += mainSteelWeight + distSteelWeight;
-
-        // ── Check 1: Shear capacity — IS 456 Cl. 40.2.3 / Table 20 ──
-        // If τv > τc,max the section cannot be saved by shear reinforcement.
-        if (zd.shear.status === 'FAIL') {
-            feasible = false;
-        }
-
-        // ── Check 2: Flexural over-reinforcement — IS 456 Cl. 38.1 ──
-        // A singly-reinforced wall must have Mu ≤ Mu,lim on both faces.
-        // isDoubly === true means Mu > Mu,lim → section needs compression steel
-        // → thickness is insufficient for the applied moment.
-        if (zd.flex_hogging.isDoubly || zd.flex_sagging.isDoubly) {
-            feasible = false;
-        }
-
-        // ── Check 3: Maximum steel ratio — IS 456 Cl. 26.5.1.1 ──
-        // governs === 'maximum' means Ast_req > 4% × b × t. The function
-        // silently capped Ast_req at Ast_max, but the section is under-designed.
-        if (zd.flex_hogging.governs === 'maximum' || zd.flex_sagging.governs === 'maximum') {
-            feasible = false;
-        }
-
-        // ── Check 4: Minimum wall thickness — IS 456 Cl. 32.2.3 ──
-        if (zd.thickness < WALL_MIN_THICKNESS) {
-            feasible = false;
-        }
-
-        // ── Track governing utilization for reporting ──
+        if (!zd.ok) feasible = false;
         const maxUtil = Math.max(zd.flex_hogging.utilization, zd.flex_sagging.utilization);
         if (maxUtil > maxUtilization) {
             maxUtilization = maxUtil;
             governingZone = zd.zone;
         }
     }
-
-    // Overturning forces (totalLateralForce, centerOfPressure) come from the
-    // thickness-independent pressure mesh — PERF-004 (no recompute per trial).
 
     return {
         beamResult,
@@ -823,40 +936,37 @@ export function analyzeWall(config: WallConfig): WallAnalysisResult {
 // ───────────────────── Structural Minimum Thickness ─────────────────────
 
 /**
- * Compute the minimum wall thickness required to keep ALL zones singly reinforced
- * (Mu ≤ Mu,lim) and to satisfy the IS 456 Cl. 32.2.3 absolute minimum (150 mm).
+ * Minimum thickness of EACH zone to stay singly reinforced (Mu ≤ Mu,lim,
+ * IS 456 Cl. 38.1) and to satisfy the Cl. 32.2.3 absolute minimum (150 mm).
  *
- * This function runs a preliminary analysis at a reference thickness (the maximum
- * available) to determine the actual governing moments from the continuous beam
- * model. It then uses the shared IS 456 Cl. 38.1 formula:
+ * A preliminary analysis at a uniform reference thickness (the maximum
+ * available) gives the governing moment of every zone; then
  *
  *   d = √(M / (R × b))   where R = coeff × fck
  *   t = d + cover + barDia/2
  *
- * This is the standard textbook formula for minimum effective depth from B.M.
- * consideration, applicable to walls, slabs, and footings alike.
+ * The minimum is returned per zone — a single wall-wide minimum (the old
+ * behaviour) forced lightly loaded upper zones up to the thickness needed by
+ * the most heavily loaded zone, so thin upper zones were never evaluated.
  *
  * @param config    wall configuration
  * @param mesh      pre-computed pressure mesh (shared by the optimizer)
  * @param maxBarDia largest bar in the available set (mm)
- * @returns minimum required thickness in mm (rounded up to nearest integer)
+ * @returns minimum required thickness per zone in mm (rounded up)
  */
 function computeMinRequiredThickness(
     config: WallConfig,
     mesh: PressureMesh,
     maxBarDia: number,
-): number {
+): number[] {
     const { material } = config;
     const fck = material.fck || 25;
     const fy = material.fy || 500;
     const cover = material.cover || 40;
 
-    // Run a preliminary analysis at a conservatively large thickness to get the
-    // actual governing moments from the continuous beam model. The moments are
-    // weakly dependent on EI (which depends on thickness), but in a propped wall
-    // under lateral pressure the moment distribution is dominated by the pressure
-    // profile and span lengths, not the stiffness. Using max thickness gives a
-    // conservative (slightly lower) estimate of d_min.
+    // The moments depend on the relative zone stiffness, so this estimate is
+    // only a pruning aid: the optimizer relaxes it (see zoneFloor in
+    // optimizeWall) and every candidate is still fully analysed.
     const refThk = config.maxThk || 600;
     const refZones = config.zones.map(z => ({
         ...z,
@@ -870,24 +980,12 @@ function computeMinRequiredThickness(
         _mesh: mesh,
     } as WallConfig);
 
-    // For each zone, compute the minimum d (effective depth) from the governing
-    // moment using the shared IS 456 Cl. 38.1 formula:
-    //   d = √(M / (R × b))   where R = coeff × fck
-    //   t = d + cover + barDia/2
-    let tMin = WALL_MIN_THICKNESS; // IS 456 Cl. 32.2.3 absolute floor
-
-    for (const zd of refResult.zoneDesigns) {
+    return refResult.zoneDesigns.map(zd => {
         const Mu_gov_kNm = zd.M_governing;
-        if (Mu_gov_kNm <= 0.001) continue;
-
-        // Use the shared formula: d = √(M / (R × b))
+        if (Mu_gov_kNm <= 0.001) return WALL_MIN_THICKNESS;
         const { d_req } = computeRequiredDepthForBM(Mu_gov_kNm, fck, fy, 1000);
-        // Gross thickness = d + effective cover (clear cover + half bar diameter)
-        const t_min_zone = Math.ceil(d_req + cover + maxBarDia / 2);
-        tMin = Math.max(tMin, t_min_zone);
-    }
-
-    return tMin;
+        return Math.max(WALL_MIN_THICKNESS, Math.ceil(d_req + cover + maxBarDia / 2));
+    });
 }
 
 // ───────────────────── Post-Optimization Verification ─────────────────────
@@ -967,16 +1065,13 @@ function verifyAndRemediate(
 
         // Identify failing zones and bump their thickness by one step.
         // For tapered walls, bump both the top and bottom variables.
+        // zd.ok carries every zone check (flexure, 4 % steel, bars, shear
+        // without links, crack width, axial + bending, 150 mm minimum), the
+        // same gate that sets result.feasible.
         let anyBumped = false;
         for (const zd of result.zoneDesigns) {
             const zIdx = zd.zone - 1; // 0-based zone index
-            const zoneFails =
-                zd.shear.status === 'FAIL' ||
-                zd.flex_hogging.isDoubly || zd.flex_sagging.isDoubly ||
-                zd.flex_hogging.governs === 'maximum' || zd.flex_sagging.governs === 'maximum' ||
-                zd.thickness < WALL_MIN_THICKNESS;
-
-            if (zoneFails) {
+            if (!zd.ok) {
                 if (config.isTapered) {
                     // Bump top and bottom thickness variables for this zone
                     if (currentThk[zIdx] + thkStep <= maxThk) {
@@ -1006,18 +1101,35 @@ function verifyAndRemediate(
 
 // ───────────────────── Zone-by-Zone Optimization ─────────────────────
 
+/** Cost per m run: concrete + steel (7 % wastage) + formwork on both faces (OPT-4). */
+function wallCost(result: WallAnalysisResult, costRatio: number): { costIndex: number; formworkArea: number } {
+    const formworkArea = 2 * result.totalHeight;
+    const costIndex = computeCost(
+        result.totalConcreteVol,
+        result.totalSteelWeight,
+        formworkArea,
+        { steelCost_per_kg: costRatio, concreteCost_per_m3: 6500, formworkCost_per_m2: 350, wastage_factor: 1.07 },
+    );
+    return { costIndex, formworkArea };
+}
+
 /**
  * Optimize wall thickness zone by zone.
  *
  * ALGORITHM:
- *   1. Compute the STRUCTURAL MINIMUM thickness from the actual design moments
- *      (IS 456 Cl. 38.1 limiting moment equation) and IS 456 Cl. 32.2.3 (150 mm).
- *   2. Clamp the user's minThk to this structural minimum so the optimizer never
- *      wastes time evaluating thicknesses that are guaranteed to fail.
- *   3. Enumerate all feasible thickness combinations (full enumeration for small
- *      search spaces, greedy sequential for large ones).
- *   4. Select the combination with the lowest cost index:
- *        costIndex = concreteCost × vol + steelCost × weight
+ *   1. Compute the STRUCTURAL MINIMUM thickness of EACH zone from its design
+ *      moment (IS 456 Cl. 38.1 limiting moment) and Cl. 32.2.3 (150 mm).
+ *   2. Build the thickness grid from the user's minThk to maxThk and give every
+ *      zone only the options at or above 85 % of its own minimum (a relaxed
+ *      floor — the minimum comes from a uniform-thickness analysis and the
+ *      moments shift when the zone stiffnesses change). Thin upper zones are
+ *      therefore evaluated even when a lower zone needs a thick section.
+ *      Tapered walls: the zone is designed on the mean of its two node
+ *      thicknesses, so the pruning is applied to that mean.
+ *   3. Enumerate all combinations (full enumeration for small search spaces,
+ *      greedy sequential for large ones).
+ *   4. Select the combination with the lowest cost:
+ *        cost = concrete × vol + steel × weight × wastage + formwork × area
  *   5. POST-OPTIMIZATION VERIFICATION: re-analyze the selected optimum and confirm
  *      that all IS 456 checks pass. If any fail, bump the failing zone's thickness
  *      and retry (up to 5 iterations).
@@ -1027,9 +1139,11 @@ function verifyAndRemediate(
  * @param onProgress optional callback invoked periodically with progress info
  */
 export function optimizeWall(config: WallConfig, costRatio: number = 90, onProgress?: ProgressCallback): OptimizeResult {
-    const { zones, minThk: userMinThk, maxThk, thkStep, ...restConfig } = config;
+    const { zones, minThk: userMinThk, maxThk: userMaxThk, thkStep, ...restConfig } = config;
     const barDias = config.barDias || [8, 10, 12, 16, 20, 25];
     const maxBarDia = Math.max(...barDias);
+    const maxThk = userMaxThk || 600;
+    const step = thkStep || 50;
 
     // ── Step 1: Compute thickness-independent pressure mesh (PERF-004) ────
     // The lateral-pressure mesh depends only on the zone *heights* and the
@@ -1038,104 +1152,83 @@ export function optimizeWall(config: WallConfig, costRatio: number = 90, onProgr
     // every analyzeWall trial via config._mesh.
     const sharedMesh = computePressureMesh({ ...restConfig, zones } as WallConfig);
 
-    // ── Step 2: Compute structural minimum thickness ─────────────────────
-    // Back-calculate the minimum wall thickness needed to keep all zones
-    // singly reinforced (Mu ≤ Mu,lim per IS 456 Cl. 38.1) and satisfy the
-    // IS 456 Cl. 32.2.3 absolute minimum of 150 mm.
-    const structuralMin = computeMinRequiredThickness(
+    // ── Step 2: Structural minimum thickness per zone ────────────────────
+    const zoneMin = computeMinRequiredThickness(
         { ...restConfig, zones, maxThk } as WallConfig,
         sharedMesh,
         maxBarDia,
     );
+    const zoneFloor = zoneMin.map(t => 0.85 * t);
 
-    // ── Step 3: Clamp and generate thickness options ─────────────────────
-    // The user's minThk is clamped UP to the structural minimum so the
-    // optimizer never evaluates guaranteed-to-fail thin sections.
-    const effectiveMinThk = Math.max(userMinThk || 150, structuralMin, WALL_MIN_THICKNESS);
-    const step = thkStep || 50;
-    // Round effectiveMinThk up to the nearest step boundary from the user's
-    // original minThk to keep the enumeration grid aligned.
-    const startThk = Math.ceil(effectiveMinThk / step) * step;
-
-    const thicknesses: number[] = [];
-    for (let t = startThk; t <= maxThk!; t += step) {
-        thicknesses.push(Math.round(t));
-    }
-    // Ensure at least one option exists (the clamped minimum itself)
-    if (thicknesses.length === 0) thicknesses.push(Math.round(Math.min(startThk, maxThk!)));
+    // ── Step 3: Thickness options per variable ───────────────────────────
+    const lo = Math.max(userMinThk || 150, WALL_MIN_THICKNESS);
+    const grid: number[] = [];
+    for (let t = lo; t <= maxThk + 1e-9; t += step) grid.push(Math.round(t));
+    // Ensure at least one option exists
+    if (grid.length === 0) grid.push(Math.round(maxThk));
+    const gridMax = grid[grid.length - 1];
 
     const nZones = zones.length;
-    const nOpts = thicknesses.length;
     const nVars = config.isTapered ? nZones + 1 : nZones;
+    const options: number[][] = config.isTapered
+        ? Array.from({ length: nVars }, () => grid)
+        : zoneFloor.map(f => {
+            const opts = grid.filter(t => t >= Math.min(f, gridMax) - 1e-9);
+            return opts.length ? opts : [gridMax];
+        });
+    // Tapered: prune on the mean thickness of every zone.
+    const passesFloors = (vars: number[]): boolean => !config.isTapered
+        || zoneFloor.every((f, i) => (vars[i] + vars[i + 1]) / 2 >= Math.min(f, gridMax) - 1e-9);
 
     // ── Step 4: Enumeration ──────────────────────────────────────────────
     // Full enumeration is the only path that proves a global optimum. Keep the
     // cap high enough for the documented realistic case (5 zones × 9 options =
     // 59,049 combos), then fall back only for genuinely huge searches.
     const maxCombos = 60000;
-    const totalCombos = Math.pow(nOpts, nVars);
+    const totalCombos = options.reduce((n, o) => n * o.length, 1);
 
     if (totalCombos > maxCombos) {
         // Fall back to greedy sequential optimization (approximate, not exhaustive)
-        return optimizeSequential(config, thicknesses, sharedMesh, costRatio, step, maxThk!, onProgress);
+        return optimizeSequential(config, options, sharedMesh, costRatio, step, maxThk, onProgress, passesFloors);
     }
+
+    const applyVars = (vars: number[]): WallZone[] => zones.map((z: WallZone, i: number) => config.isTapered
+        ? { ...z, thicknessTop: vars[i], thicknessBot: vars[i + 1] }
+        : { ...z, thickness: vars[i] });
 
     const results: OptimumDesign[] = [];
     const indices = new Array(nVars).fill(0);
 
     for (let combo = 0; combo < totalCombos; combo++) {
-        // Build zone config with current thicknesses
-        const trialZones = zones.map((z: WallZone, i: number) => {
-            if (config.isTapered) {
-                return {
-                    ...z,
-                    thicknessTop: thicknesses[indices[i]],
-                    thicknessBot: thicknesses[indices[i + 1]],
-                };
-            } else {
-                return {
-                    ...z,
-                    thickness: thicknesses[indices[i]],
-                };
-            }
-        });
+        const vars = indices.map((idx: number, v: number) => options[v][idx]);
+        if (passesFloors(vars)) {
+            try {
+                const result = analyzeWall({
+                    ...restConfig,
+                    zones: applyVars(vars),
+                    _mesh: sharedMesh, // PERF-004: reuse pre-computed pressure mesh
+                } as WallConfig);
 
-        try {
-            const result = analyzeWall({
-                ...restConfig,
-                zones: trialZones,
-                _mesh: sharedMesh, // PERF-004: reuse pre-computed pressure mesh
-            } as WallConfig);
-
-            // Feasibility is now checked comprehensively inside analyzeWall:
-            //   - Shear: τv ≤ τc,max (IS 456 Cl. 40.2.3)
-            //   - Flexure: Mu ≤ Mu,lim on both faces (IS 456 Cl. 38.1)
-            //   - Max steel: Ast ≤ 4% × b × t (IS 456 Cl. 26.5.1.1)
-            //   - Min thickness: t ≥ 150 mm (IS 456 Cl. 32.2.3)
-            if (result.feasible) {
-                // AUDIT FIX OPT-4 (2026-07-04): include formwork in the cost.
-                // Formwork area per metre run = 2 × totalHeight (both faces of wall).
-                const formworkArea = 2 * result.totalHeight;
-                const costIndex = computeCost(
-                    result.totalConcreteVol,
-                    result.totalSteelWeight,
-                    formworkArea,
-                    { steelCost_per_kg: costRatio, concreteCost_per_m3: 6500, formworkCost_per_m2: 350, wastage_factor: 1.07 },
-                );
-                results.push({
-                    thicknesses: config.isTapered
-                        ? indices.map((idx: number) => thicknesses[idx])
-                        : trialZones.map(z => z.thickness),
-                    concreteVol: result.totalConcreteVol,
-                    steelWeight: result.totalSteelWeight,
-                    maxUtilization: result.maxUtilization,
-                    costIndex,
-                    formworkArea,
-                    result,
-                });
+                // Feasibility is checked comprehensively inside analyzeWall
+                // (zd.ok for every zone): flexure Mu ≤ Mu,lim (Cl. 38.1), Ast ≤ 4 %
+                // (Cl. 26.5.1.1), bars able to supply Ast, shear without links
+                // τv ≤ k·τc (Cl. 40.2.1.1), crack width (Cl. 35.3.2 / Annex F),
+                // axial + bending with slenderness (Cl. 32.2 / 39), t ≥ 150 mm.
+                if (result.feasible) {
+                    const { costIndex, formworkArea } = wallCost(result, costRatio);
+                    results.push({
+                        thicknesses: vars,
+                        concreteVol: result.totalConcreteVol,
+                        steelWeight: result.totalSteelWeight,
+                        maxUtilization: result.maxUtilization,
+                        costIndex,
+                        formworkArea,
+                        result,
+                    });
+                }
+            } catch (e) {
+                // Skip invalid combinations (e.g. beam engine errors for extreme geometries)
             }
-        } catch (e) {
-            // Skip invalid combinations (e.g. beam engine errors for extreme geometries)
         }
 
         // Report progress every 500 combos (or ~2.5% whichever is larger)
@@ -1151,7 +1244,7 @@ export function optimizeWall(config: WallConfig, costRatio: number = 90, onProgr
         let carry = 1;
         for (let k = nVars - 1; k >= 0 && carry; k--) {
             indices[k] += carry;
-            if (indices[k] >= nOpts) {
+            if (indices[k] >= options[k].length) {
                 indices[k] = 0;
                 carry = 1;
             } else {
@@ -1172,29 +1265,15 @@ export function optimizeWall(config: WallConfig, costRatio: number = 90, onProgr
     // If the verification fails (e.g. bar-selection iteration changed d),
     // bump failing zones and retry up to MAX_VERIFY_ITER times.
     let optimum: OptimumDesign | null = null;
-    if (results.length > 0) {
+    for (let i = 0; i < Math.min(results.length, 10) && !optimum; i++) {
         optimum = verifyAndRemediate(
-            results[0].thicknesses,
+            results[i].thicknesses,
             { ...restConfig, zones, isTapered: config.isTapered } as WallConfig,
             sharedMesh,
             step,
-            maxThk!,
+            maxThk,
             costRatio,
         );
-        // If the top candidate couldn't be remediated, try subsequent candidates
-        if (!optimum) {
-            for (let i = 1; i < Math.min(results.length, 10); i++) {
-                optimum = verifyAndRemediate(
-                    results[i].thicknesses,
-                    { ...restConfig, zones, isTapered: config.isTapered } as WallConfig,
-                    sharedMesh,
-                    step,
-                    maxThk!,
-                    costRatio,
-                );
-                if (optimum) break;
-            }
-        }
     }
 
     return {
@@ -1214,9 +1293,9 @@ export function optimizeWall(config: WallConfig, costRatio: number = 90, onProgr
 /**
  * Sequential single-zone optimization (for large search spaces).
  *
- * ALGORITHM: greedy coordinate descent — fix all zones at maxThk, then for each
- * zone variable, sweep all thickness options and keep the one that yields the
- * lowest cost index while remaining feasible. Repeat until no improvement.
+ * ALGORITHM: greedy coordinate descent — start every variable at its largest
+ * option, then for each variable sweep its options and keep the one that
+ * yields the lowest cost while remaining feasible. Repeat until no improvement.
  *
  * This is NOT exhaustive: it may converge to a local minimum. The result is
  * flagged `approximate: true` so the UI can warn the user.
@@ -1225,20 +1304,19 @@ export function optimizeWall(config: WallConfig, costRatio: number = 90, onProgr
  * full-enumeration path.
  */
 function optimizeSequential(
-    config: WallConfig, thicknesses: number[], sharedMesh: PressureMesh | null,
+    config: WallConfig, options: number[][], sharedMesh: PressureMesh | null,
     costRatio: number, thkStep: number, maxThkBound: number,
     onProgress?: ProgressCallback,
+    passesFloors: (vars: number[]) => boolean = () => true,
 ): OptimizeResult {
     const { zones, ...restConfig } = config;
     // PERF-004: reuse the caller's pre-computed pressure mesh; build one only if a
     // caller invoked this path directly without supplying it.
     const mesh = sharedMesh || computePressureMesh({ ...restConfig, zones } as WallConfig);
-    const nZones = zones.length;
-    const nVars = config.isTapered ? nZones + 1 : nZones;
-    const maxThk = thicknesses[thicknesses.length - 1];
+    const nVars = options.length;
 
-    // Start with maximum thickness everywhere (guaranteed feasible starting point)
-    const currentVars = new Array(nVars).fill(maxThk);
+    // Start with every variable at its largest option (feasible end of the search)
+    const currentVars = options.map(o => o[o.length - 1]);
 
     const applyVars = (vars: number[]): WallZone[] => {
         return zones.map((z, i) => {
@@ -1253,9 +1331,11 @@ function optimizeSequential(
     // Greedy coordinate descent: reduce each zone's thickness one at a time
     let improved = true;
     let iterations = 0;
-    const maxIter = nVars * thicknesses.length;
+    const maxOpts = Math.max(...options.map(o => o.length));
+    const maxIter = nVars * maxOpts;
     let trialCount = 0;
-    const totalTrials = maxIter * thicknesses.length;
+    const perPass = options.reduce((n, o) => n + o.length, 0);
+    const totalTrials = perPass * maxOpts;
 
     while (improved && iterations < maxIter) {
         improved = false;
@@ -1266,26 +1346,18 @@ function optimizeSequential(
             let bestThk = origThk;
             let bestCostIndex = Infinity;
 
-            for (const t of thicknesses) {
+            for (const t of options[v]) {
                 currentVars[v] = t;
                 trialCount++;
+                if (!passesFloors(currentVars)) continue;
                 try {
                     const trialZones = applyVars(currentVars);
                     const result = analyzeWall({ ...restConfig, zones: trialZones, _mesh: mesh } as WallConfig);
-                    // Feasibility now includes all IS 456 checks (shear, flexure,
-                    // max steel, min thickness) — same gate as full enumeration.
+                    // Same feasibility gate as full enumeration (zd.ok for every zone).
                     if (result.feasible) {
-                        // AUDIT FIX OPT-4 (2026-07-04): include formwork in the cost
-                        // (consistent with the full-enumeration path).
-                        const formworkArea = 2 * result.totalHeight;
-                        const ci = computeCost(
-                            result.totalConcreteVol,
-                            result.totalSteelWeight,
-                            formworkArea,
-                            { steelCost_per_kg: costRatio, concreteCost_per_m3: 6500, formworkCost_per_m2: 350, wastage_factor: 1.07 },
-                        );
-                        if (ci < bestCostIndex) {
-                            bestCostIndex = ci;
+                        const { costIndex } = wallCost(result, costRatio);
+                        if (costIndex < bestCostIndex) {
+                            bestCostIndex = costIndex;
                             bestThk = t;
                         }
                     }
