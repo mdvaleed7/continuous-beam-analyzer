@@ -190,12 +190,22 @@ export async function generateWaffleSlabPDF(input: WaffleSlabInput, results: any
                 <div class="section-box avoid-break">
                     <div class="section-header">Section Properties</div>
                     <div class="section-body">
-                        ${kx(`d = D - \\text{cover} - 10 = ${D} - ${cover} - 10 = ${(D - cover - 10)} \\text{ mm}`)}
+                        ${kx(`d = D - \\text{cover} - \\phi/2 = ${r.ribX.d_eff} \\text{ mm}`)}
                         ${kx(`D_r = D - D_f = ${D} - ${Df} = ${D - Df} \\text{ mm (rib depth)}`)}
                         <p style="font-size:12px;color:#64748b;margin:4px 0 0 0;">Equivalent solid thickness and self-weight (IS 456 for voided slabs).</p>
                         ${kx(`D_{eq} = \\left(1 - \\frac{V_v}{V_s}\\right)D = ${r.D_eq.toFixed(1)} \\text{ mm}`)}
                         ${calcRow('Eq. self-weight (w_dead)', `${r.w_dead.toFixed(2)}`, 'kN/m²')}
                         ${kx(`w_u = 1.5 \\times (w_{dead} + w_{live} + w_{finish}) = ${r.wu.toFixed(2)} \\text{ kN/m}^2`)}
+                        ${r.solidZone ? `
+                        <p style="font-size:12px;color:#475569;margin:8px 0 4px 0;"><strong>Solid support zones</strong> (voids filled along every edge, width a from the support centre-line).
+                        The extra weight is carried by the ribs framing into each edge as end patch loads &Delta;q over length a; corner overlaps counted in both directions (conservative).
+                        The stiffening of the solid zone is ignored in the deflection check (conservative).</p>
+                        ${kx(`\\Delta w = \\frac{V_v}{A_{cell}} \\times 25 = ${r.solidZone.w_extra.toFixed(2)} \\text{ kN/m}^2, \\quad a_x = ${r.solidZone.width_x} \\text{ m}, \\ a_y = ${r.solidZone.width_y} \\text{ m}`)}
+                        ${kx(`A_{zone} = ${r.solidZone.area.toFixed(2)} \\text{ m}^2 \\Rightarrow \\text{extra weight} = ${r.solidZone.extraWeight.toFixed(1)} \\text{ kN per panel (service)}`)}
+                        ${kx(`\\Delta q_x = ${r.solidZone.dq_x.toFixed(2)}, \\ \\Delta q_y = ${r.solidZone.dq_y.toFixed(2)} \\text{ kN/m per rib (service)}`)}
+                        ${kx(`\\Delta M_{mid} = \\frac{\\Delta q\\,a^2}{2}: \\ ${r.solidZone.dM_mid_x.toFixed(2)} / ${r.solidZone.dM_mid_y.toFixed(2)} \\text{ kN·m}, \\quad \\Delta V: \\ ${r.solidZone.dV_x.toFixed(2)} / ${r.solidZone.dV_y.toFixed(2)} \\text{ kN (factored, X / Y rib)}`)}
+                        ${r.hogging ? kx(`\\Delta M^- = \\Delta q\\,a^2 \\frac{3L - 2a}{${r.hogging.supportCondition === 'continuous' ? '6' : '4'}L}: \\ ${r.solidZone.dM_hog_x.toFixed(2)} / ${r.solidZone.dM_hog_y.toFixed(2)} \\text{ kN·m (factored, X / Y rib)}`) : ''}
+                        ` : ''}
                     </div>
                 </div>
 
