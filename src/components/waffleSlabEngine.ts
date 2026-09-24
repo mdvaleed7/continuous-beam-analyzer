@@ -18,6 +18,7 @@ import {
     getTauC,
     getTauCMax,
     getMinSteelRatio,
+    developmentLength,
     annexCDeflection,
     tBeamDeflection,
     getRequiredDeflectionCamber,
@@ -68,6 +69,10 @@ export interface WaffleSlabInput {
     // the span, along every edge of the panel. Used for its extra self-weight
     // (voids filled). Defaults to one rib spacing when a solid zone is on.
     solid_zone_width?: number;
+    // Width of the supporting beam / wall (m) — lengths of the hogging bars
+    // are given from the support centre-line; development length Ld is
+    // measured from the support face (centre-line + width/2). Default 0.
+    support_width?: number;
     costParams?: CostParameters;
 }
 
@@ -362,7 +367,7 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
     const hogBarDia = input.rib_hog_bar_dia || 16;
     const d_hog = D - cover - hogBarDia / 2;
     const solidZone = input.solid_support_zone === true;
-    const designHog = (M_hog: number, spacing_m: number) => {
+    const designHog = (M_hog: number, spacing_m: number, M_hog_patch: number = 0) => {
         const b = solidZone ? spacing_m * 1000 : bw;
         const flex = flexuralDesignShared(M_hog, b, d_hog, fck, fy, D);
         // Minimum steel: beam rule for a rib (Cl. 26.5.1.1 a), slab rule for a
@@ -381,7 +386,7 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
         const ok = !flex.isDoubly && Ast_provided >= Ast_req && fits;
         const r1 = (v: number) => Math.round(v * 10) / 10;
         return {
-            M_hog: Math.round(M_hog * 100) / 100, b, d: d_hog,
+            M_hog: Math.round(M_hog * 100) / 100, M_hog_patch, b, d: d_hog,
             Mu_lim: Math.round(flex.Mu_lim * 100) / 100,
             isDoubly: flex.isDoubly,
             Ast_req: r1(Ast_req), Ast_min: r1(Ast_min),
@@ -389,12 +394,147 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
             fits, ok,
         };
     };
-    const hogging = isContinuous ? {
+    // ─── Curtailment of the hogging bars — IS 456 Cl. 26.2.3 ────────────────
+    // Hogging envelope along the rib, the larger of two load cases
+    // (Cl. 22.4.1 pattern loading), each M⁻(x) = M_A(1 − x/L) + M_B·x/L − M0(x)
+    // with M_B = 0 for 'one_end' and M0 the simply supported moment of the
+    // span load (+ solid-zone patches, which are dead load):
+    //  1. Maximum support moment — M_A from Table 12 above, span fully loaded.
+    //  2. Longest hogging region — span carries design dead load only while
+    //     the live load is on alternate spans. By superposition (uniform ½·wL
+    //     on all spans + an antisymmetric ±½·wL part that adds no support
+    //     moment) the support moment is c_D·(wD + ½·wL)·L², c_D = 1/12
+    //     (interior) or 1/10 (next to end support), plus the patch hogging.
+    // Bars (x from the support centre-line):
+    //  • Group A — at least 1/3 of the bars (Cl. 26.2.3.4): beyond the point of
+    //    inflection by max(d, 12φ, Ln/16).
+    //  • Group B — the rest: beyond the section where group A alone resists
+    //    M⁻ by max(d, 12φ) (Cl. 26.2.3.1). This point lies in the tension zone,
+    //    so Cl. 26.2.3.2 must hold: (a) V ≤ ⅔·Vc, or (c) φ ≤ 36 mm, continuing
+    //    bars ≥ 2 × the area required there and V ≤ ¾·Vc (ribs carry no
+    //    links, so Vc = τc·bw·d). Otherwise group B runs to group A's length.
+    //  • Every bar is developed for Ld (Cl. 26.2.1) beyond the support face.
+    // Lengths are rounded up to 50 mm.
+    const supportWidth_mm = Math.max(0, (input.support_width ?? 0) * 1000);
+    const curtail = (
+        h: ReturnType<typeof designHog>, L_m: number, share: number, trib_m: number,
+        dq: number, a_m: number, V_support: number, w_rib_full: number,
+    ) => {
+        const L = L_m * 1000;                                  // mm
+        const qD = wuD * share * trib_m;                       // kN/m per rib (factored dead)
+        const qFull = wu * share * trib_m;                     // kN/m per rib (factored total)
+        const bothEnds = deflSupport === 'continuous';
+        const cD = bothEnds ? 1 / 12 : 1 / 10;
+        const M_max = h.M_hog;                                                      // case 1
+        const M_alt = cD * (wuD + 0.5 * wuL) * share * trib_m * L_m * L_m + (h.M_hog_patch ?? 0);  // case 2
+        const a = a_m * 1000;
+        const caseM = (x: number, M_sup: number, q: number) => {
+            const xm = x / 1000, Lm = L / 1000, am = a / 1000;
+            let M0 = q * xm * (Lm - xm) / 2;
+            if (am > 0 && dq > 0) {
+                M0 += dq * am * xm - dq * Math.pow(Math.min(xm, am), 2) / 2
+                    - (xm > Lm - am ? dq * Math.pow(xm - (Lm - am), 2) / 2 : 0);
+            }
+            return M_sup * (1 - xm / Lm) + (bothEnds ? M_sup * (xm / Lm) : 0) - M0;
+        };
+        // Hogging moment envelope (kN·m, positive = hogging) at x (mm) from support A
+        const Mneg = (x: number) => Math.max(caseM(x, M_max, qFull), caseM(x, M_alt, qD));
+        const N = 4000;
+        const firstBelow = (limit: number): number | null => {
+            for (let i = 1; i <= N; i++) {
+                const x = L * i / N;
+                if (Mneg(x) <= limit) return x;
+            }
+            return null;
+        };
+        const phi = h.bar_dia, d_ = h.d;
+        const Abar = Math.PI * phi * phi / 4;
+        const Ld = developmentLength(phi, fy, grade);
+        const LdFromCL = Ld + supportWidth_mm / 2;
+        const Ln = Math.max(0, L - supportWidth_mm);
+        const ext1 = Math.max(d_, 12 * phi);
+        const extPOI = Math.max(d_, 12 * phi, Ln / 16);
+        const up50 = (v: number) => Math.ceil(v / 50) * 50;
+
+        const xPOI = firstBelow(0);
+        const runsThrough = xPOI === null;
+        const n = h.n_bars;
+        const nA = Math.max(1, Math.ceil(n / 3));
+        const nB = n - nA;
+
+        let L_A: number, governsA: string;
+        if (runsThrough) {
+            L_A = L; governsA = 'hogging over the whole span — run through';
+        } else {
+            const byPOI = (xPOI as number) + extPOI;
+            L_A = Math.max(byPOI, LdFromCL);
+            governsA = byPOI >= LdFromCL ? 'POI + max(d, 12φ, Ln/16)' : 'Ld from support face';
+            L_A = Math.min(up50(L_A), L);
+        }
+
+        let groupB: {
+            n: number; L: number; x_theory: number | null; governs: string;
+            curtailed: boolean; check: 'a' | 'c' | 'none' | 'n/a'; V: number; Vc: number;
+        } | null = null;
+        if (nB > 0) {
+            const As_A = nA * Abar;
+            // Resisting moment of the continuing bars (singly reinforced,
+            // IS 456 Annex G-1.1 b), rib web width bw (conservative).
+            const Mr_A = 0.87 * fy * As_A * d_ * (1 - (As_A * fy) / (bw * d_ * fck)) / 1e6;
+            const xB = firstBelow(Mr_A) ?? L;
+            let L_B = Math.max(xB + ext1, LdFromCL);
+            let governsB = xB + ext1 >= LdFromCL ? 'theoretical cut-off + max(d, 12φ)' : 'Ld from support face';
+            L_B = up50(L_B);
+            let check: 'a' | 'c' | 'none' | 'n/a' = 'n/a';
+            let V = 0, Vc = 0;
+            let curtailed = L_B < L_A;
+            if (curtailed && (runsThrough || L_B < (xPOI as number))) {
+                // Cut-off in the tension zone → Cl. 26.2.3.2
+                const xm = L_B / 1000;
+                V = Math.max(0, V_support - w_rib_full * xm - dq * Math.min(xm, a_m));
+                const ptA = Math.min(3, Math.max(0.15, 100 * As_A / (bw * d_)));
+                Vc = getTauC(ptA, grade) * bw * d_ / 1000;
+                const Mcut = Math.max(0, Mneg(L_B));
+                const term = 1 - 4.6 * Mcut * 1e6 / (fck * bw * d_ * d_);
+                const As_req_cut = term > 0 ? 0.5 * fck / fy * (1 - Math.sqrt(term)) * bw * d_ : Infinity;
+                if (V <= (2 / 3) * Vc) check = 'a';
+                else if (phi <= 36 && As_A >= 2 * As_req_cut && V <= 0.75 * Vc) check = 'c';
+                else {
+                    check = 'none';
+                    curtailed = false;
+                    governsB = 'Cl. 26.2.3.2 not met — no curtailment';
+                }
+            }
+            if (!curtailed) {
+                L_B = L_A;
+                if (check !== 'none') governsB = 'no saving — same as group A';
+            }
+            const r2 = (v: number) => Math.round(v * 100) / 100;
+            groupB = {
+                n: nB, L: L_B, x_theory: Math.round(xB), governs: governsB,
+                curtailed, check, V: r2(V), Vc: r2(Vc),
+            };
+        }
+        const steelLength = nA * L_A + (groupB ? groupB.n * groupB.L : 0);  // mm of bar per end
+        return {
+            x_POI: runsThrough ? null : Math.round(xPOI as number),
+            runsThrough,
+            Ld: Math.round(Ld), supportWidth: supportWidth_mm,
+            ext1: Math.round(ext1), extPOI: Math.round(extPOI),
+            groupA: { n: nA, L: L_A, governs: governsA },
+            groupB,
+            steelVolume_mm3: steelLength * Abar,   // per continuous end, per rib
+        };
+    };
+
+    const hogX = isContinuous ? designHog(hogCoef * qx * Lx * Lx * spacing_y + dM_hog_x, spacing_y, dM_hog_x) : null;
+    const hogY = isContinuous ? designHog(hogCoef * qy * Ly * Ly * spacing_x + dM_hog_y, spacing_x, dM_hog_y) : null;
+    const hogging = (hogX && hogY) ? {
         supportCondition: deflSupport,
         solidZone,
         coef: Math.round(hogCoef * 10000) / 10000,  // × q·L² (per m, before Rankine–Grashoff share)
-        x: designHog(hogCoef * qx * Lx * Lx * spacing_y + dM_hog_x, spacing_y),
-        y: designHog(hogCoef * qy * Ly * Ly * spacing_x + dM_hog_y, spacing_x),
+        x: { ...hogX, curtailment: curtail(hogX, Lx, qx / wu, spacing_y, dq_x, a_x, V_rib_x, qx * spacing_y) },
+        y: { ...hogY, curtailment: curtail(hogY, Ly, qy / wu, spacing_x, dq_y, a_y, V_rib_y, qy * spacing_x) },
     } : null;
     const hogging_ok = !hogging || (hogging.x.ok && hogging.y.ok);
 
@@ -834,14 +974,13 @@ export function optimizeWaffleSlab(
             // Rib steel: bottom (tension) + top (compression, if any) along
             // every rib in both directions.
             const Abar_rib_top = result.Asc_rib_provided; // already mm² per rib
-            // Hogging top bars at continuous supports — costed at 0.3·L from
-            // each continuous support (a costing estimate; the actual cut-off
-            // follows Cl. 26.2.3).
+            // Hogging top bars at continuous supports — Cl. 26.2.3 curtailed
+            // lengths (mm³ per end per rib → mm²·m).
             const hog = result.hogging;
             const nContEnds = hog ? (hog.supportCondition === 'continuous' ? 2 : 1) : 0;
             const hogSteel = hog
-                ? hog.x.Ast_provided * 0.3 * input.Lx * nContEnds * nRibsX
-                    + hog.y.Ast_provided * 0.3 * input.Ly * nContEnds * nRibsY
+                ? (hog.x.curtailment.steelVolume_mm3 / 1000) * nContEnds * nRibsX
+                    + (hog.y.curtailment.steelVolume_mm3 / 1000) * nContEnds * nRibsY
                 : 0;
             const ribSteel_net = (
                 (Ast_rib_prov + Abar_rib_top) * input.Lx * nRibsX +

@@ -201,6 +201,10 @@ export default function WaffleSlabAnalyzer() {
                                 <label htmlFor="rib_hog_n_bars">No. of Hogging Bars per Rib (0 = auto)</label>
                                 <input title="rib_hog_n_bars" type="number" min="0" name="rib_hog_n_bars" value={input.rib_hog_n_bars ?? 0} onChange={handleInputChange} id="rib_hog_n_bars" />
                             </div>
+                            <div className="control-group">
+                                <label htmlFor="support_width">Support Width (m) — for Ld from support face</label>
+                                <input title="support_width" type="number" min="0" step="0.05" name="support_width" value={input.support_width ?? 0} onChange={handleInputChange} id="support_width" />
+                            </div>
                         </>
                     )}
                     {/* ─── Solid support zones (weight always; hogging section when continuous) ─── */}
@@ -417,6 +421,23 @@ export default function WaffleSlabAnalyzer() {
                                                 <td>{h.Ast_req.toFixed(0)} mm²</td>
                                                 <td>{h.n_bars}–Ø{h.bar_dia} = {h.Ast_provided.toFixed(0)} mm²</td>
                                                 <td><span className={`chip ${h.ok ? 'chip-safe' : 'chip-fail'}`}>{h.ok ? 'OK' : h.isDoubly ? 'Mu > Mu,lim' : !h.fits ? 'BARS DO NOT FIT' : 'ADD STEEL'}</span></td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            )}
+                            {results.hogging && (
+                                <table className="result-table compact">
+                                    <thead>
+                                        <tr><th>Top-bar curtailment (Cl. 26.2.3), from support ℄</th><th>Point of inflection</th><th>Group A (≥ ⅓, past POI)</th><th>Group B (rest)</th></tr>
+                                    </thead>
+                                    <tbody>
+                                        {([['Ribs ∥ X', results.hogging.x.curtailment], ['Ribs ∥ Y', results.hogging.y.curtailment]] as const).map(([label, c]) => (
+                                            <tr key={label}>
+                                                <td>{label} — L<sub>d</sub> = {c.Ld} mm</td>
+                                                <td>{c.runsThrough ? 'none (hogging whole span)' : `${c.x_POI} mm`}</td>
+                                                <td>{c.groupA.n} bar(s) × {c.groupA.L} mm<br /><small>{c.groupA.governs}</small></td>
+                                                <td>{c.groupB ? <>{c.groupB.n} bar(s) × {c.groupB.L} mm<br /><small>{c.groupB.governs}{c.groupB.check === 'a' ? ' — 26.2.3.2(a) V ≤ ⅔Vc' : c.groupB.check === 'c' ? ' — 26.2.3.2(c)' : ''}</small></> : '—'}</td>
                                             </tr>
                                         ))}
                                     </tbody>

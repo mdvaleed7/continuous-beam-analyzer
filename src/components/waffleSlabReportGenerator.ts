@@ -253,7 +253,25 @@ export async function generateWaffleSlabPDF(input: WaffleSlabInput, results: any
                                     <td>${statusChip(h.ok, h.ok ? 'OK' : h.isDoubly ? 'Mu &gt; Mu,lim' : !h.fits ? 'BARS DO NOT FIT' : 'ADD STEEL')}</td></tr>`).join('')}
                             </tbody>
                         </table>
-                        <p style="font-size:12px;color:#475569;">Min steel: ${r.hogging.solidZone ? 'slab rule Cl. 26.5.2.1' : 'beam rule 0.85&middot;b&middot;d/f<sub>y</sub>, Cl. 26.5.1.1(a)'}; bar clear spacing &ge; max(&Oslash;, 25 mm), Cl. 26.3.2. Curtail top bars per Cl. 26.2.3.</p>
+                        <p style="font-size:12px;color:#475569;">Min steel: ${r.hogging.solidZone ? 'slab rule Cl. 26.5.2.1' : 'beam rule 0.85&middot;b&middot;d/f<sub>y</sub>, Cl. 26.5.1.1(a)'}; bar clear spacing &ge; max(&Oslash;, 25 mm), Cl. 26.3.2.</p>
+                        <h4 style="margin:12px 0 4px;">Curtailment of top bars &mdash; IS 456 Cl. 26.2.3</h4>
+                        <p style="font-size:12px;color:#475569;">
+                            Hogging envelope = larger of (1) Table 12 support moment with the span fully loaded and (2) span under design dead load only with live load on
+                            alternate spans, support moment c<sub>D</sub>(w<sub>D</sub> + &frac12;w<sub>L</sub>)L&sup2; (Cl. 22.4.1). Lengths from the support centre-line, rounded up to 50 mm.
+                            Group A (&ge; &frac13; of the bars) extends past the point of inflection by max(d, 12&phi;, L<sub>n</sub>/16) (Cl. 26.2.3.4);
+                            group B extends past its theoretical cut-off by max(d, 12&phi;) (Cl. 26.2.3.1) and, when cut in the tension zone, satisfies Cl. 26.2.3.2 (a) V &le; &frac23;V<sub>c</sub>
+                            or (c) continuing bars &ge; 2&times; required and V &le; &frac34;V<sub>c</sub>, V<sub>c</sub> = &tau;<sub>c</sub>b<sub>w</sub>d (no links in ribs).
+                            All bars extend at least L<sub>d</sub> = &phi;&sigma;<sub>s</sub>/(4&tau;<sub>bd</sub>) (Cl. 26.2.1) beyond the support face (support width ${(r.hogging.x.curtailment.supportWidth / 1000).toFixed(2)} m).
+                        </p>
+                        <table class="result-table">
+                            <thead><tr><th>Direction</th><th>L<sub>d</sub> (mm)</th><th>POI (mm)</th><th>max(d, 12&phi;)</th><th>max(d, 12&phi;, L<sub>n</sub>/16)</th><th>Group A</th><th>Group B</th></tr></thead>
+                            <tbody>
+                                ${[['Ribs &parallel; X', r.hogging.x.curtailment], ['Ribs &parallel; Y', r.hogging.y.curtailment]].map(([lab, c]: any) => `
+                                <tr><td>${lab}</td><td>${c.Ld}</td><td>${c.runsThrough ? 'none &mdash; hogging over whole span' : c.x_POI}</td><td>${c.ext1}</td><td>${c.extPOI}</td>
+                                    <td>${c.groupA.n} &times; ${c.groupA.L} mm<br/><small>${c.groupA.governs}</small></td>
+                                    <td>${c.groupB ? `${c.groupB.n} &times; ${c.groupB.L} mm<br/><small>${c.groupB.governs}${c.groupB.check === 'a' || c.groupB.check === 'c' || c.groupB.check === 'none' ? ` &mdash; V = ${c.groupB.V.toFixed(2)} kN, V<sub>c</sub> = ${c.groupB.Vc.toFixed(2)} kN${c.groupB.check === 'a' ? ', 26.2.3.2(a)' : c.groupB.check === 'c' ? ', 26.2.3.2(c)' : ''}` : ''}</small>` : '&mdash;'}</td></tr>`).join('')}
+                            </tbody>
+                        </table>
                     </div>
                 </div>` : ''}
 
