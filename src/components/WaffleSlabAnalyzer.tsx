@@ -201,13 +201,20 @@ export default function WaffleSlabAnalyzer() {
                                 <label htmlFor="rib_hog_n_bars">No. of Hogging Bars per Rib (0 = auto)</label>
                                 <input title="rib_hog_n_bars" type="number" min="0" name="rib_hog_n_bars" value={input.rib_hog_n_bars ?? 0} onChange={handleInputChange} id="rib_hog_n_bars" />
                             </div>
-                            <div className="control-group">
-                                <label htmlFor="solid_support_zone">
-                                    <input title="solid_support_zone" type="checkbox" name="solid_support_zone" checked={input.solid_support_zone === true} onChange={handleInputChange} id="solid_support_zone" />
-                                    {' '}Solid zone at supports (hogging section = full rib spacing)
-                                </label>
-                            </div>
                         </>
+                    )}
+                    {/* ─── Solid support zones (weight always; hogging section when continuous) ─── */}
+                    <div className="control-group">
+                        <label htmlFor="solid_support_zone">
+                            <input title="solid_support_zone" type="checkbox" name="solid_support_zone" checked={input.solid_support_zone === true} onChange={handleInputChange} id="solid_support_zone" />
+                            {' '}Solid zone at supports (voids filled along all edges)
+                        </label>
+                    </div>
+                    {input.solid_support_zone === true && (
+                        <div className="control-group">
+                            <label htmlFor="solid_zone_width">Solid Zone Width from Support ℄ (m) — 0 = one rib spacing</label>
+                            <input title="solid_zone_width" type="number" min="0" step="0.05" name="solid_zone_width" value={input.solid_zone_width ?? 0} onChange={handleInputChange} id="solid_zone_width" />
+                        </div>
                     )}
                 </div>
 

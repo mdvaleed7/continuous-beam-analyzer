@@ -64,6 +64,10 @@ export interface WaffleSlabInput {
     // hogging section is then a solid slab strip of width = rib spacing
     // instead of the rib web bw.
     solid_support_zone?: boolean;
+    // Width of the solid zone (m), measured from the support centre-line into
+    // the span, along every edge of the panel. Used for its extra self-weight
+    // (voids filled). Defaults to one rib spacing when a solid zone is on.
+    solid_zone_width?: number;
     costParams?: CostParameters;
 }
 
@@ -110,9 +114,54 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
     const Mx_per_m = (qx * Lx * Lx) / 8; // kN.m / m
     const My_per_m = (qy * Ly * Ly) / 8;
 
+    // ─── Solid support zones — extra self-weight ────────────────────────────
+    // With a solid zone the voids are filled over a strip of width a along
+    // every panel edge. The extra weight (void fraction × 25 kN/m³) is carried
+    // by the ribs framing into that edge (the X-ribs carry the strips at the
+    // x-supports, the Y-ribs those at the y-supports; corners are counted in
+    // both — conservative), i.e. each rib gets a patch load Δq over length a
+    // at both ends. Effects of two symmetric end patches on a span L:
+    //   simply supported : midspan ΔM = Δq·a²/2,      support ΔV = Δq·a
+    //   fixed both ends  : support ΔM = Δq·a²(3L − 2a)/(6L)
+    //   propped (one end): support ΔM = Δq·a²(3L − 2a)/(4L), ΔV = Δq·a + ΔM/L
+    // The midspan ΔM is added to the simply supported sagging design and the
+    // support ΔM / ΔV to the Table 12 / 13 continuity actions. The stiffening
+    // of the solid zone is ignored in the deflection check (conservative).
+    const solidZoneOn = input.solid_support_zone === true;
+    const zoneWidthIn = input.solid_zone_width && input.solid_zone_width > 0
+        ? input.solid_zone_width : Math.max(spacing_x, spacing_y);
+    const a_x = solidZoneOn ? Math.min(zoneWidthIn, Lx / 2) : 0;   // m, along X-ribs
+    const a_y = solidZoneOn ? Math.min(zoneWidthIn, Ly / 2) : 0;   // m, along Y-ribs
+    const w_zone = V_v * 25;                                      // kN/m² extra (service) inside the zone
+    const dq_x_s = w_zone * spacing_y;                            // kN/m per X-rib (service)
+    const dq_y_s = w_zone * spacing_x;
+    const dq_x = 1.5 * dq_x_s, dq_y = 1.5 * dq_y_s;               // factored
+    const patchMid = (dq: number, a: number) => dq * a * a / 2;
+    const patchHog = (dq: number, a: number, L: number) =>
+        deflSupport === 'continuous' ? dq * a * a * (3 * L - 2 * a) / (6 * L)
+            : deflSupport === 'one_end' ? dq * a * a * (3 * L - 2 * a) / (4 * L)
+                : 0;
+    const dM_mid_x = patchMid(dq_x, a_x), dM_mid_y = patchMid(dq_y, a_y);
+    const dM_hog_x = patchHog(dq_x, a_x, Lx), dM_hog_y = patchHog(dq_y, a_y, Ly);
+    const dV_x = dq_x * a_x + (deflSupport === 'one_end' ? dM_hog_x / Lx : 0);
+    const dV_y = dq_y * a_y + (deflSupport === 'one_end' ? dM_hog_y / Ly : 0);
+    const zoneArea = solidZoneOn ? Lx * Ly - Math.max(0, Lx - 2 * a_x) * Math.max(0, Ly - 2 * a_y) : 0;
+    const solidZone_info = solidZoneOn ? {
+        width_x: Math.round(a_x * 1000) / 1000, width_y: Math.round(a_y * 1000) / 1000,
+        w_extra: Math.round(w_zone * 100) / 100,              // kN/m² inside the zone
+        area: Math.round(zoneArea * 100) / 100,               // m² per panel
+        extraWeight: Math.round(w_zone * zoneArea * 100) / 100, // kN per panel (service)
+        dq_x: Math.round(dq_x_s * 100) / 100, dq_y: Math.round(dq_y_s * 100) / 100, // kN/m per rib (service)
+        dM_mid_x: Math.round(dM_mid_x * 100) / 100, dM_mid_y: Math.round(dM_mid_y * 100) / 100,
+        dM_hog_x: Math.round(dM_hog_x * 100) / 100, dM_hog_y: Math.round(dM_hog_y * 100) / 100,
+        dV_x: Math.round(dV_x * 100) / 100, dV_y: Math.round(dV_y * 100) / 100,
+    } : null;
+
     // Moment per rib
-    const M_rib_x = Mx_per_m * spacing_y; // Rib parallel to X takes moment from spacing_y width
-    const M_rib_y = My_per_m * spacing_x;
+    const M_rib_x_udl = Mx_per_m * spacing_y; // Rib parallel to X takes moment from spacing_y width
+    const M_rib_y_udl = My_per_m * spacing_x;
+    const M_rib_x = M_rib_x_udl + dM_mid_x;
+    const M_rib_y = M_rib_y_udl + dM_mid_y;
 
     // Continuity of the ribs over the supports — IS 456 Table 12 / Table 13
     // coefficients (Cl. 22.5.1) applied to each rib direction as a continuous
@@ -137,13 +186,16 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
             : 0.5;
 
     // Shear per rib
-    const V_rib_x = (shearCoef * qx * Lx) * spacing_y;
-    const V_rib_y = (shearCoef * qy * Ly) * spacing_x;
+    const V_rib_x = (shearCoef * qx * Lx) * spacing_y + dV_x;
+    const V_rib_y = (shearCoef * qy * Ly) * spacing_x + dV_y;
 
     // Load per unit length on each rib (kN/m) — used to reduce the support
     // shear to the critical section (d_eff from face of support, IS 456 Cl. 40.1.1).
-    const w_rib_x = qx * spacing_y;   // kN/m on each X-parallel rib
-    const w_rib_y = qy * spacing_x;   // kN/m on each Y-parallel rib
+    // Inside a solid zone the extra patch load also acts over the length d,
+    // so it is included in the reduction (pro rata when the zone is narrower).
+    const d_m = d / 1000;
+    const w_rib_x = qx * spacing_y + (d_m > 0 ? dq_x * Math.min(a_x, d_m) / d_m : 0);  // kN/m on each X-parallel rib
+    const w_rib_y = qy * spacing_x + (d_m > 0 ? dq_y * Math.min(a_y, d_m) / d_m : 0);  // kN/m on each Y-parallel rib
 
     // Design Rib as T-Beam
     const grade = `M${fck}` as ConcreteGrade;
@@ -341,8 +393,8 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
         supportCondition: deflSupport,
         solidZone,
         coef: Math.round(hogCoef * 10000) / 10000,  // × q·L² (per m, before Rankine–Grashoff share)
-        x: designHog(hogCoef * qx * Lx * Lx * spacing_y, spacing_y),
-        y: designHog(hogCoef * qy * Ly * Ly * spacing_x, spacing_x),
+        x: designHog(hogCoef * qx * Lx * Lx * spacing_y + dM_hog_x, spacing_y),
+        y: designHog(hogCoef * qy * Ly * Ly * spacing_x + dM_hog_y, spacing_x),
     } : null;
     const hogging_ok = !hogging || (hogging.x.ok && hogging.y.ok);
 
@@ -409,7 +461,11 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
     // Service moments on the governing rib (unfactored, per rib)
     const govM_rib = govRib === ribX ? M_rib_x : M_rib_y; // kN·m (factored, per rib)
     const M_service_rib = govM_rib / 1.5; // unfactor
-    const M_perm_rib = M_service_rib * ((w_dead + w_finish) / (w_dead + w_live + w_finish || 1));
+    // The uniform part splits dead/live by load ratio; the solid-zone patch
+    // moment is entirely permanent.
+    const govM_patch = govRib === ribX ? dM_mid_x : dM_mid_y;
+    const M_perm_rib = ((govM_rib - govM_patch) / 1.5) * ((w_dead + w_finish) / (w_dead + w_live + w_finish || 1))
+        + govM_patch / 1.5;
     const deflection: DeflectionResult = tBeamDeflection(
         {
             L: govSpan * 1000,     // span (mm)
@@ -548,6 +604,8 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
         qx, qy,
         Mx_per_m, My_per_m,
         M_rib_x, M_rib_y,
+        M_rib_x_udl, M_rib_y_udl,
+        solidZone: solidZone_info,   // extra self-weight of the solid support zones (null when off)
         V_rib_x, V_rib_y,
         ribX,
         ribY,
@@ -755,7 +813,9 @@ export function optimizeWaffleSlab(
             const cellArea = spacing * spacing;
             const voidVol = (spacing - bw / 1000) * (spacing - bw / 1000) * ((D - Df) / 1000);
             const solidVol = cellArea * (D / 1000) - voidVol;
-            const concreteVol = solidVol * (input.Lx * input.Ly) / cellArea;
+            // + voids filled in the solid support zones
+            const zoneFill = result.solidZone ? result.solidZone.area * (voidVol / cellArea) : 0;
+            const concreteVol = solidVol * (input.Lx * input.Ly) / cellArea + zoneFill;
 
             // Steel weight: rib Ast × rib length × n_ribs + topping Ast × area
             // Use the PROVIDED rib steel (rib_bar_dia × rib_n_bars), not required
