@@ -198,6 +198,10 @@ export interface BarResult {
     Ast_provided: number;
     label: string;
     nBars?: number;
+    // false when no bar/spacing combination in the allowed set reaches Ast_req
+    // (the densest combination is returned so the caller can report it, but it
+    // is NOT adequate and the design must be flagged).
+    adequate?: boolean;
 }
 
 export interface ShearLinkResult {
@@ -337,6 +341,153 @@ export function computeRequiredDepthForBM(
     };
 }
 
+// ─── Shear enhancement factor k for solid slabs — IS 456 Cl. 40.2.1.1 ───────
+//  D ≥ 300 → 1.00, 275 → 1.05, 250 → 1.10, 225 → 1.15, 200 → 1.20,
+//  175 → 1.25, ≤ 150 → 1.30 (linear between the tabulated depths).
+export function slabDepthFactorK(D_mm: number): number {
+    if (D_mm <= 150) return 1.30;
+    if (D_mm >= 300) return 1.00;
+    return 1.30 - (D_mm - 150) * 0.30 / 150;
+}
+
+// ─── Moment of resistance of a singly reinforced section ──────────────────
+//  IS 456:2000 Annex G-1.1(b):  Mu = 0.87·fy·Ast·d·(1 − Ast·fy/(b·d·fck))
+//  valid while xu ≤ xu,max; beyond that the singly reinforced capacity is
+//  limited to Mu,lim (Annex G-1.1(c)).
+export function flexuralCapacity(
+    Ast_mm2: number, b_mm: number, d_mm: number, fck: number, fy: number,
+): number {
+    if (!(Ast_mm2 > 0) || !(d_mm > 0)) return 0;
+    const Mu = 0.87 * fy * Ast_mm2 * d_mm * (1 - (Ast_mm2 * fy) / (b_mm * d_mm * fck));
+    const Mu_lim = getMuLimCoeff(fy) * fck * b_mm * d_mm * d_mm;
+    return Math.max(0, Math.min(Mu, Mu_lim)) / 1e6;   // kN·m
+}
+
+// ─── Design stress–strain curve of reinforcement — IS 456 Fig. 23 ─────────
+//  Mild steel (fy ≤ 250): elastic–perfectly plastic at 0.87·fy (Fig. 23B).
+//  Cold-worked deformed bars (Fe415/Fe500/Fe550, Fig. 23A): linear up to
+//  0.8·fyd, then the inelastic strains below are added to fs/Es:
+//      fs/fyd : 0.80   0.85    0.90    0.95    0.975   1.00
+//      ε_inel : 0      0.0001  0.0003  0.0007  0.0010  0.0020
+//  Returns the stress (N/mm²) with the sign of the strain (compression +).
+const COLD_WORKED_POINTS: readonly [number, number][] = [
+    [0.80, 0.0], [0.85, 0.0001], [0.90, 0.0003], [0.95, 0.0007], [0.975, 0.0010], [1.0, 0.0020],
+];
+export function steelStressIS(strain: number, fy: number, Es: number = 200000): number {
+    const sign = strain < 0 ? -1 : 1;
+    const e = Math.abs(strain);
+    const fyd = 0.87 * fy;
+    if (fy <= 250) return sign * Math.min(e * Es, fyd);
+    if (e <= 0.80 * fyd / Es) return sign * e * Es;
+    let e0 = 0.80 * fyd / Es, f0 = 0.80 * fyd;
+    for (let i = 1; i < COLD_WORKED_POINTS.length; i++) {
+        const [r, inel] = COLD_WORKED_POINTS[i];
+        const e1 = r * fyd / Es + inel, f1 = r * fyd;
+        if (e <= e1) return sign * (f0 + (f1 - f0) * (e - e0) / (e1 - e0));
+        e0 = e1; f0 = f1;
+    }
+    return sign * fyd;
+}
+
+// ─── Combined axial compression + uniaxial bending — IS 456 Cl. 39 ─────────
+//  Strain-compatibility capacity of a rectangular section b × D with steel
+//  layers (area, depth from the more compressed face). Assumptions of
+//  Cl. 38.1 / 39.1: plane sections, concrete stress block of Fig. 21
+//  (0.446·fck plateau beyond 0.002 strain), no concrete tension, steel per
+//  Fig. 23. Neutral axis inside the section: εcu = 0.0035 at the extreme
+//  fibre. Neutral axis outside (Cl. 39.1 b): strain 0.002 at 3D/7 from the
+//  highly compressed face. Returns the moment capacity (kN·m) about the
+//  section centroid at the given factored axial load Pu (kN, compression +),
+//  or 0 when Pu exceeds the axial capacity. Displaced concrete at
+//  compression bars is deducted.
+export interface SteelLayer { As: number; y: number; }
+export function sectionMomentCapacityAtAxial(
+    b: number, D: number, layers: readonly SteelLayer[], fck: number, fy: number, Pu_kN: number,
+): number {
+    const fcd = 0.446 * fck;
+    const concreteStress = (eps: number) => {
+        if (eps <= 0) return 0;
+        const r = eps / 0.002;
+        return r >= 1 ? fcd : fcd * (2 * r - r * r);
+    };
+    const strainAt = (xu: number, y: number) => xu <= D
+        ? 0.0035 * (xu - y) / xu
+        : 0.002 * (xu - y) / (xu - 3 * D / 7);
+    // Concrete: the strain is linear in y, so between the break points
+    // ε = 0 and ε = 0.002 the stress is a polynomial of degree ≤ 2 in y and
+    // Simpson's rule integrates σ and σ·(D/2 − y) exactly on each piece.
+    const resultants = (xu: number) => {
+        let P = 0, M = 0;
+        const e0 = strainAt(xu, 0), g = (strainAt(xu, D) - e0) / D;
+        const cuts = [0, D];
+        for (const e of [0, 0.002]) {
+            const y = g !== 0 ? (e - e0) / g : -1;
+            if (y > 0 && y < D) cuts.push(y);
+        }
+        cuts.sort((a, c) => a - c);
+        for (let k = 0; k < cuts.length - 1; k++) {
+            const ya = cuts[k], yb = cuts[k + 1], ym = 0.5 * (ya + yb), h = yb - ya;
+            if (h <= 0) continue;
+            const fa = concreteStress(e0 + g * ya), fm = concreteStress(e0 + g * ym), fb = concreteStress(e0 + g * yb);
+            P += b * h / 6 * (fa + 4 * fm + fb);
+            M += b * h / 6 * (fa * (D / 2 - ya) + 4 * fm * (D / 2 - ym) + fb * (D / 2 - yb));
+        }
+        for (const L of layers) {
+            const eps = strainAt(xu, L.y);
+            const fs = steelStressIS(eps, fy) - (eps > 0 ? concreteStress(eps) : 0);
+            P += fs * L.As;
+            M += fs * L.As * (D / 2 - L.y);
+        }
+        return { P: P / 1e3, M: M / 1e6 };   // kN, kN·m
+    };
+    const Pu = Math.max(0, Pu_kN);
+    let lo = 1e-3 * D, hi = 50 * D;
+    if (resultants(hi).P < Pu) return 0;             // beyond axial capacity
+    if (resultants(lo).P > Pu) return resultants(lo).M;
+    for (let it = 0; it < 50; it++) {
+        const mid = 0.5 * (lo + hi);
+        if (resultants(mid).P < Pu) lo = mid; else hi = mid;
+    }
+    return Math.max(0, resultants(0.5 * (lo + hi)).M);
+}
+
+// ─── Surface crack width — IS 456:2000 Annex F ──────────────────────────────
+//  w = 3·acr·εm / (1 + 2(acr − cmin)/(h − x))                     (F-1)
+//  εm = ε1 − b(h − x)(a − x) / (3·Es·As·(d − x))                  (F-2)
+//  Elastic cracked section with Ec/2 (sustained load, F-2), crack width at
+//  the tension surface (a = h) midway between bars:
+//  acr = √((s/2)² + (c + φ/2)²) − φ/2. Annex F applies while fs ≤ 0.8·fy.
+//  Limits (Cl. 35.3.2): 0.3 mm in general, 0.2 mm where the face is in contact
+//  with soil / ground water or continuously exposed to moisture, 0.1 mm for
+//  'severe' exposure.
+export interface CrackWidthResult {
+    w: number;          // mm
+    fs: number;         // service steel stress (N/mm²)
+    fs_ok: boolean;     // fs ≤ 0.8·fy (Annex F precondition)
+    x: number;          // elastic neutral-axis depth (mm)
+    acr: number;        // mm
+    epsm: number;
+}
+export function crackWidthAnnexF(
+    Ms_kNm: number, b: number, h: number, d: number, As: number,
+    barDia: number, spacing: number, clearCover: number, fck: number, fy: number,
+    Es: number = 200000,
+): CrackWidthResult {
+    const Ms = Math.abs(Ms_kNm) * 1e6;
+    const m = Es / (0.5 * getEc(fck));
+    const x = (-m * As + Math.sqrt((m * As) ** 2 + 2 * b * m * As * d)) / b;
+    const fs = As > 0 ? Ms / (As * (d - x / 3)) : Infinity;
+    const eps_s = fs / Es;
+    const eps1 = eps_s * (h - x) / (d - x);
+    const epsm = Math.max(0, eps1 - (b * (h - x) * (h - x)) / (3 * Es * As * (d - x)));
+    const acr = Math.sqrt((spacing / 2) ** 2 + (clearCover + barDia / 2) ** 2) - barDia / 2;
+    const w = (3 * acr * epsm) / (1 + 2 * (acr - clearCover) / (h - x));
+    return {
+        w: Math.round(w * 1000) / 1000, fs: Math.round(fs * 10) / 10, fs_ok: fs <= 0.8 * fy,
+        x: Math.round(x * 10) / 10, acr: Math.round(acr * 10) / 10, epsm,
+    };
+}
+
 // ─── Bar selection for 1m strip ────────────────────────────────────────────
 
 export function selectBars(
@@ -359,14 +510,18 @@ export function selectBars(
         for (const sp of spacings.filter(s => s <= maxSpacing)) {
             const Ast = Abar * (b / sp);
             if (Ast >= Ast_req && (!best || Ast < best.Ast_provided)) {
-                best = { dia, spacing: sp, Ast_provided: Math.round(Ast), label: `${dia}mm @ ${sp} c/c`, nBars: Math.floor(b / sp) };
+                best = { dia, spacing: sp, Ast_provided: Math.round(Ast), label: `${dia}mm @ ${sp} c/c`, nBars: Math.floor(b / sp), adequate: true };
             }
         }
     }
     if (!best) {
-        const dia = barDias[barDias.length - 1], sp = spacings[0];
+        // Nothing in the allowed set reaches Ast_req: return the densest
+        // combination, flagged inadequate so the caller can mark the design
+        // REVISE instead of silently under-providing steel.
+        const dia = barDias[barDias.length - 1];
+        const sp = Math.min(...spacings.filter(s => s <= maxSpacing).concat(spacings[0]));
         const Ast = (Math.PI * dia * dia / 4) * (b / sp);
-        best = { dia, spacing: sp, Ast_provided: Math.round(Ast), label: `${dia}mm @ ${sp} c/c`, nBars: Math.floor(b / sp) };
+        best = { dia, spacing: sp, Ast_provided: Math.round(Ast), label: `${dia}mm @ ${sp} c/c`, nBars: Math.floor(b / sp), adequate: Ast >= Ast_req };
     }
     return best;
 }

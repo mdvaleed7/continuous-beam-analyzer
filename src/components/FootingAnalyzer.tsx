@@ -9,10 +9,12 @@ import { exportToJSON, timestampForFilename, copyToClipboard, fmt } from "../lib
 import { useToast } from './ToastProvider';
 import { logger } from "../lib/logger";
 
+// SBC entered per case: wind / earthquake cases carry the permitted 25 %
+// increase here (IS 1904); the engine does not add it again.
 const DEFAULT_LOAD_CASES: LoadCase[] = [
-    { label: 'LC1: DL+LL',  Fy: 1000, Mx: 0,    Mz: 0, sbc: 150 },
-    { label: 'LC2: DL+LL+WX', Fy: 900,  Mx: 1500, Mz: 0, sbc: 185 },
-    { label: 'LC3: DL+LL+WZ', Fy: 900,  Mx: 0,    Mz: 1500, sbc: 185 },
+    { label: 'LC1: DL+LL',  Fy: 1000, Mx: 0,   Mz: 0,   sbc: 150, loadFactor: 1.5 },
+    { label: 'LC2: DL+LL+WX', Fy: 900,  Mx: 150, Mz: 0,   sbc: 187.5, loadFactor: 1.2, allowPartialContact: true },
+    { label: 'LC3: DL+LL+WZ', Fy: 900,  Mx: 0,   Mz: 150, sbc: 187.5, loadFactor: 1.2, allowPartialContact: true },
 ];
 
 const DEFAULT_FOOTING: FootingConfig = {
@@ -82,6 +84,7 @@ export default function FootingAnalyzer() {
         grade: 'M25', fck: 25, steelGrade: 'Fe500', fy: 500, cover: 50,
         gammaFill: 18, gammaConcrete: 25,
         depthFill: 1.0,
+        sbcIsNet: false,
     });
 
     const handleGradeChange = useCallback((grade: string) => {
@@ -132,6 +135,7 @@ export default function FootingAnalyzer() {
                 gammaFill: sharedMaterial.gammaFill,
                 gammaConcrete: sharedMaterial.gammaConcrete,
                 depthFill: sharedMaterial.depthFill,
+                sbcIsNet: sharedMaterial.sbcIsNet,
             }));
             const res = analyzeFootings(configs);
             setResults(res);
@@ -164,6 +168,7 @@ export default function FootingAnalyzer() {
             gammaFill: sharedMaterial.gammaFill,
             gammaConcrete: sharedMaterial.gammaConcrete,
             depthFill: sharedMaterial.depthFill,
+            sbcIsNet: sharedMaterial.sbcIsNet,
         };
 
         const params = { minL, maxL, stepL, minB, maxB, stepB, minD, maxD, stepD };
@@ -291,8 +296,16 @@ export default function FootingAnalyzer() {
                             <input title="Value" type="number" min="0" max="5" step="0.1" value={sharedMaterial.depthFill}
                                 onChange={e => setSharedMaterial(prev => ({ ...prev, depthFill: +e.target.value }))} />
                         </div>
+                        <div className="control-group">
+                            <label>
+                                <input type="checkbox" checked={sharedMaterial.sbcIsNet} title="SBC is net"
+                                    onChange={e => setSharedMaterial(prev => ({ ...prev, sbcIsNet: e.target.checked }))} />
+                                {' '}SBC values are NET (compare p − γ·(fill + D))
+                            </label>
+                        </div>
                         <div className="info-note-inline">
-                            τ<sub>c</sub> computed inbuilt from IS 456 Table 19 (getTauC for grade {sharedMaterial.grade}). Footing self-weight computed from actual L×B×D geometry.
+                            τ<sub>c</sub> computed inbuilt from IS 456 Table 19 (getTauC for grade {sharedMaterial.grade}). Footing self-weight computed from actual geometry.
+                            Enter each load case&apos;s allowable SBC (incl. any wind/EQ increase); γ<sub>f</sub> per case (IS 456 Table 18).
                         </div>
                     </div>
                 </div>
@@ -337,7 +350,7 @@ export default function FootingAnalyzer() {
                                     className="btn-add-lc"
                                     onClick={() => {
                                         const n = (f.loadCases?.length ?? 0) + 1;
-                                        const newLC: LoadCase = { label: `LC${n}`, Fy: 0, Mx: 0, Mz: 0, sbc: f.sbc || 150 };
+                                        const newLC: LoadCase = { label: `LC${n}`, Fy: 0, Mx: 0, Mz: 0, sbc: f.sbc || 150, loadFactor: 1.5 };
                                         updateFooting(activeFooting, 'loadCases', [...(f.loadCases ?? []), newLC]);
                                     }}
                                     title="Add load case"
@@ -345,7 +358,7 @@ export default function FootingAnalyzer() {
                             </div>
                             <div className="load-cases-list">
                                 {(f.loadCases ?? []).map((lc, li) => (
-                                    <div key={li} className="load-case-row">
+                                    <div key={li} className="load-case-row load-case-row-7">
                                         <div className="lc-label-cell">
                                             <input
                                                 title="Load case label"
@@ -392,14 +405,28 @@ export default function FootingAnalyzer() {
                                                 newLCs[li] = { ...lc, sbc: +e.target.value };
                                                 updateFooting(activeFooting, 'loadCases', newLCs);
                                             }} />
+                                        <input title="γf — ULS load factor for this case" type="number" min="0.9" max="2" step="0.1" value={lc.loadFactor ?? 1.5}
+                                            onChange={e => {
+                                                const newLCs = [...(f.loadCases ?? [])];
+                                                newLCs[li] = { ...lc, loadFactor: +e.target.value };
+                                                updateFooting(activeFooting, 'loadCases', newLCs);
+                                            }} />
+                                        <input title="Allow loss of contact (wind / EQ cases only)" type="checkbox" checked={lc.allowPartialContact === true}
+                                            onChange={e => {
+                                                const newLCs = [...(f.loadCases ?? [])];
+                                                newLCs[li] = { ...lc, allowPartialContact: e.target.checked };
+                                                updateFooting(activeFooting, 'loadCases', newLCs);
+                                            }} />
                                     </div>
                                 ))}
-                                <div className="load-case-row lc-header-row">
+                                <div className="load-case-row load-case-row-7 lc-header-row">
                                     <span></span>
                                     <span>F<sub>y</sub> (kN)</span>
                                     <span>M<sub>x</sub> (kN·m)</span>
                                     <span>M<sub>z</sub> (kN·m)</span>
                                     <span>SBC (kN/m²)</span>
+                                    <span>γ<sub>f</sub></span>
+                                    <span>Uplift ok</span>
                                 </div>
                             </div>
                         </div>
@@ -596,6 +623,8 @@ export default function FootingAnalyzer() {
                                             <th>SBC (kN/m²)</th>
                                             <th>Self Wt (kN)</th>
                                             <th>p<sub>max</sub> (kN/m²)</th>
+                                            <th>Contact</th>
+                                            <th>γ<sub>f</sub></th>
                                             <th>τ<sub>v</sub> punch</th>
                                             <th>Status</th>
                                         </tr>
@@ -615,6 +644,8 @@ export default function FootingAnalyzer() {
                                                 <td>{fmt(lc.sbc, 0)}</td>
                                                 <td>{fmt(lc.selfWeight, 1)}</td>
                                                 <td>{fmt(lc.soilPressure.p_max, 1)}</td>
+                                                <td>{lc.soilPressure.overturning ? 'overturns' : `${Math.round(lc.soilPressure.contactFraction * 100)}%`}</td>
+                                                <td>{fmt(lc.loadFactor, 2)}</td>
                                                 <td>{fmt(lc.punchingShear.tau_v, 3)}</td>
                                                 <td><span className={`chip ${lc.overallStatus === 'SAFE' ? 'chip-safe' : 'chip-fail'}`}>{lc.overallStatus}</span></td>
                                             </tr>
@@ -624,7 +655,7 @@ export default function FootingAnalyzer() {
                                 <div className="ld-note">
                                     One-way τ<sub>c</sub> = {fmt(r.tau_c_inbuilt, 3)} N/mm² (IS 456 Table 19, grade {r.grade}, p<sub>t</sub>={fmt(r.pt_used, 2)}%);
                                     two-way (punching) τ<sub>c</sub> = {fmt(r.tau_c_punching, 3)} N/mm² (Cl. 31.6.3.1, k<sub>s</sub>·0.25√f<sub>ck</sub>).
-                                    Structural design (flexure &amp; shear) uses net factored pressure p<sub>u,net</sub> = {fmt(r.loadFactor,2)}·p<sub>col</sub> = {fmt(r.soilPressure.p_max_net_factored,1)} kN/m² (Cl. 34.2.4.1); SBC check uses service pressure.
+                                    Structural design (flexure &amp; shear) uses the net factored pressure p<sub>u,net</sub> = γ<sub>f</sub>·(p<sub>max</sub> − W/A) = {fmt(r.soilPressure.p_max_net_factored,1)} kN/m² (governing case); SBC check uses service pressure (no-tension distribution when the resultant leaves the kern).
                                     Footing self-weight = {fmt(r.selfWeight, 1)} kN (actual L×B×D), fill = {fmt(r.fillWeight, 1)} kN.
                                 </div>
                             </div>
@@ -644,6 +675,7 @@ export default function FootingAnalyzer() {
                                         <th>p_avg (kN/m²)</th>
                                         <th>e<sub>X</sub> (m)</th>
                                         <th>e<sub>Z</sub> (m)</th>
+                                        <th>Contact</th>
                                         <th>SBC Check</th>
                                     </tr>
                                 </thead>
@@ -657,6 +689,7 @@ export default function FootingAnalyzer() {
                                         <td>{r.soilPressure.p_avg}</td>
                                         <td>{r.soilPressure.eccentricityX}</td>
                                         <td>{r.soilPressure.eccentricityZ}</td>
+                                        <td>{r.soilPressure.overturning ? 'overturns' : `${Math.round(r.soilPressure.contactFraction * 100)}%`}</td>
                                         <td><span className={`chip ${r.soilPressure.sbcCheck ? 'chip-safe' : 'chip-fail'}`}>{r.soilPressure.sbcCheck ? 'OK' : 'FAIL'}</span></td>
                                     </tr>
                                 </tbody>
@@ -665,12 +698,13 @@ export default function FootingAnalyzer() {
 
                         {/* PUNCHING SHEAR */}
                         <div className="panel">
-                            <h3 className="panel-title"><span className="panel-icon">⚔️</span> Punching Shear (Two-Way) — <CodeRef clause="34.2.3">Cl. 34.2.3</CodeRef></h3>
+                            <h3 className="panel-title"><span className="panel-icon">⚔️</span> Punching Shear (Two-Way) — <CodeRef clause="34.2.4.1">Cl. 34.2.4.1(b)</CodeRef> / <CodeRef clause="31.6">Cl. 31.6</CodeRef></h3>
                             <table className="result-table">
                                 <thead>
                                     <tr>
                                         <th>Critical Perimeter (mm)</th>
                                         <th>Area Punched (m²)</th>
+                                        <th>d (mm)</th>
                                         <th>V<sub>u</sub> (kN)</th>
                                         <th>τ<sub>v</sub> (N/mm²)</th>
                                         <th>τ<sub>c</sub> (N/mm²)</th>
@@ -681,6 +715,7 @@ export default function FootingAnalyzer() {
                                     <tr>
                                         <td>{r.punchingShear.perimeter_u}</td>
                                         <td>{r.punchingShear.area_punched}</td>
+                                        <td>{r.punchingShear.d}</td>
                                         <td>{r.punchingShear.Vu}</td>
                                         <td>{r.punchingShear.tau_v}</td>
                                         <td>{r.punchingShear.tau_c}</td>
@@ -698,6 +733,7 @@ export default function FootingAnalyzer() {
                                     <tr>
                                         <th>Direction</th>
                                         <th>V<sub>u</sub> (kN)</th>
+                                        <th>d at section (mm)</th>
                                         <th>τ<sub>v</sub> (N/mm²)</th>
                                         <th>τ<sub>c</sub> (N/mm²)</th>
                                         <th>Status</th>
@@ -707,6 +743,7 @@ export default function FootingAnalyzer() {
                                     <tr>
                                         <td>X (parallel L)</td>
                                         <td>{r.oneWayShearX.Vu}</td>
+                                        <td>{r.oneWayShearX.d}</td>
                                         <td>{r.oneWayShearX.tau_v}</td>
                                         <td>{r.oneWayShearX.tau_c}</td>
                                         <td><span className={`chip ${r.oneWayShearX.status === 'OK' ? 'chip-safe' : 'chip-fail'}`}>{r.oneWayShearX.status}</span></td>
@@ -714,6 +751,7 @@ export default function FootingAnalyzer() {
                                     <tr>
                                         <td>Z (parallel B)</td>
                                         <td>{r.oneWayShearZ.Vu}</td>
+                                        <td>{r.oneWayShearZ.d}</td>
                                         <td>{r.oneWayShearZ.tau_v}</td>
                                         <td>{r.oneWayShearZ.tau_c}</td>
                                         <td><span className={`chip ${r.oneWayShearZ.status === 'OK' ? 'chip-safe' : 'chip-fail'}`}>{r.oneWayShearZ.status}</span></td>
@@ -735,6 +773,7 @@ export default function FootingAnalyzer() {
                                         <th>A<sub>st,min</sub> (mm²/m)</th>
                                         <th>p<sub>t</sub> (%)</th>
                                         <th>Governs</th>
+                                        <th>Bars</th>
                                         <th>Status</th>
                                     </tr>
                                 </thead>
@@ -747,6 +786,7 @@ export default function FootingAnalyzer() {
                                         <td>{r.flexureX.Ast_min}</td>
                                         <td>{r.flexureX.pt}</td>
                                         <td>{r.flexureX.governs}</td>
+                                        <td>{r.flexureX.bars?.label ?? '—'}</td>
                                         <td><span className={`chip ${r.flexureX.status === 'SAFE' ? 'chip-safe' : 'chip-fail'}`}>{r.flexureX.status}</span></td>
                                     </tr>
                                     <tr>
@@ -757,10 +797,54 @@ export default function FootingAnalyzer() {
                                         <td>{r.flexureZ.Ast_min}</td>
                                         <td>{r.flexureZ.pt}</td>
                                         <td>{r.flexureZ.governs}</td>
+                                        <td>{r.flexureZ.bars?.label ?? '—'}</td>
                                         <td><span className={`chip ${r.flexureZ.status === 'SAFE' ? 'chip-safe' : 'chip-fail'}`}>{r.flexureZ.status}</span></td>
                                     </tr>
                                 </tbody>
                             </table>
+                        </div>
+
+                        {r.centralBand && (
+                            <div className="panel">
+                                <h3 className="panel-title"><span className="panel-icon">🎯</span> Central Band — <CodeRef clause="34.3.1">Cl. 34.3.1(b)</CodeRef></h3>
+                                <table className="result-table">
+                                    <tbody>
+                                        <tr><td>β = long/short</td><td>{r.centralBand.beta}</td></tr>
+                                        <tr><td>Short-direction bars (along {r.centralBand.shortDirection})</td><td>A<sub>s,total</sub> = {r.centralBand.As_total} mm²</td></tr>
+                                        <tr><td>Central band ({r.centralBand.bandWidth} m) = 2/(β+1)·A<sub>s</sub></td><td>{r.centralBand.As_band} mm² → {r.centralBand.band_per_m} mm²/m → {r.centralBand.bandBars.label}</td></tr>
+                                        <tr><td>Outer portions</td><td>{r.centralBand.outer_per_m} mm²/m → {r.centralBand.outerBars?.label ?? '—'}</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+
+                        <div className="panel">
+                            <h3 className="panel-title"><span className="panel-icon">🧱</span> Detailing &amp; Bearing Checks</h3>
+                            <table className="result-table">
+                                <thead><tr><th>Check</th><th>Detail</th><th>Status</th></tr></thead>
+                                <tbody>
+                                    <tr>
+                                        <td>Edge thickness ≥ 150 mm (<CodeRef clause="34.1.2">Cl. 34.1.2</CodeRef>)</td>
+                                        <td>{r.edgeThickness.value} mm</td>
+                                        <td><span className={`chip ${r.edgeThickness.ok ? 'chip-safe' : 'chip-fail'}`}>{r.edgeThickness.ok ? 'OK' : 'REVISE'}</span></td>
+                                    </tr>
+                                    {r.bearing.map(b => (
+                                        <tr key={b.location}>
+                                            <td>Bearing: {b.location} (<CodeRef clause="34.4">Cl. 34.4</CodeRef>)</td>
+                                            <td>P<sub>u</sub> = {b.Pu} kN vs {b.capacity} kN; dowels ≥ {b.As_dowel_req} mm²</td>
+                                            <td><span className={`chip ${b.ok ? 'chip-safe' : 'chip-warn'}`}>{b.ok ? 'OK' : 'DOWELS'}</span></td>
+                                        </tr>
+                                    ))}
+                                    {r.developmentLength.map(dl => (
+                                        <tr key={dl.direction}>
+                                            <td>Development length, {dl.direction} bars (<CodeRef clause="34.2.4.3">Cl. 34.2.4.3</CodeRef>)</td>
+                                            <td>L<sub>d</sub> = {dl.Ld} mm; straight {dl.available} mm{dl.anchorage === 'bend' ? `; 90° bend + ${dl.leg_req} mm leg` : ''}</td>
+                                            <td><span className={`chip ${dl.anchorage === 'insufficient' ? 'chip-fail' : 'chip-safe'}`}>{dl.anchorage.toUpperCase()}</span></td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                            {r.messages.map(m => <p key={m} className="ld-note">⚠ {m}</p>)}
                         </div>
 
                         {/* SLOPE CHECK (slope footing only) */}

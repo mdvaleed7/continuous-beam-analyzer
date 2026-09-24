@@ -16,6 +16,7 @@ import {
     getTauC,
     computeRequiredDepthForBM,
     flexuralDesign,
+    flexuralCapacity,
     selectBars,
     computeCostIndex,
     annexCDeflection,
@@ -66,6 +67,10 @@ export interface SlabConfig {
     slabType?: SlabTypeInput;
     ageOfLoading?: string;  // '7' | '28' | '365'
     camber?: number;        // explicit upward camber (mm), used by optimizer
+    // Fixed main tension bars (bottom short-span; top for a cantilever) —
+    // used by optimizeSlabExtended. Checked for Ast ≥ Ast,req and spacing.
+    mainBarDia?: number;    // mm
+    mainBarSpacing?: number; // mm
     costParams?: CostParameters;
 }
 
@@ -83,7 +88,7 @@ interface ShearDirResult {
     allowable: number;
     status: DesignStatus;
     d: number;
-    beta?: number | null;  // IS 456 Table 25 shear coefficient
+    beta?: number | null;  // shear coefficient (BS 8110-1 Table 3.15 two-way; IS 456 Table 13 one-way)
     d_eff?: number;        // effective depth at critical section
     Vu_critical?: number;  // shear at critical section (d from face)
 }
@@ -156,6 +161,7 @@ export interface SlabAnalysisResult {
     bars_y_bot: BarSelection;
     bars_x_top: BarSelection;
     bars_y_top: BarSelection;
+    flexUtilization: number;   // max Mu / Mu,R with the provided bars (all four zones)
     isDistributionSteel_y: boolean;
     requiresTorsionSteel: boolean;
     torsionSteelBothFaces_per_m: number | null;
@@ -187,7 +193,7 @@ const TABLE_26_AX_POS: readonly (readonly number[])[] = [
     [0.028, 0.032, 0.036, 0.039, 0.041, 0.044, 0.048, 0.052], // Case 2: One short edge disc.
     [0.028, 0.033, 0.039, 0.044, 0.047, 0.051, 0.059, 0.065], // Case 3: One long edge disc.
     [0.035, 0.040, 0.045, 0.049, 0.053, 0.056, 0.063, 0.069], // Case 4: Two adjacent edges disc.
-    [0.035, 0.037, 0.040, 0.043, 0.045, 0.045, 0.049, 0.052], // Case 5: Two short edges disc.
+    [0.035, 0.037, 0.040, 0.043, 0.044, 0.045, 0.049, 0.052], // Case 5: Two short edges disc.
     [0.035, 0.043, 0.051, 0.057, 0.063, 0.068, 0.080, 0.088], // Case 6: Two long edges disc.
     [0.043, 0.048, 0.053, 0.057, 0.060, 0.064, 0.069, 0.073], // Case 7: Three edges disc. (1 long cont.)
     [0.043, 0.051, 0.059, 0.065, 0.071, 0.076, 0.087, 0.096], // Case 8: Three edges disc. (1 short cont.)
@@ -224,8 +230,12 @@ const TABLE_26_AY_NEG: readonly (number | null)[] = [
 ];
 
 // ═══════════════════════════════════════════════════════════════
-//  IS 456 TABLE 25 — Shear Force Coefficients (βx, βy)
-//  Vx = βx × w × lx  and  Vy = βy × w × lx
+//  SHEAR FORCE COEFFICIENTS (βvx, βvy) — BS 8110-1:1997 Table 3.15
+//  IS 456:2000 has no shear-coefficient table for two-way slabs (loads on
+//  the supporting beams follow Cl. 24.5 / Fig. 7); these coefficients belong
+//  to the same CP 110 / BS 8110 moment method as IS 456 Table 26 and are used
+//  here as a borrowed reference, flagged as such in the report.
+//  Vx = βvx × w × lx  and  Vy = βvy × w × lx
 //  Same 9 boundary cases, same Ly/Lx columns as Table 26
 // ═══════════════════════════════════════════════════════════════
 
@@ -362,8 +372,8 @@ interface ShearConfig {
     fck: number;
     loadFactor?: number;
     slabType: SlabType;
-    boundaryCase?: number;      // IS 456 Table 25 case 1-9 (two-way)
-    supportCondition?: SupportCondition;  // IS 456 Table 22 (one-way)
+    boundaryCase?: number;      // Table 26 case 1-9 (two-way; shear from BS 8110-1 Table 3.15)
+    supportCondition?: SupportCondition;  // one-way: IS 456 Table 13 (Cl. 22.5.2)
 }
 
 interface ShearDesign {
@@ -392,7 +402,7 @@ function shearCheck(config: ShearConfig, design: ShearDesign): ShearResult {
     let beta_y: number | null = null;
 
     if (isTwoWay && boundaryCase && boundaryCase >= 1 && boundaryCase <= 9) {
-        // IS 456 Table 25: Vx = βx × w × lx, Vy = βy × w × lx
+        // BS 8110-1:1997 Table 3.15: Vx = βvx × w × lx, Vy = βvy × w × lx
         // Use maximum β from continuous and discontinuous edges
         const bx_cont = interpolateCoeff(boundaryCase, lyLx, TABLE_25_BX_CONT);
         const bx_disc = interpolateCoeff(boundaryCase, lyLx, TABLE_25_BX_DISC);
@@ -414,14 +424,14 @@ function shearCheck(config: ShearConfig, design: ShearDesign): ShearResult {
         Vu_x = wTotal * Lx_m;
         Vu_y = 0;
     } else {
-        // One-way slab — IS 456 Table 22 shear force coefficients
+        // One-way slab — IS 456 Table 13 shear force coefficients (Cl. 22.5.2)
         // Governing (maximum) shear coefficient at the critical support:
         //   Simply supported: 0.5 (standard statics)
         //   One-end continuous: 0.60 (at the interior support face)
         //   Both-ends continuous: 0.60 (at support closer to end span)
         const sc = config.supportCondition;
         if (sc === 'continuous' || sc === 'one_end') {
-            beta_x = 0.60;  // IS 456 Table 22: governing coefficient
+            beta_x = 0.60;  // IS 456 Table 13: support next to the end support
         } else {
             beta_x = 0.50;  // Simply supported
         }
@@ -540,31 +550,31 @@ function getSlabType(Lx: number, Ly: number, slabType: SlabType | null): SlabTyp
 // ═══════════════════════════════════════════════════════════════
 //  SUPPORT CONDITION for deflection
 // ═══════════════════════════════════════════════════════════════
-// CORRECTION (slabEngine.ts): getSupportCondForDeflection — Case 6 was wrongly
-// mapped to 'simply'.  IS 456 Table 26 Case 6 = "two long edges discontinuous
-// (both short edges continuous)".  In the short-span direction (Lx — the
-// deflection-governing direction), both ends are supported by continuous beams,
-// so the correct support condition is 'continuous'.  Using 'simply' would have
-// applied α = 5/48 (instead of 1/48) and limitRatio = L/20 (instead of L/26),
-// overpredicting deflection by a factor of 5 and being needlessly conservative
-// on the span/depth check.
-//
-// Case 7: Three edges disc. (1 long cont.) — deflection in short span where
-// one end is discontinuous and the other is continuous → 'one_end'.
-// Case 8: Three edges disc. (1 short cont.) — deflection in short span where
-// both ends are discontinuous → 'simply'.
+// Support condition of the SHORT span (lx, the deflection-governing
+// direction) for each IS 456 Table 26 case. The short span runs between the
+// two LONG edges, so only the long edges decide it — consistent with the
+// table itself, which gives a short-span support coefficient αx− only where
+// a long edge is continuous:
+//   Case 1 interior, 2 one short edge disc., 5 two short edges disc.
+//          → both long edges continuous       → 'continuous'
+//   Case 3 one long edge disc., 4 two adjacent edges disc.,
+//        7 three edges disc. (one long edge cont.)
+//          → one long edge continuous         → 'one_end'
+//   Case 6 two long edges disc., 8 three edges disc. (one short edge cont.),
+//        9 four edges disc.
+//          → both long edges discontinuous    → 'simply'  (αx− absent)
+// (Cases 2, 5 and 6 were previously mapped from the short edges.)
 function getSupportCondForDeflection(boundaryCase: number): SupportCondition {
     switch (boundaryCase) {
         case 1: return 'continuous';
-        case 2: return 'one_end';   // one short edge disc.  → 1 SS, 1 cont. end (short span)
-        case 3: return 'one_end';   // one long edge disc.   → 1 SS, 1 cont. end (short span)
-        case 4: return 'one_end';   // two adjacent edges disc. → conservative one_end
-        case 5: return 'simply';    // two short edges disc. → both ends SS in short span
-        case 6: return 'continuous';// BUG-FIX: two long edges disc. → both short edges
-                                    // are continuous → 'continuous' in short span direction
-        case 7: return 'one_end';   // three edges disc. (1 long cont.) → one_end in short span
-        case 8: return 'simply';    // three edges disc. (1 short cont.) → simply in short span
-        case 9: return 'simply';    // all four edges disc.
+        case 2: return 'continuous';
+        case 3: return 'one_end';
+        case 4: return 'one_end';
+        case 5: return 'continuous';
+        case 6: return 'simply';
+        case 7: return 'one_end';
+        case 8: return 'simply';
+        case 9: return 'simply';
         default: return 'continuous';
     }
 }
@@ -645,27 +655,69 @@ export function analyzeSlab(config: SlabConfig): SlabAnalysisResult {
         My_neg = ay_neg !== null ? ay_neg * wFactored * Math.pow(Lx_m, 2) : 0;
     }
 
-    const barDia = 10;
-    const dx = D - cover - barDia / 2;
-    const dy = D - cover - barDia - barDia / 2;
-
-    const flex_x_bot = flexuralDesign(Mx_pos, b, dx, fck, fy, D);
-    const flex_y_bot = flexuralDesign(My_pos, b, dy, fck, fy, D);
-    const flex_x_top = flexuralDesign(Mx_neg, b, dx, fck, fy, D);
-    const flex_y_top = flexuralDesign(My_neg, b, dy, fck, fy, D);
-
+    // Flexural design at the effective depth of the bars actually provided:
+    // x bars in the outer layer, y bars inside them (bottom and top mats).
+    // First pass with 10 mm bars, then redesigned until the diameters settle.
+    // Optional `mainBarDia` / `mainBarSpacing` fix the main tension layer
+    // (bottom x, or top x for a cantilever) — used by optimizeSlabExtended.
     const isDistributionSteel_y = actualSlabType === 'one-way';
-    const bars_x_bot = selectBars(flex_x_bot.Ast_req, undefined, undefined, 1000, dx);
-    const bars_y_bot = selectBars(flex_y_bot.Ast_req, undefined, undefined, 1000, dy, isDistributionSteel_y);
-    const bars_x_top = selectBars(flex_x_top.Ast_req, undefined, undefined, 1000, dx);
-    const bars_y_top = selectBars(flex_y_top.Ast_req, undefined, undefined, 1000, dy, isDistributionSteel_y);
+    const fixedMain = config.mainBarDia && config.mainBarSpacing
+        ? { dia: config.mainBarDia, spacing: config.mainBarSpacing } : null;
+    const mainIsTop = actualSlabType === 'cantilever';
+    const fixedBars = (Ast_req: number, d: number): BarSelection => {
+        const { dia, spacing } = fixedMain!;
+        const Ast = Math.PI * dia * dia / 4 * b / spacing;
+        return {
+            dia, spacing, Ast_provided: Math.round(Ast), label: `${dia}mm @ ${spacing} c/c`,
+            nBars: Math.floor(b / spacing),
+            adequate: Ast >= Ast_req && spacing <= Math.min(3 * d, 300),   // Cl. 26.3.3 (b)(1)
+        };
+    };
+    const designAt = (dxb: number, dyb: number, dxt: number, dyt: number) => {
+        const fxb = flexuralDesign(Mx_pos, b, dxb, fck, fy, D);
+        const fyb = flexuralDesign(My_pos, b, dyb, fck, fy, D);
+        const fxt = flexuralDesign(Mx_neg, b, dxt, fck, fy, D);
+        const fyt = flexuralDesign(My_neg, b, dyt, fck, fy, D);
+        return {
+            flex_x_bot: fxb, flex_y_bot: fyb, flex_x_top: fxt, flex_y_top: fyt,
+            bars_x_bot: fixedMain && !mainIsTop ? fixedBars(fxb.Ast_req, dxb) : selectBars(fxb.Ast_req, undefined, undefined, 1000, dxb),
+            bars_y_bot: selectBars(fyb.Ast_req, undefined, undefined, 1000, dyb, isDistributionSteel_y),
+            bars_x_top: fixedMain && mainIsTop ? fixedBars(fxt.Ast_req, dxt) : selectBars(fxt.Ast_req, undefined, undefined, 1000, dxt),
+            bars_y_top: selectBars(fyt.Ast_req, undefined, undefined, 1000, dyt, isDistributionSteel_y),
+        };
+    };
+    const depthsOf = (z: ReturnType<typeof designAt>) => [
+        D - cover - z.bars_x_bot.dia / 2,
+        D - cover - z.bars_x_bot.dia - z.bars_y_bot.dia / 2,
+        D - cover - z.bars_x_top.dia / 2,
+        D - cover - z.bars_x_top.dia - z.bars_y_top.dia / 2,
+    ];
+    let depths = [D - cover - 5, D - cover - 15, D - cover - 5, D - cover - 15];
+    let dsg = designAt(depths[0], depths[1], depths[2], depths[3]);
+    for (let it = 0; it < 3; it++) {
+        const next = depthsOf(dsg);
+        if (next.every((v, k) => Math.abs(v - depths[k]) < 1e-9)) break;
+        depths = next;
+        dsg = designAt(depths[0], depths[1], depths[2], depths[3]);
+    }
+    const { flex_x_bot, flex_y_bot, flex_x_top, flex_y_top, bars_x_bot, bars_y_bot, bars_x_top, bars_y_top } = dsg;
+    const [dxb, dyb, dxt, dyt] = depthsOf(dsg);
+
+    // Flexural utilization with the PROVIDED steel at its actual depth:
+    // Mu / Mu,R, Mu,R = 0.87·fy·Ast·d·(1 − Ast·fy/(b·d·fck)) ≤ Mu,lim (Annex G-1.1 b)
+    const utilOf = (Mu: number, bars: BarSelection, d: number) =>
+        Mu > 1e-9 ? Mu / Math.max(1e-9, flexuralCapacity(bars.Ast_provided, b, d, fck, fy)) : 0;
+    const flexUtilization = Math.max(
+        utilOf(Mx_pos, bars_x_bot, dxb), utilOf(My_pos, bars_y_bot, dyb),
+        utilOf(Math.abs(Mx_neg), bars_x_top, dxt), utilOf(Math.abs(My_neg), bars_y_top, dyt),
+    );
 
     const requiresTorsionSteel = actualSlabType === 'two-way' && boundaryCase !== 1;
     const torsionSteelBothFaces_per_m = requiresTorsionSteel ? 0.75 * flex_x_bot.Ast_req : null;
     const torsionStripWidth_mm = requiresTorsionSteel ? Math.round((Lx_m * 1000) / 5 / 10) * 10 : null;
 
-    const dx_actual = D - cover - bars_x_bot.dia / 2;
-    const dy_actual = D - cover - bars_x_bot.dia - bars_y_bot.dia / 2;
+    const dx_actual = dxb;
+    const dy_actual = dyb;
 
     // Resolve the effective support condition for span/depth + deflection checks.
     // Priority: explicit supportCondition (one-way) > cantilever > derived from boundaryCase.
@@ -751,7 +803,13 @@ export function analyzeSlab(config: SlabConfig): SlabAnalysisResult {
         },
     );
 
-    const steelStatus: DesignStatus = [flex_x_bot, flex_y_bot, flex_x_top, flex_y_top].every(f => !f.isDoubly) ? 'SAFE' : 'REVISE';
+    // Steel: singly reinforced (Cl. 38.1), Ast ≤ 0.04·b·D (Cl. 26.5.1.1 limit),
+    // bars able to supply Ast within the spacing limits, and capacity ≥ Mu.
+    const steelStatus: DesignStatus =
+        [flex_x_bot, flex_y_bot, flex_x_top, flex_y_top].every(f => !f.isDoubly && f.governs !== 'maximum')
+        && [bars_x_bot, bars_y_bot, bars_x_top, bars_y_top].every(bs => bs.adequate !== false)
+        && flexUtilization <= 1 + 1e-6
+            ? 'SAFE' : 'REVISE';
     const deflStatus: 'OK' | 'FAIL' = deflection.status_total === 'OK' && deflection.status_post === 'OK' ? 'OK' : 'FAIL';
     const shearStatus: 'OK' | 'FAIL' = shear.shortDir.status === 'OK' && shear.longDir.status === 'OK' ? 'OK' : 'FAIL';
 
@@ -782,6 +840,7 @@ export function analyzeSlab(config: SlabConfig): SlabAnalysisResult {
 
         flex_x_bot, flex_y_bot, flex_x_top, flex_y_top,
         bars_x_bot, bars_y_bot, bars_x_top, bars_y_top,
+        flexUtilization: Math.round(flexUtilization * 1000) / 1000,
         isDistributionSteel_y,
         requiresTorsionSteel,
         torsionSteelBothFaces_per_m,
@@ -870,7 +929,8 @@ interface OptimumSlabDesign {
         steel_INR:      number;
         formwork_INR:   number;
     };
-    steelWeight_gross:  number;
+    steelWeight_net:    number;   // kg per panel (provided bars + corner torsion steel)
+    steelWeight_gross:  number;   // kg per panel incl. wastage factor
     concreteVol:        number;
     utilizationRatio: {
         flexure:        number;
@@ -934,6 +994,44 @@ function computeTorsionSteelWeight(result: SlabAnalysisResult): number {
     return (total_area_mm2 * length_m * 7850) / 1e6;
 }
 
+// Quantities and cost of an analysed panel. Steel = provided bars (mm²/m)
+// over the panel area + corner torsion steel; the wastage factor is applied
+// ONCE, inside computeCost (a separate lap factor used to be applied on top
+// of it). Utilizations: flexure = max Mu / Mu,R with the provided bars,
+// deflection = a_total / limit, shear = τv / (k·τc).
+function slabDesignRecord(result: SlabAnalysisResult, D: number, costParams: CostParameters) {
+    const slabArea_m2 = result.Lx * result.Ly;
+    const concreteVol = (D / 1000) * slabArea_m2;
+    const barSteel_kg = ((result.bars_x_bot.Ast_provided + result.bars_x_top.Ast_provided +
+        result.bars_y_bot.Ast_provided + result.bars_y_top.Ast_provided) * slabArea_m2 * 7850) / 1e6;
+    const torsionSteel_kg = result.requiresTorsionSteel ? computeTorsionSteelWeight(result) : 0;
+    const steelWeight_net = barSteel_kg + torsionSteel_kg;
+    const fw = costParams.wastage_factor ?? 1.07;
+    const costTotal_INR = computeCost(concreteVol, steelWeight_net, slabArea_m2, costParams);
+    const concrete_INR = concreteVol * (costParams.concreteCost_per_m3 ?? 6500);
+    const steel_INR = steelWeight_net * (costParams.steelCost_per_kg ?? 82) * fw;
+    const formwork_INR = slabArea_m2 * (costParams.formworkCost_per_m2 ?? 350);
+    const shearUtilization = Math.max(
+        result.shear.shortDir.tau_v / (result.shear.shortDir.k * result.shear.shortDir.tau_c),
+        result.shear.longDir.tau_v / (result.shear.longDir.k * result.shear.longDir.tau_c),
+    );
+    return {
+        thickness: D,
+        camber: result.deflection.camber ?? 0,
+        costTotal_INR,
+        costBreakdown: { concrete_INR, steel_INR, formwork_INR },
+        steelWeight_net,
+        steelWeight_gross: steelWeight_net * fw,
+        concreteVol,
+        utilizationRatio: {
+            flexure: result.flexUtilization,
+            deflection: result.deflection.a_total / result.deflection.limit_total,
+            shear: shearUtilization,
+        },
+        result,
+    };
+}
+
 export function optimizeSlab(config: SlabConfig, thicknesses: number[], costRatio: number = 90, onProgress?: SlabProgressCallback): SlabOptimizeResult {
     const results: OptimumSlabDesign[] = [];
     let done = 0;
@@ -961,39 +1059,7 @@ export function optimizeSlab(config: SlabConfig, thicknesses: number[], costRati
             }
 
             if (result.overallStatus === 'SAFE') {
-                const concreteVol = (D / 1000) * result.Lx * result.Ly;
-                const LAP_WASTAGE_FACTOR = 1.08;
-                const steelWeight_net = ((result.bars_x_bot.Ast_provided + result.bars_x_top.Ast_provided +
-                    result.bars_y_bot.Ast_provided + result.bars_y_top.Ast_provided) *
-                    result.Lx * result.Ly * 7850) / 1e6;
-                const steelWeight_gross = steelWeight_net * LAP_WASTAGE_FACTOR;
-                const torsionSteel_kg = result.requiresTorsionSteel ? computeTorsionSteelWeight(result) : 0;
-                const totalSteelWeight = steelWeight_gross + torsionSteel_kg;
-                const slabArea_m2 = result.Lx * result.Ly;
-                const costTotal_INR = computeCost(concreteVol, totalSteelWeight, slabArea_m2, costParams);
-                
-                const concrete_INR = concreteVol * (costParams.concreteCost_per_m3 ?? 6500);
-                const steel_INR = totalSteelWeight * (costParams.steelCost_per_kg ?? 82) * (costParams.wastage_factor ?? 1.07);
-                const formwork_INR = slabArea_m2 * (costParams.formworkCost_per_m2 ?? 350);
-
-                const maxMu = Math.max(result.Mx_pos, result.My_pos, Math.abs(result.Mx_neg), Math.abs(result.My_neg));
-                const flexureUtilization = maxMu / result.flexDepthCheck.Mu_max;
-                const deflectionUtilization = result.deflection.a_total / result.deflection.limit_total;
-                const shearUtilization = Math.max(
-                    result.shear.shortDir.tau_v / (result.shear.shortDir.k * result.shear.shortDir.tau_c),
-                    result.shear.longDir.tau_v / (result.shear.longDir.k * result.shear.longDir.tau_c)
-                );
-
-                results.push({
-                    thickness: D,
-                    camber: result.deflection.camber ?? 0,
-                    costTotal_INR,
-                    costBreakdown: { concrete_INR, steel_INR, formwork_INR },
-                    steelWeight_gross: totalSteelWeight,
-                    concreteVol,
-                    utilizationRatio: { flexure: flexureUtilization, deflection: deflectionUtilization, shear: shearUtilization },
-                    result,
-                });
+                results.push(slabDesignRecord(result, D, costParams));
             }
         } catch (e) {
             // skip invalid thickness
@@ -1040,10 +1106,12 @@ export function optimizeSlab(config: SlabConfig, thicknesses: number[], costRati
 //    • Bar diameter      ([10, 12, 16] by default)
 //    • Bar spacing       ([100, 125, 150, 175, 200, 250] by default)
 //
-//  For each combination, it runs `analyzeSlab` and computes the actual
-//  cost using the PROVIDED steel (not the required). The result includes
-//  the selected bar dia + spacing so the engineer can see exactly what
-//  reinforcement layout was chosen.
+//  For each combination, it runs `analyzeSlab` with the swept bar fixed as
+//  the main tension layer (`mainBarDia` / `mainBarSpacing`; the engine
+//  rejects it when Ast < Ast,req or the spacing limit is exceeded) and
+//  computes the cost from the PROVIDED steel. Previously the swept values
+//  were only a pre-filter — the engine re-selected its own bars, so every
+//  (dia, spacing) pair at one thickness gave the same design.
 //
 //  IS 456 cl. 26.3.3 bar spacing constraints are enforced as hard
 //  feasibility checks (max 3d or 300 mm for main bars; max bar dia D/8).
@@ -1094,7 +1162,9 @@ export function optimizeSlabExtended(
                     // Min spacing: barDia + 5 mm (concrete flow)
                     if (spacing < dia + 5) continue;
 
-                    const trialConfig = { ...config, D };
+                    // The swept bars are the main tension layer of the design
+                    // (analyzeSlab checks Ast ≥ Ast,req and the spacing limits).
+                    const trialConfig = { ...config, D, mainBarDia: dia, mainBarSpacing: spacing };
                     let result = analyzeSlab(trialConfig);
 
                     // --- CAMBER RETRY (same as legacy optimizer) ---
@@ -1112,56 +1182,7 @@ export function optimizeSlabExtended(
                     }
 
                     if (result.overallStatus === 'SAFE') {
-                        // Use the PROVIDED bar from the engine result (it may
-                        // differ from the swept dia/spacing because the engine
-                        // calls selectBars internally). The swept dia/spacing
-                        // serves as a pre-filter — only combos that satisfy
-                        // the code spacing limits proceed to the full analysis.
-                        const concreteVol = (D / 1000) * result.Lx * result.Ly;
-                        const LAP_WASTAGE_FACTOR = 1.08;
-                        const steelWeight_net = ((
-                            result.bars_x_bot.Ast_provided + result.bars_x_top.Ast_provided +
-                            result.bars_y_bot.Ast_provided + result.bars_y_top.Ast_provided
-                        ) * (result.Lx + result.Ly) * 7850) / 1e6;
-                        const steelWeight_gross = steelWeight_net * LAP_WASTAGE_FACTOR;
-                        const torsionSteel_kg = result.requiresTorsionSteel
-                            ? computeTorsionSteelWeight(result) : 0;
-                        const totalSteelWeight = steelWeight_gross + torsionSteel_kg;
-                        const slabArea_m2 = result.Lx * result.Ly;
-                        const costTotal_INR = computeCost(
-                            concreteVol, totalSteelWeight, slabArea_m2, costParams,
-                        );
-                        const concrete_INR = concreteVol * (costParams.concreteCost_per_m3 ?? 6500);
-                        const steel_INR = totalSteelWeight * (costParams.steelCost_per_kg ?? 82) * (costParams.wastage_factor ?? 1.07);
-                        const formwork_INR = slabArea_m2 * (costParams.formworkCost_per_m2 ?? 350);
-
-                        const maxMu = Math.max(
-                            result.Mx_pos, result.My_pos,
-                            Math.abs(result.Mx_neg), Math.abs(result.My_neg),
-                        );
-                        const flexureUtilization = maxMu / result.flexDepthCheck.Mu_max;
-                        const deflectionUtilization = result.deflection.a_total / result.deflection.limit_total;
-                        const shearUtilization = Math.max(
-                            result.shear.shortDir.tau_v / (result.shear.shortDir.k * result.shear.shortDir.tau_c),
-                            result.shear.longDir.tau_v / (result.shear.longDir.k * result.shear.longDir.tau_c),
-                        );
-
-                        results.push({
-                            thickness: D,
-                            barDia: result.bars_x_bot.dia,        // actual selected bar
-                            barSpacing: result.bars_x_bot.spacing, // actual selected spacing
-                            camber: result.deflection.camber ?? 0,
-                            costTotal_INR,
-                            costBreakdown: { concrete_INR, steel_INR, formwork_INR },
-                            steelWeight_gross: totalSteelWeight,
-                            concreteVol,
-                            utilizationRatio: {
-                                flexure: flexureUtilization,
-                                deflection: deflectionUtilization,
-                                shear: shearUtilization,
-                            },
-                            result,
-                        });
+                        results.push({ ...slabDesignRecord(result, D, costParams), barDia: dia, barSpacing: spacing });
                     }
                 } catch {
                     // skip invalid combo

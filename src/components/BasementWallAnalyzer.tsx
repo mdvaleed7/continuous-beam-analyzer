@@ -30,6 +30,13 @@ export default function BasementWallAnalyzer() {
     const [loadFactor, setLoadFactor] = useState(1.5);
     const [loadCombMode, setLoadCombMode] = useState('ultimate'); // 'service' | 'ultimate' | 'custom'
     const [optBounds, setOptBounds] = useState({ minThk: 200, maxThk: 400, thkStep: 50 });
+    // Wall checks: vertical load from above (kN/m, service), crack width
+    // (IS 456 Cl. 35.3.2 / Annex F) and the construction stage (cantilever
+    // before the floors are cast).
+    const [designOpts, setDesignOpts] = useState({
+        axialLoad: 0, checkCrackWidth: true, crackWidthLimitEarth: 0.2, crackWidthLimitInner: 0.3,
+        checkConstructionStage: false,
+    });
     const [optResult, setOptResult] = useState<any>(null);
     const [currentResult, setCurrentResult] = useState<any>(null);
     const [error, setError] = useState<string | null>(null);
@@ -150,7 +157,7 @@ export default function BasementWallAnalyzer() {
         let result = null;
         try {
             const config = {
-                zones, soilParams, material, loadFactor, isTapered,
+                zones, soilParams, material, loadFactor, isTapered, ...designOpts,
                 barDias: [8, 10, 12, 16, 20, 25],
                 spacings: [100, 125, 150, 175, 200, 250, 300],
             };
@@ -165,7 +172,7 @@ export default function BasementWallAnalyzer() {
             logger.error('Wall analysis error:', e);
             setError(e.message);
         }
-    }, [zones, soilParams, material, loadFactor, isTapered]);
+    }, [zones, soilParams, material, loadFactor, isTapered, designOpts]);
 
     // PERF-002: draw the wall diagram + design table ONLY when the analysis result
     // reference changes. Guard against redundant redraws (same result object) and
@@ -222,7 +229,7 @@ export default function BasementWallAnalyzer() {
     const handleOptimize = useCallback(() => {
         setError(null);
         const config = {
-            zones, soilParams, material, loadFactor, isTapered,
+            zones, soilParams, material, loadFactor, isTapered, ...designOpts,
             barDias: [8, 10, 12, 16, 20, 25],
             spacings: [100, 125, 150, 175, 200, 250, 300],
             minThk: optBounds.minThk,
@@ -257,7 +264,7 @@ export default function BasementWallAnalyzer() {
                 setError(e.message);
             }
         }
-    }, [zones, soilParams, material, loadFactor, optBounds, isTapered]);
+    }, [zones, soilParams, material, loadFactor, optBounds, isTapered, designOpts]);
 
     // PERF-01: cancel an in-progress optimization by terminating the worker.
     // The worker is recreated on the next optimize click.
@@ -284,7 +291,7 @@ export default function BasementWallAnalyzer() {
         }
         try {
             const config = {
-                zones, soilParams, material, loadFactor, isTapered
+                zones, soilParams, material, loadFactor, isTapered, ...designOpts
             };
             const canvas = document.getElementById('wall-canvas') as HTMLCanvasElement;
             const blobUrl = await generateWallReport(config, currentResult, canvas, true); // preview mode
@@ -293,7 +300,7 @@ export default function BasementWallAnalyzer() {
             logger.error('Preview report error:', e);
             alert('Failed to generate report preview: ' + (e?.message || e));
         }
-    }, [currentResult, zones, soilParams, material, loadFactor, isTapered]);
+    }, [currentResult, zones, soilParams, material, loadFactor, isTapered, designOpts]);
 
     const handleDownloadReport = useCallback(async () => {
         if (!currentResult) {
@@ -302,7 +309,7 @@ export default function BasementWallAnalyzer() {
         }
         try {
             const config = {
-                zones, soilParams, material, loadFactor, isTapered
+                zones, soilParams, material, loadFactor, isTapered, ...designOpts
             };
             const canvas = document.getElementById('wall-canvas') as HTMLCanvasElement;
             await generateWallReport(config, currentResult, canvas, false); // download mode
@@ -310,7 +317,7 @@ export default function BasementWallAnalyzer() {
             logger.error('Download report error:', e);
             alert('Failed to generate report for download: ' + (e?.message || e));
         }
-    }, [currentResult, zones, soilParams, material, loadFactor, isTapered]);
+    }, [currentResult, zones, soilParams, material, loadFactor, isTapered, designOpts]);
 
     const updateZone = (idx: number, field: string, value: any): void => {
         setZones(prev => prev.map((z, i) => i === idx ? { ...z, [field]: value } : z));
@@ -596,6 +603,43 @@ export default function BasementWallAnalyzer() {
 
                         <div className="wall-section-divider" />
 
+                        <div className="span-props-title">Wall Checks</div>
+                        <div className="control-group">
+                            <label>Vertical Load at Top (kN/m, service)</label>
+                            <input title="Axial load from the structure above" type="number" value={designOpts.axialLoad} min="0" step="10"
+                                onChange={e => setDesignOpts(p => ({ ...p, axialLoad: Math.max(0, parseFloat(e.target.value) || 0) }))} />
+                        </div>
+                        <div className="control-group">
+                            <label>
+                                <input type="checkbox" checked={designOpts.checkCrackWidth} title="Crack width check"
+                                    onChange={e => setDesignOpts(p => ({ ...p, checkCrackWidth: e.target.checked }))} />
+                                {' '}Crack width check (Annex F)
+                            </label>
+                        </div>
+                        {designOpts.checkCrackWidth && (
+                            <div className="norm-ref-row">
+                                <div className="control-group">
+                                    <label>w earth face (mm)</label>
+                                    <input title="Crack width limit, earth face" type="number" value={designOpts.crackWidthLimitEarth} min="0.05" max="0.3" step="0.05"
+                                        onChange={e => setDesignOpts(p => ({ ...p, crackWidthLimitEarth: parseFloat(e.target.value) || 0.2 }))} />
+                                </div>
+                                <div className="control-group">
+                                    <label>w inner face (mm)</label>
+                                    <input title="Crack width limit, inner face" type="number" value={designOpts.crackWidthLimitInner} min="0.05" max="0.3" step="0.05"
+                                        onChange={e => setDesignOpts(p => ({ ...p, crackWidthLimitInner: parseFloat(e.target.value) || 0.3 }))} />
+                                </div>
+                            </div>
+                        )}
+                        <div className="control-group">
+                            <label>
+                                <input type="checkbox" checked={designOpts.checkConstructionStage} title="Construction stage"
+                                    onChange={e => setDesignOpts(p => ({ ...p, checkConstructionStage: e.target.checked }))} />
+                                {' '}Backfill before floors are cast (cantilever stage)
+                            </label>
+                        </div>
+
+                        <div className="wall-section-divider" />
+
                         <div className="span-props-title">Optimization Bounds</div>
                         <div className="norm-ref-row">
                             <div className="control-group">
@@ -678,7 +722,7 @@ export default function BasementWallAnalyzer() {
                                 <button className="btn-primary extracted-style-48" onClick={async () => {
                                     const r = currentResult;
                                     if (!r) { toast('⚠ Run analysis first', { type: 'info' }); return; }
-                                    const zoneLines = r.zoneDesigns?.map((z: any) => `  Z${z.zone}: thk=${z.thickness}mm | shear=${z.shear?.status||'—'} | hog=${z.flex_hogging?.utilization?.toFixed(2)||'—'} | sag=${z.flex_sagging?.utilization?.toFixed(2)||'—'}`) || [];
+                                    const zoneLines = r.zoneDesigns?.map((z: any) => `  Z${z.zone}: thk=${z.thickness}mm | shear τv/kτc=${z.shear && z.shear_k ? (z.shear.tau_v / (z.shear_k * z.shear.tau_c)).toFixed(2) : '—'} | hog=${z.flex_hogging?.utilization?.toFixed(2)||'—'} | sag=${z.flex_sagging?.utilization?.toFixed(2)||'—'} | w=${z.crack?.hogging?.w?.toFixed(3) ?? '—'}/${z.crack?.sagging?.w?.toFixed(3) ?? '—'} mm | ${z.ok ? 'OK' : 'FAIL'}`) || [];
                                     const s = `RETAINING WALL DESIGN SUMMARY (IS 456:2000)
 ${'='.repeat(50)}
 Total Height: ${r.totalHeight?.toFixed(2)}m | Zones: ${r.zoneDesigns?.length ?? 0} | K0=${r.K0?.toFixed(3)}
@@ -733,11 +777,12 @@ ${'='.repeat(50)}`;
                                         )}
                                         {/* Design-code shear check (per-zone roll-up, distinct from equilibrium) */}
                                         <tr data-testid="shear-row" className="extracted-style-63">
-                                            <td className="extracted-style-64">Shear Capacity (IS 456 <CodeRef clause="40.2">Cl. 40</CodeRef>)</td>
+                                            <td className="extracted-style-64">Zone Design Checks (IS 456 <CodeRef clause="38.1">Cl. 38.1</CodeRef>, <CodeRef clause="40.2">Cl. 40.2.1.1</CodeRef>, Cl. 35.3.2, Cl. 32.2)</td>
                                             <td className="extracted-style-65">
-                                                max util = {(currentResult.maxUtilization ?? 0).toFixed(3)}
+                                                Mu/Mu,lim = {(currentResult.maxUtilization ?? 0).toFixed(3)};
+                                                {' '}τv/kτc = {Math.max(0, ...(currentResult.zoneDesigns ?? []).map((z: any) => z.shear.tau_v / (z.shear_k * z.shear.tau_c))).toFixed(3)}
                                             </td>
-                                            <td className="extracted-style-66">&le; 1.000</td>
+                                            <td className="extracted-style-66">&le; 1.000; crack width &amp; P–M within limits</td>
                                             <td className={`status-cell ${currentResult.feasible ? 'pass' : 'fail'}`}>
                                                 {currentResult.feasible ? '\u2713 PASS' : '\u2717 FAIL'}
                                             </td>

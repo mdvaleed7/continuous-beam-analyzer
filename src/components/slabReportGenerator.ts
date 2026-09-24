@@ -218,6 +218,9 @@ function spanDepthSection(r: any): string {
 
 function shearSection(r: any, directions: {label: string, dir: any}[]): string {
     const isTwoWay = r.slabType === 'two-way';
+    // Two-way βv values are borrowed from BS 8110-1:1997 Table 3.15 (IS 456 has
+    // no two-way shear coefficient table); one-way from IS 456 Table 13.
+    const betaRef = isTwoWay ? 'BS 8110-1 Table 3.15' : 'IS 456 Table 13';
     const shearBlocks = directions.map(({label, dir}) => {
         const hasBeta = dir.beta != null;
         const vuFormula = hasBeta
@@ -228,7 +231,7 @@ function shearSection(r: any, directions: {label: string, dir: any}[]): string {
             : '';
         return `
         <div style="margin-bottom: 15px; padding-bottom: 15px; border-bottom: 1px dashed #e2e8f0;">
-            <h4 style="margin-top: 0;">${label} Direction${hasBeta ? ` — β = ${dir.beta} (Table 25)` : ''}</h4>
+            <h4 style="margin-top: 0;">${label} Direction${hasBeta ? ` — β = ${dir.beta} (${betaRef})` : ''}</h4>
             <div style="display: flex; gap: 20px;">
                 <div style="flex: 1; min-width: 0;">
                     ${vuFormula}
@@ -249,7 +252,7 @@ function shearSection(r: any, directions: {label: string, dir: any}[]): string {
 
     const isOneWay = r.slabType === 'one-way';
     const isCantilever = r.slabType === 'cantilever';
-    const tableRef = isTwoWay ? 'Table 25' : (isOneWay ? 'Table 22' : '');
+    const tableRef = isTwoWay ? 'BS 8110-1:1997 Table 3.15 — borrowed, IS 456 has no two-way shear table' : (isOneWay ? 'IS 456 Table 13, Cl. 22.5.2' : '');
     const hasBetaCoeff = !isCantilever;
 
     return `
@@ -258,7 +261,7 @@ function shearSection(r: any, directions: {label: string, dir: any}[]): string {
         <div class="section-body">
             <p style="margin-top:0; color:#475569; font-size:13px;">
                 <strong>Variables:</strong><br/>
-                ${hasBetaCoeff ? `${kxInline(`\\beta`)}: Shear force coefficient (IS 456 ${tableRef || 'Cl. 40'})<br/>` : ''}
+                ${hasBetaCoeff ? `${kxInline(`\\beta`)}: Shear force coefficient (${tableRef || 'IS 456 Cl. 40'})<br/>` : ''}
                 ${kxInline(`V_u`)}: Factored shear force${hasBetaCoeff ? ` (${kxInline(`= \\beta \\times w_u \\times l_x`)})` : ''}<br/>
                 ${kxInline(`V_{u,crit}`)}: Shear at critical section (d from face)<br/>
                 ${kxInline(`\\tau_v`)}: Nominal shear stress<br/>
@@ -298,6 +301,11 @@ function flexuralDepthSection(r: any): string {
                     </div>
                 </div>
             </div>
+            ${r.flexUtilization != null ? `
+            <p style="margin: 10px 0 0; color:#475569; font-size:13px;">
+                Capacity with the provided bars at their actual depth (Annex G-1.1 b), all four zones:
+                ${kxInline(`\\max(M_u / M_{u,R}) = ${Number(r.flexUtilization).toFixed(3)} ${r.flexUtilization <= 1 ? '\\le' : '>'} 1.0`)}
+            </p>` : ''}
         </div>
     </div>`;
 }

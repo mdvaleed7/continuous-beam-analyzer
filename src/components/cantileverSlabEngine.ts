@@ -494,15 +494,18 @@ export function optimizeCantileverSlab(
     const bottomBarDias = params.bottomBarDias ?? [0, 8, 10];
     const bottomSpacings = params.bottomSpacings ?? [150, 200, 250];
 
-    const total = Ds.length * barDias.length * spacings.length
-        * bottomBarDias.length * bottomSpacings.length;
+    // "No bottom mat" (0) is one option, not one per bottom spacing — the
+    // spacing loop used to evaluate the same design once per spacing,
+    // filling the top-5 list with duplicates.
+    const nBottomOptions = bottomBarDias.reduce((n, d) => n + (d > 0 ? bottomSpacings.length : 1), 0);
+    const total = Ds.length * barDias.length * spacings.length * nBottomOptions;
     let done = 0;
 
     for (const D of Ds) {
         for (const bar_main of barDias) {
             for (const spacing_main of spacings) {
                 for (const bar_bot of bottomBarDias) {
-                    for (const spacing_bot of bottomSpacings) {
+                    for (const spacing_bot of (bar_bot > 0 ? bottomSpacings : bottomSpacings.slice(0, 1))) {
                         done++;
                         try {
                             const trialInput: CantileverSlabInput = {
@@ -538,10 +541,10 @@ export function optimizeCantileverSlab(
                                 ) / 1e6 * result.L_eff * 7850;  // kg/m
                                 // AUDIT FIX OPT-3 (2026-07-04): use the shared `computeCost`
                                 // helper for a proper INR cost (concrete + steel + formwork).
-                                // Formwork area per metre width ≈ L_eff (soffit) + L_eff (top
-                                // surface) = 2 × L_eff. This is consistent with the slab /
-                                // flat-slab / waffle-slab optimizers.
-                                const formworkArea = 2 * result.L_eff;
+                                // Formwork per metre width = soffit (L_eff) + free edge (D);
+                                // the top surface is not formed (it was counted as a second
+                                // L_eff before).
+                                const formworkArea = result.L_eff + D / 1000;
                                 const costTotal_INR = computeCost(
                                     concreteVol, steelWeight, formworkArea, costParams,
                                 );

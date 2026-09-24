@@ -63,26 +63,29 @@ describe('Retaining wall — end-to-end bearing pressure (audit 2026-07-04)', ()
         expect(r.p_max).toBeCloseTo(r.p_toe, 1);
     });
 
-    test('x_bar uses (M_resisting - M_overturning) / SigmaV (not just M_resisting / SigmaV)', () => {
+    test('x_bar uses (M_resisting - M_overturning) / V (not just M_resisting / V)', () => {
         const r = analyzeRetainingWall(baseRetainingWall());
-        // The corrected formula must give an eccentricity that matches:
-        //   e = (M_resisting - M_overturning) / SigmaV - B/2
+        // Governing bearing case of this wall: without the heel surcharge
+        // (V = W_dead − U). The corrected formula:
+        //   e = (M_resisting − M_overturning) / V − B/2
+        expect(r.bearingCase).toBe('without surcharge');
         const B_m = r.B / 1000;
-        const e_correct = (r.M_resisting - r.M_overturning) / r.SigmaV - B_m / 2;
+        const V = r.W_dead - r.U;
+        expect(r.V_bearing).toBeCloseTo(V, 6);
+        const e_correct = (r.M_resisting - r.M_overturning) / V - B_m / 2;
         // The buggy formula would give:
-        const e_buggy = r.M_resisting / r.SigmaV - B_m / 2;
+        const e_buggy = r.M_resisting / V - B_m / 2;
         // The engine must use the corrected formula.
         expect(r.eccentricity).toBeCloseTo(e_correct, 3);
         expect(r.eccentricity).not.toBeCloseTo(e_buggy, 3);
-        // For a typical wall, |e_correct| < |e_buggy| AND e_correct is shifted
-        // toward the toe (more negative).
+        // e_correct is shifted toward the toe (more negative).
         expect(r.eccentricity).toBeLessThan(e_buggy);
     });
 
     test('bearing pressures match Meyerhof formula with corrected signs', () => {
         const r = analyzeRetainingWall(baseRetainingWall());
         const B_m = r.B / 1000;
-        const p_avg = r.SigmaV / B_m;
+        const p_avg = r.V_bearing / B_m;
         const e = r.eccentricity; // positive toward heel
         // p_toe = p_avg * (1 - 6e/B)  — LOWER when e > 0 (resultant on heel)
         // p_heel = p_avg * (1 + 6e/B) — HIGHER when e > 0

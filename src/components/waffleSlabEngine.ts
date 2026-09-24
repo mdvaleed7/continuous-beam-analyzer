@@ -842,7 +842,8 @@ export interface OptimumWaffleSlabDesign {
         steel_INR:      number;
         formwork_INR:   number;
     };
-    steelWeight_gross:  number;
+    steelWeight_net:    number;   // kg per panel (provided bars)
+    steelWeight_gross:  number;   // kg per panel incl. wastage factor
     concreteVol:        number;
     utilizationRatio: {
         flexure:        number;
@@ -970,7 +971,6 @@ export function optimizeWaffleSlab(
             // bottom (positive) and top (negative) topping mats explicitly, sum
             // the two areas directly. Rib top compression bars (when supplied)
             // are included alongside the rib tension steel.
-            const LAP_WASTAGE_FACTOR = 1.08;
             // Rib steel: bottom (tension) + top (compression, if any) along
             // every rib in both directions.
             const Abar_rib_top = result.Asc_rib_provided; // already mm² per rib
@@ -990,12 +990,15 @@ export function optimizeWaffleSlab(
             const Ast_topping_total = (result.Ast_topping_bot + result.Ast_topping_top); // mm²/m, both mats
             const toppingSteel_net = Ast_topping_total / 1e6 * (input.Lx * input.Ly) * 7850;
             const steelWeight_net = ribSteel_net + toppingSteel_net;
-            const steelWeight_gross = steelWeight_net * LAP_WASTAGE_FACTOR;
+            // Wastage is applied once, inside computeCost (a separate 1.08 lap
+            // factor used to be applied on top of it).
+            const fw = costParams.wastage_factor ?? 1.07;
+            const steelWeight_gross = steelWeight_net * fw;
             const slabArea_m2 = input.Lx * input.Ly;
 
-            const costTotal_INR = computeCost(concreteVol, steelWeight_gross, slabArea_m2, costParams);
+            const costTotal_INR = computeCost(concreteVol, steelWeight_net, slabArea_m2, costParams);
             const concrete_INR = concreteVol * (costParams.concreteCost_per_m3 ?? 6500);
-            const steel_INR = steelWeight_gross * (costParams.steelCost_per_kg ?? 82) * (costParams.wastage_factor ?? 1.07);
+            const steel_INR = steelWeight_net * (costParams.steelCost_per_kg ?? 82) * fw;
             const formwork_INR = slabArea_m2 * (costParams.formworkCost_per_m2 ?? 350);
 
             const flexure_u = Math.max(
@@ -1016,7 +1019,7 @@ export function optimizeWaffleSlab(
                 camber: result.deflection.camber ?? 0,
                 costTotal_INR,
                 costBreakdown: { concrete_INR, steel_INR, formwork_INR },
-                steelWeight_gross, concreteVol,
+                steelWeight_net, steelWeight_gross, concreteVol,
                 utilizationRatio: { flexure: flexure_u, deflection: deflection_u, shear: shear_u },
                 result
             };

@@ -183,7 +183,7 @@ describe('IMP-3: footing engine exposes Ast_provided (actual bars)', () => {
 
 // ─── IMP-4: Wall distribution steel ───────────────────────────────────────
 
-describe('IMP-4: wall engine includes distribution steel in weight', () => {
+describe('IMP-4: wall engine includes horizontal (distribution) steel in weight', () => {
     test('totalSteelWeight > main steel alone (distribution steel added)', () => {
         const r = analyzeWall({
             zones: [{ height: 4, thickness: 400 }],
@@ -204,8 +204,13 @@ describe('IMP-4: wall engine includes distribution steel in weight', () => {
         // The engine's total must be HIGHER than main-only (dist steel added)
         expect(r.totalSteelWeight).toBeGreaterThan(mainSteelOnly);
 
-        // Distribution steel: 0.12% × b × t × 2 faces × height × 7850
-        const expectedDist = (2 * 0.0012 * 1000 * 400 / 1e6) * 4 * 7850;
+        // Horizontal steel, IS 456 Cl. 32.5(c): 0.20 % of b·t for deformed
+        // bars ≤ 16 mm with fy ≥ 415, half on each face:
+        //   0.0020 × 1000 × 400 / 2 = 400 mm²/m per face → 8 mm @ 125 (402 mm²/m)
+        expect(zd.distBars.Ast_provided).toBeGreaterThanOrEqual(400);
+        expect(zd.distBars.label).toBe('8mm @ 125 c/c');
+        // Both faces × height × 7850: 2 × 402 × 4 × 7850 / 1e6 = 25.2 kg/m
+        const expectedDist = (2 * zd.distBars.Ast_provided / 1e6) * 4 * 7850;
         const expectedTotal = mainSteelOnly + expectedDist;
         expect(r.totalSteelWeight).toBeCloseTo(expectedTotal, 0);
     });

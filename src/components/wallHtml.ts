@@ -40,20 +40,32 @@ export function renderWallDesignTable(container: HTMLElement | null, wallResult:
                 <th>Earth Face</th>
                 <th>Mu sag (kN·m)</th>
                 <th>Inner Face</th>
-                <th>Shear Links</th>
-                <th>τv / τc</th>
+                <th>Horiz. / face</th>
+                <th title="Shear without links, IS 456 Cl. 40.2.1.1">τv / k·τc</th>
+                <th title="Crack width, IS 456 Annex F / Cl. 35.3.2">w earth / inner (mm)</th>
+                <th title="Axial + bending with slenderness, IS 456 Cl. 32.2 / 39">Mu,P / cap (He/t)</th>
                 <th>Status</th>
             </tr></thead>
             <tbody>`;
 
     for (const zd of zoneDesigns) {
-        const shearOk = zd.shear.status !== 'FAIL';
-        const flexOk = !zd.flex_hogging.isDoubly && !zd.flex_sagging.isDoubly;
         const hogOk = zd.mainBars_hogging.Ast_provided >= zd.flex_hogging.Ast_req;
         const sagOk = zd.mainBars_sagging.Ast_provided >= zd.flex_sagging.Ast_req;
-        const ok = shearOk && flexOk;
-        const statusClass = ok ? 'color:var(--positive)' : 'color:var(--negative)';
-        const statusText = ok ? 'OK' : (zd.shear.status === 'FAIL' ? 'Shear FAIL' : 'Doubly req.');
+        const fails: string[] = [];
+        if (zd.flex_hogging.isDoubly || zd.flex_sagging.isDoubly) fails.push('Doubly req.');
+        if (zd.flex_hogging.governs === 'maximum' || zd.flex_sagging.governs === 'maximum') fails.push('Ast > 4%');
+        if (zd.mainBars_hogging.adequate === false || zd.mainBars_sagging.adequate === false) fails.push('Bars short');
+        if (!zd.shearOk) fails.push('Shear');
+        if (!zd.crack.hogging.ok || !zd.crack.sagging.ok) fails.push('Crack');
+        if (!zd.pm.ok) fails.push(zd.pm.slendernessOk ? 'P–M' : 'He/t > 30');
+        if (zd.thickness < 150) fails.push('t < 150');
+        const statusClass = zd.ok ? 'color:var(--positive)' : 'color:var(--negative)';
+        const statusText = zd.ok ? 'OK' : fails.join(', ') || 'FAIL';
+        const kTauC = zd.shear_k * zd.shear.tau_c;
+        // Governing face for axial + bending: the larger Mu / capacity
+        const rH = zd.pm.cap_h > 0 ? zd.pm.Mu_h / zd.pm.cap_h : Infinity;
+        const rS = zd.pm.cap_s > 0 ? zd.pm.Mu_s / zd.pm.cap_s : Infinity;
+        const pmMu = rS > rH ? `${zd.pm.Mu_s} / ${zd.pm.cap_s}` : `${zd.pm.Mu_h} / ${zd.pm.cap_h}`;
 
         // Build bar cell with Ast demand/provided
         const hogCell = `<span style="font-size:0.85em">${zd.mainBars_hogging.label}</span><br/>`
@@ -75,12 +87,21 @@ export function renderWallDesignTable(container: HTMLElement | null, wallResult:
             <td>${hogCell}</td>
             <td>${zd.M_sagging.toFixed(2)}</td>
             <td>${sagCell}</td>
-            <td style="font-size:0.85em">${zd.shear.links ? zd.shear.links.label : '—'}</td>
-            <td>${zd.shear.tau_v} / ${zd.shear.tau_c}</td>
+            <td style="font-size:0.85em">${zd.distBars.label}</td>
+            <td>${zd.shear.tau_v} / ${kTauC.toFixed(3)}</td>
+            <td>${zd.crack.hogging.w.toFixed(3)} / ${zd.crack.sagging.w.toFixed(3)}</td>
+            <td style="font-size:0.85em">${pmMu} (${zd.pm.slenderness})</td>
             <td style="${statusClass};font-weight:700">${statusText}</td>
         </tr>`;
     }
     html += '</tbody></table>';
+    const consChecked = config.checkConstructionStage === true;
+    html += `<div class="config-note" style="margin-top:8px;font-size:0.78rem;color:var(--text-muted)">
+        Shear is resisted without links (τv ≤ k·τc, Cl. 40.2.1.1); where needed the tension bars are increased to raise τc (Table 19).
+        Crack width limits ${(config.crackWidthLimitEarth ?? 0.2)} mm earth face / ${(config.crackWidthLimitInner ?? 0.3)} mm inner face (Cl. 35.3.2, Annex F${config.checkCrackWidth === false ? ' — check switched off' : ''}).
+        Horizontal steel ${mat.fy >= 415 ? '0.20' : '0.25'} % of b·t, half per face (Cl. 32.5 c).
+        ${consChecked ? 'Construction stage (cantilever before floors are cast) included.' : 'Construction stage not checked — backfill only after the floor slabs are cast.'}
+    </div>`;
 
     // Summary
     const summaryColor = feasible ? 'var(--positive)' : 'var(--negative)';
