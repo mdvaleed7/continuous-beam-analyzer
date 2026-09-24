@@ -69,7 +69,10 @@ export default function WaffleSlabAnalyzer() {
 
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
         const { name, value } = e.target;
-        if (name === 'deflectionSupport') {
+        if (name === 'solid_support_zone') {
+            const checked = (e.target as HTMLInputElement).checked;
+            setInput(prev => ({ ...prev, solid_support_zone: checked }));
+        } else if (name === 'deflectionSupport') {
             setInput(prev => ({ ...prev, [name]: value as 'continuous' | 'simply' | 'one_end' }));
         } else if (name === 'grade') {
             const fck = parseInt(value.replace('M', ''));
@@ -162,11 +165,11 @@ export default function WaffleSlabAnalyzer() {
                         </select>
                     </div>
                     <div className="control-group">
-                        <label>Deflection Support Condition (Annex C)</label>
+                        <label>Edge Support Condition (hogging, shear, Annex C k₃)</label>
                         <select title="deflectionSupport" name="deflectionSupport" value={input.deflectionSupport || 'continuous'} onChange={handleInputChange} id="deflectionSupport">
-                            <option value="continuous">Continuous (both ends) — α=1/16, k₃=0.063</option>
-                            <option value="one_end">One-end continuous — α=1/12, k₃=0.086</option>
-                            <option value="simply">Simply supported — α=5/48, k₃=0.125</option>
+                            <option value="continuous">Continuous (both ends) — hogging wD/12 + wL/9, k₃=0.063</option>
+                            <option value="one_end">One-end continuous — hogging wD/10 + wL/9, k₃=0.086</option>
+                            <option value="simply">Simply supported — no hogging, k₃=0.125</option>
                         </select>
                     </div>
                     <div className="control-group">
@@ -187,6 +190,25 @@ export default function WaffleSlabAnalyzer() {
                         <label htmlFor="rib_top_n_bars">No. of Top Bars in Rib</label>
                         <input title="rib_top_n_bars" type="number" name="rib_top_n_bars" value={input.rib_top_n_bars ?? 0} onChange={handleInputChange} id="rib_top_n_bars" placeholder="0 = no top steel" />
                     </div>
+                    {/* ─── Support hogging (continuous edges only) ─── */}
+                    {(input.deflectionSupport ?? 'continuous') !== 'simply' && (
+                        <>
+                            <div className="control-group">
+                                <label htmlFor="rib_hog_bar_dia">Support Hogging Bar Ø (mm)</label>
+                                <input title="rib_hog_bar_dia" type="number" name="rib_hog_bar_dia" value={input.rib_hog_bar_dia || 16} onChange={handleInputChange} id="rib_hog_bar_dia" />
+                            </div>
+                            <div className="control-group">
+                                <label htmlFor="rib_hog_n_bars">No. of Hogging Bars per Rib (0 = auto)</label>
+                                <input title="rib_hog_n_bars" type="number" min="0" name="rib_hog_n_bars" value={input.rib_hog_n_bars ?? 0} onChange={handleInputChange} id="rib_hog_n_bars" />
+                            </div>
+                            <div className="control-group">
+                                <label htmlFor="solid_support_zone">
+                                    <input title="solid_support_zone" type="checkbox" name="solid_support_zone" checked={input.solid_support_zone === true} onChange={handleInputChange} id="solid_support_zone" />
+                                    {' '}Solid zone at supports (hogging section = full rib spacing)
+                                </label>
+                            </div>
+                        </>
+                    )}
                 </div>
 
                 <div className="panel">
@@ -374,6 +396,25 @@ export default function WaffleSlabAnalyzer() {
                                     <tr><td>Topping Ast (top mat, −M)</td><td><strong>{results.Ast_topping_top.toFixed(0)} mm²/m</strong></td></tr>
                                 </tbody>
                             </table>
+                            {results.hogging && (
+                                <table className="result-table compact">
+                                    <thead>
+                                        <tr><th>Support hogging ({results.hogging.solidZone ? 'solid zone' : 'rib web'})</th><th>M⁻ (kN·m/rib)</th><th>b × d (mm)</th><th>Ast req</th><th>Provided</th><th>Status</th></tr>
+                                    </thead>
+                                    <tbody>
+                                        {([['Ribs ∥ X', results.hogging.x], ['Ribs ∥ Y', results.hogging.y]] as const).map(([label, h]) => (
+                                            <tr key={label}>
+                                                <td>{label}</td>
+                                                <td>{h.M_hog.toFixed(2)}</td>
+                                                <td>{h.b} × {h.d}</td>
+                                                <td>{h.Ast_req.toFixed(0)} mm²</td>
+                                                <td>{h.n_bars}–Ø{h.bar_dia} = {h.Ast_provided.toFixed(0)} mm²</td>
+                                                <td><span className={`chip ${h.ok ? 'chip-safe' : 'chip-fail'}`}>{h.ok ? 'OK' : h.isDoubly ? 'Mu > Mu,lim' : !h.fits ? 'BARS DO NOT FIT' : 'ADD STEEL'}</span></td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            )}
                         </div>
 
                         {/* Deflection Check */}

@@ -56,6 +56,14 @@ export interface WaffleSlabInput {
     rib_top_bar_dia?: number; // rib TOP (compression) bar diameter (mm)
     rib_top_n_bars?: number;  // number of top (compression) bars in the rib
     camber?: number; // explicit upward camber (mm), used by optimizer
+    // Support hogging (continuous / one_end edges). Top bars over the support
+    // in each rib; when n is omitted the number of bars is chosen to suit.
+    rib_hog_bar_dia?: number;  // hogging (top) bar diameter at supports (mm), default 16
+    rib_hog_n_bars?: number;   // number of hogging bars per rib
+    // Solid zone at the supports (ribs infilled over the support region): the
+    // hogging section is then a solid slab strip of width = rib spacing
+    // instead of the rib web bw.
+    solid_support_zone?: boolean;
     costParams?: CostParameters;
 }
 
@@ -106,9 +114,31 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
     const M_rib_x = Mx_per_m * spacing_y; // Rib parallel to X takes moment from spacing_y width
     const M_rib_y = My_per_m * spacing_x;
 
+    // Continuity of the ribs over the supports — IS 456 Table 12 / Table 13
+    // coefficients (Cl. 22.5.1) applied to each rib direction as a continuous
+    // member carrying its Rankine–Grashoff share of the load, with the factored
+    // dead / imposed parts kept separate:
+    //   'continuous' (interior panel): support M = −(wD/12 + wL/9)·L²,
+    //                                  support V = (0.5·wD + 0.6·wL)·L
+    //   'one_end'    (end panel, continuous end = "support next to end
+    //                 support"):       support M = −(wD/10 + wL/9)·L²,
+    //                                  support V = 0.6·(wD + wL)·L
+    //   'simply':                      no hogging, V = 0.5·w·L
+    // Midspan (sagging) design keeps the simply supported qL²/8 — an upper
+    // bound that also covers pattern loading and loss of continuity.
+    const wuD = 1.5 * (w_dead + w_finish);
+    const wuL = 1.5 * w_live;
+    const isContinuous = deflSupport === 'continuous' || deflSupport === 'one_end';
+    const hogCoef = deflSupport === 'continuous' ? (wuD / 12 + wuL / 9) / wu
+        : deflSupport === 'one_end' ? (wuD / 10 + wuL / 9) / wu
+            : 0;
+    const shearCoef = deflSupport === 'continuous' ? (0.5 * wuD + 0.6 * wuL) / wu
+        : deflSupport === 'one_end' ? 0.6
+            : 0.5;
+
     // Shear per rib
-    const V_rib_x = (qx * Lx / 2) * spacing_y;
-    const V_rib_y = (qy * Ly / 2) * spacing_x;
+    const V_rib_x = (shearCoef * qx * Lx) * spacing_y;
+    const V_rib_y = (shearCoef * qy * Ly) * spacing_x;
 
     // Load per unit length on each rib (kN/m) — used to reduce the support
     // shear to the critical section (d_eff from face of support, IS 456 Cl. 40.1.1).
@@ -270,6 +300,52 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
     const ribX = designRib(M_rib_x, V_rib_x, spacing_y, w_rib_x);
     const ribY = designRib(M_rib_y, V_rib_y, spacing_x, w_rib_y);
 
+    // ─── Support hogging design (continuous edges) ──────────────────────────
+    // Tension at the top, compression in the rib soffit. Without a solid zone
+    // the compression zone is the rib web only (rectangular bw × d); with a
+    // solid zone it is a solid strip of width = rib spacing. A section that
+    // would need compression steel (Mu > Mu,lim) is flagged REVISE — provide a
+    // solid zone or a deeper section. Moments are taken at the support
+    // centre-line (conservative w.r.t. the face moment).
+    const hogBarDia = input.rib_hog_bar_dia || 16;
+    const d_hog = D - cover - hogBarDia / 2;
+    const solidZone = input.solid_support_zone === true;
+    const designHog = (M_hog: number, spacing_m: number) => {
+        const b = solidZone ? spacing_m * 1000 : bw;
+        const flex = flexuralDesignShared(M_hog, b, d_hog, fck, fy, D);
+        // Minimum steel: beam rule for a rib (Cl. 26.5.1.1 a), slab rule for a
+        // solid strip (already applied inside flexuralDesign).
+        const Ast_min = solidZone ? (flex.Ast_min ?? 0) : (0.85 / fy) * b * d_hog;
+        const Ast_req = Math.max(flex.Ast_req, Ast_min);
+        const Abar = Math.PI * hogBarDia * hogBarDia / 4;
+        const n_bars = input.rib_hog_n_bars && input.rib_hog_n_bars > 0
+            ? input.rib_hog_n_bars
+            : Math.max(2, Math.ceil(Ast_req / Abar));
+        const Ast_provided = n_bars * Abar;
+        // Cl. 26.3.2: clear spacing ≥ max(bar Ø, 25 mm) — check the bars fit
+        // across the rib web (not needed for a solid strip).
+        const clearGap = Math.max(hogBarDia, 25);
+        const fits = solidZone || (n_bars * hogBarDia + (n_bars - 1) * clearGap <= bw - 2 * cover);
+        const ok = !flex.isDoubly && Ast_provided >= Ast_req && fits;
+        const r1 = (v: number) => Math.round(v * 10) / 10;
+        return {
+            M_hog: Math.round(M_hog * 100) / 100, b, d: d_hog,
+            Mu_lim: Math.round(flex.Mu_lim * 100) / 100,
+            isDoubly: flex.isDoubly,
+            Ast_req: r1(Ast_req), Ast_min: r1(Ast_min),
+            bar_dia: hogBarDia, n_bars, Ast_provided: r1(Ast_provided),
+            fits, ok,
+        };
+    };
+    const hogging = isContinuous ? {
+        supportCondition: deflSupport,
+        solidZone,
+        coef: Math.round(hogCoef * 10000) / 10000,  // × q·L² (per m, before Rankine–Grashoff share)
+        x: designHog(hogCoef * qx * Lx * Lx * spacing_y, spacing_y),
+        y: designHog(hogCoef * qy * Ly * Ly * spacing_x, spacing_x),
+    } : null;
+    const hogging_ok = !hogging || (hogging.x.ok && hogging.y.ok);
+
     // Topping Slab Design ─ BUG-WS1 FIX (2026-06-26 audit):
     // The topping spans continuously between rib top flanges and behaves as a
     // continuous one-way slab; per IS 456 Cl. 22.5 (continuous slab moment
@@ -416,11 +492,6 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
         Df, Df_min, Df_min_geom: Math.round(Df_min_geom),
         messages: [] as string[],
     };
-    // The grid moments are simply supported; continuous edges develop hogging
-    // moments at the supports that this engine does not design.
-    const hoggingWarning = deflSupport !== 'simply'
-        ? 'Rib moments use a simply supported Rankine–Grashoff model. For continuous edges, design the support hogging moment (solid zone / rib top steel) separately.'
-        : null;
     if (!ribGeometryCheck.bwOk)
         ribGeometryCheck.messages.push(`Rib width ${bw}mm < 65mm (IS 456 Cl. 30.5)`);
     if (!ribGeometryCheck.spacingOk)
@@ -469,7 +540,7 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
     const overallStatus: 'SAFE' | 'REVISE' =
         (ribGeometryOk && !ribX.shear_over_max && !ribY.shear_over_max &&
             !ribX.isOverReinforced && !ribY.isOverReinforced &&
-            allAstFinite && deflection_safe && barChecks.topping.astFeasible) ? 'SAFE' : 'REVISE';
+            allAstFinite && deflection_safe && barChecks.topping.astFeasible && hogging_ok) ? 'SAFE' : 'REVISE';
 
     return {
         w_dead,
@@ -509,7 +580,8 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
         ribGeometryCheck,  // Cl. 30.5 (bw >= 65 mm, c/c <= 1500 mm, Dr <= 4bw) + topping >= max(50, clearSpacing/12)
         barChecks,
         deflectionSupport: deflSupport,
-        hoggingWarning,
+        hogging,          // support hogging design (null for simply supported edges)
+        hogging_ok,
     };
 }
 
@@ -702,9 +774,19 @@ export function optimizeWaffleSlab(
             // Rib steel: bottom (tension) + top (compression, if any) along
             // every rib in both directions.
             const Abar_rib_top = result.Asc_rib_provided; // already mm² per rib
+            // Hogging top bars at continuous supports — costed at 0.3·L from
+            // each continuous support (a costing estimate; the actual cut-off
+            // follows Cl. 26.2.3).
+            const hog = result.hogging;
+            const nContEnds = hog ? (hog.supportCondition === 'continuous' ? 2 : 1) : 0;
+            const hogSteel = hog
+                ? hog.x.Ast_provided * 0.3 * input.Lx * nContEnds * nRibsX
+                    + hog.y.Ast_provided * 0.3 * input.Ly * nContEnds * nRibsY
+                : 0;
             const ribSteel_net = (
                 (Ast_rib_prov + Abar_rib_top) * input.Lx * nRibsX +
-                (Ast_rib_prov + Abar_rib_top) * input.Ly * nRibsY
+                (Ast_rib_prov + Abar_rib_top) * input.Ly * nRibsY +
+                hogSteel
             ) / 1e6 * 7850;
             const Ast_topping_total = (result.Ast_topping_bot + result.Ast_topping_top); // mm²/m, both mats
             const toppingSteel_net = Ast_topping_total / 1e6 * (input.Lx * input.Ly) * 7850;

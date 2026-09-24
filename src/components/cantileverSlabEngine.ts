@@ -18,12 +18,14 @@ import {
     getTauC,
     getMinSteelRatio,
     annexCDeflection,
+    combineStripDeflections,
     getRequiredDeflectionCamber,
     computeSpanDepthCheck,
     computeCost,
     type ConcreteGrade,
     type CostParameters,
     type DeflectionResult,
+    type AnnexCDesign,
     type SpanDepthCheckResult,
 } from '../lib/is456';
 
@@ -49,6 +51,15 @@ export interface CantileverSlabInput {
     spacing_bot?: number; // Bottom bar spacing (mm)
     cover_bot?: number;   // Clear cover on the bottom (compression) face (mm); defaults to `cover`
     camber?: number; // explicit upward camber (mm), used by optimizer
+
+    // Support fixity for the deflection check.
+    //  'fixed'    — rigid support, no rotation (default; unconservative when the
+    //               cantilever is the extension of a flexible back-span).
+    //  'backspan' — the cantilever continues from an adjoining slab span whose
+    //               flexibility lets the root rotate; the tip moves θ·L.
+    supportFixity?: 'fixed' | 'backspan';
+    backSpan_L?: number;                          // back-span c/c length (m)
+    backSpan_farEnd?: 'pinned' | 'continuous';    // far-end restraint of the back-span
     
     // Optional parapet / railing line load at the free end
     parapetHeight?: number;    // m
@@ -144,9 +155,9 @@ export function analyzeCantileverSlab(input: CantileverSlabInput) {
     // Per the user's instruction: the simplified L/d = 7 span/depth check is NOT
     // used for cantilever slabs; instead the full Annex C deflection calculation governs.
     // Cantilever support condition → alpha = 1/4 (UDL), 1/3 (tip load), k3 = 0.5.
-    // The cantilever is taken as fixed at the support: rotation of the
-    // back-span / supporting beam is NOT included and must be added by the
-    // engineer where the support is flexible.
+    // Root rotation from a flexible back-span is added when
+    // supportFixity = 'backspan' (see below); rotation of a supporting beam in
+    // torsion is not modelled.
     const w_service_total = w_dead + w_live + w_finish;   // kN/m² (per m width)
     const w_perm = w_dead + w_finish;                      // permanent (dead) load
     const M_service = (w_service_total * Math.pow(L_eff, 2)) / 2 + P_parapet * L_eff;  // kN·m/m
@@ -158,24 +169,64 @@ export function analyzeCantileverSlab(input: CantileverSlabInput) {
     //   Asc_x_top + barDia_comp    → BOTTOM mat (the compression steel)
     // d' is supplied via the explicit barDia_comp / cover_comp fields so the
     // compression-face geometry is honoured exactly (matches PI-EX-106A XLS).
-    const deflection: DeflectionResult = annexCDeflection(
-        { Lx: L_eff * 1000, D, cover, fck, fy },
-        {
-            barDia_x_bot: bar_main,
-            Ast_x_bot: Ast_provided,
-            Asc_x_top: Asc_provided,                   // bottom mat = compression steel for cantilever
-            barDia_comp: bar_bot,                      // bottom bar dia (for d')
-            cover_comp: cover_bot ?? cover,            // bottom cover
-            M_service,
-            M_perm,
-            supportCondition: 'cantilever',
-            // Parapet line load at the tip deflects with α = 1/3 (PL³/3EI),
-            // not the UDL α = 1/4.
-            M_service_tip: P_parapet * L_eff,
-            M_perm_tip: P_parapet * L_eff,
-            camber: input.camber ?? 0,
-        },
-    );
+    const deflConfig = { Lx: L_eff * 1000, D, cover, fck, fy };
+    const deflLoading: AnnexCDesign = {
+        barDia_x_bot: bar_main,
+        Ast_x_bot: Ast_provided,
+        Asc_x_top: Asc_provided,                   // bottom mat = compression steel for cantilever
+        barDia_comp: bar_bot,                      // bottom bar dia (for d')
+        cover_comp: cover_bot ?? cover,            // bottom cover
+        M_service,
+        M_perm,
+        supportCondition: 'cantilever',
+        // Parapet line load at the tip deflects with α = 1/3 (PL³/3EI),
+        // not the UDL α = 1/4.
+        M_service_tip: P_parapet * L_eff,
+        M_perm_tip: P_parapet * L_eff,
+    };
+    const deflectionRoot: DeflectionResult = annexCDeflection(deflConfig, deflLoading);
+
+    // ─── Support rotation from a flexible back-span ─────────────────────────
+    // The cantilever root moment M rotates the near end of the back-span by
+    //   θ = k·M·Lb/(E·I),  k = 1/3 (far end pinned), 1/4 (far end fixed/continuous)
+    // (stiffness of a prismatic member: 3EI/L and 4EI/L). The tip deflects θ·L.
+    // E·I is the cracked hogging section at the root (same top steel carried
+    // into the back-span), I_eff short-term with Ec and I_eff,lt with Ece for
+    // the creep part — conservative, as the back-span moment falls off from M.
+    // Loads on the back-span (which rotate the root the other way) and
+    // back-span shrinkage are ignored — conservative.
+    const Lb_m = input.supportFixity === 'backspan' ? Math.max(0, input.backSpan_L ?? 0) : 0;
+    let supportRotation: {
+        Lb: number; farEnd: 'pinned' | 'continuous'; k: number;
+        theta_i_mrad: number; theta_perm_mrad: number; theta_lt_mrad: number;
+        a_i: number; a_i_perm: number; a1_perm: number; a_creep: number;
+    } | null = null;
+    let deflection: DeflectionResult = annexCDeflection(deflConfig, { ...deflLoading, camber: input.camber ?? 0 });
+    if (Lb_m > 0) {
+        const farEnd = input.backSpan_farEnd ?? 'pinned';
+        const k = farEnd === 'continuous' ? 1 / 4 : 1 / 3;
+        const Lb = Lb_m * 1000;                    // mm
+        const Lc = deflectionRoot.L;               // mm
+        const Ec = deflectionRoot.Ec, Ece = deflectionRoot.Ece;
+        const Ms = Math.abs(M_service) * 1e6, Mp = Math.abs(M_perm) * 1e6;   // N·mm
+        const theta_i = k * Ms * Lb / (Ec * deflectionRoot.Ieff);
+        const theta_perm = k * Mp * Lb / (Ec * deflectionRoot.Ieff_perm);
+        const theta_lt = k * Mp * Lb / (Ece * deflectionRoot.Ieff_lt);
+        const a_i = theta_i * Lc, a_i_perm = theta_perm * Lc, a1_perm = theta_lt * Lc;
+        const a_creep = Math.max(0, a1_perm - a_i_perm);
+        const rotPart: DeflectionResult = {
+            ...deflectionRoot,
+            ai: a_i, ai_perm: a_i_perm, a_live: Math.max(0, a_i - a_i_perm),
+            a1_perm, a_creep, a_shrinkage: 0,
+        };
+        deflection = combineStripDeflections([deflectionRoot, rotPart], Lc, input.camber ?? 0);
+        const r2 = (v: number) => Math.round(v * 100) / 100;
+        supportRotation = {
+            Lb: Lb_m, farEnd, k,
+            theta_i_mrad: r2(theta_i * 1000), theta_perm_mrad: r2(theta_perm * 1000), theta_lt_mrad: r2(theta_lt * 1000),
+            a_i: r2(a_i), a_i_perm: r2(a_i_perm), a1_perm: r2(a1_perm), a_creep: r2(a_creep),
+        };
+    }
     // User instruction: evaluate both total and post-construction checks.
     const defl_safe = deflection.status_total === 'OK' && deflection.status_post === 'OK';
     // Keep legacy fields for UI/PDF backwards-compat (mapped from Annex C result)
@@ -253,6 +304,8 @@ export function analyzeCantileverSlab(input: CantileverSlabInput) {
         pc_provided,
         // Deflection (Annex C) — replaced the legacy L/d=7 check
         deflection,
+        deflectionRoot,   // fixed-root cantilever deflection (before support rotation)
+        supportRotation,  // null when the support is taken as fixed
         defl_safe,
         Ld_actual,  // now = a_total (mm) for UI compat
         Ld_max,     // now = limit_total (mm) for UI compat

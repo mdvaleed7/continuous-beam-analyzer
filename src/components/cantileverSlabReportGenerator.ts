@@ -137,7 +137,7 @@ export async function generateCantileverSlabPDF(input: CantileverSlabInput, resu
                             L/d span/depth check (Cl. 23.2) is computed below for reference but is
                             IGNORED for design purposes.
                         </p>
-                        ${kx(`E_c = 5000\\sqrt{f_{ck}} = ${r.deflection.Ec} \\text{ N/mm}^2, \\quad m = \\frac{280}{f_{ck}} = ${r.deflection.m}`)}
+                        ${kx(`E_c = 5000\\sqrt{f_{ck}} = ${r.deflection.Ec} \\text{ N/mm}^2, \\quad m = E_s/E_c = ${r.deflection.m}`)}
                         ${kx(`A_{st,top} = ${r.Ast_provided.toFixed(0)} \\text{ mm}^2\\text{/m}, \\quad A_{sc,bot} = ${(r.Asc_provided ?? 0).toFixed(0)} \\text{ mm}^2\\text{/m}`)}
                         ${kx(`p_t = ${r.deflection.pt}\\%, \\quad p_c = ${r.deflection.pc}\\% \\quad \\text{(both top and bottom reinforcement included per PI-EX-106A)}`)}
                         ${kx(`f_{cr} = 0.7\\sqrt{f_{ck}} = ${r.deflection.fcr.toFixed(3)} \\text{ N/mm}^2, \\quad M_{cr} = ${r.deflection.Mcr.toFixed(2)} \\text{ kN·m/m}`)}
@@ -145,6 +145,12 @@ export async function generateCantileverSlabPDF(input: CantileverSlabInput, resu
                         ${kx(`a_i = \\alpha \\frac{M_s L^2}{E_c I_{eff}} = ${r.deflection.ai.toFixed(2)} \\text{ mm (short-term)}`)}
                         ${kx(`a_{shrinkage} = k_3 \\psi_{cs} L^2 = ${r.deflection.a_shrinkage.toFixed(2)} \\text{ mm} \\quad (k_3=0.5, \\psi_{cs}=${(r.deflection.psi_cs*1e6).toFixed(2)}\\times 10^{-6})`)}
                         ${kx(`a_{creep} = a_{1,perm} - a_{i,perm} = ${r.deflection.a_creep.toFixed(2)} \\text{ mm} \\quad (\\theta=${r.deflection.theta}, E_{ce}=${r.deflection.Ece.toFixed(0)})`)}
+                        ${r.supportRotation ? `
+                        <p style="font-size:12px;margin:6px 0 2px;"><strong>Support rotation (back-span, far end ${r.supportRotation.farEnd}):</strong>
+                        the values above include the tip movement &theta;&middot;L from rotation of the root. Back-span loads and shrinkage are ignored (conservative).</p>
+                        ${kx(`\\theta = k \\frac{M L_b}{E I}, \\ k = ${r.supportRotation.k === 0.25 ? '1/4' : '1/3'}, \\ L_b = ${r.supportRotation.Lb} \\text{ m} \\Rightarrow \\theta_i = ${r.supportRotation.theta_i_mrad} \\text{ mrad}, \\ \\theta_{perm,lt} = ${r.supportRotation.theta_lt_mrad} \\text{ mrad}`)}
+                        ${kx(`a_{i,rot} = \\theta_i L = ${r.supportRotation.a_i.toFixed(2)} \\text{ mm}, \\quad a_{creep,rot} = ${r.supportRotation.a_creep.toFixed(2)} \\text{ mm} \\quad (\\text{fixed-root } a_i = ${r.deflectionRoot.ai.toFixed(2)} \\text{ mm})`)}
+                        ` : ''}
                         ${r.deflection.camber > 0 ? kx(`\\text{Camber} = ${r.deflection.camber.toFixed(2)} \\text{ mm}`) : ''}
                         ${r.deflection.camber > 0
                             ? kx(`a_{total,net} = a_i + a_{creep} + a_{shrinkage} - a_{camber} = ${r.deflection.a_total.toFixed(2)} \\text{ mm} \\quad \\text{vs} \\quad L/250 = ${r.deflection.limit_total.toFixed(2)} \\text{ mm}`)
