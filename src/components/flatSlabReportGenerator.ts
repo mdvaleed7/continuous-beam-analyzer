@@ -159,7 +159,8 @@ export async function generateFlatSlabPDF(input: FlatSlabInput, results: any, pr
                         ${kx(`a_i = ${r.deflection.ai.toFixed(2)} \\text{ mm (short-term)}, \\quad a_{shrinkage} = ${r.deflection.a_shrinkage.toFixed(2)} \\text{ mm}, \\quad a_{creep} = ${r.deflection.a_creep.toFixed(2)} \\text{ mm}`)}
                         ${r.deflection.camber > 0 ? kx(`a_{camber} = ${r.deflection.camber.toFixed(2)} \\text{ mm (upward)}`) : ''}
                         ${kx(`a_{total,net} = ${r.deflection.a_total.toFixed(2)} \\text{ mm} \\quad \\text{vs} \\quad L/250 = ${r.deflection.limit_total.toFixed(2)} \\text{ mm}`)}
-                        ${kx(`a_{post,net} = ${r.deflection.a_post_construction.toFixed(2)} \\text{ mm} \\quad \\text{vs} \\quad L/350 = ${r.deflection.limit_post.toFixed(2)} \\text{ mm}`)}
+                        ${kx(`a_{post} = (a_i - a_{i,perm}) + a_{creep} + a_{shrinkage}${r.deflection.camber > 0 ? ' - a_{camber}' : ''} = ${r.deflection.a_post_construction.toFixed(2)} \\text{ mm} \\quad \\text{vs} \\quad \\min(L/350, 20) = ${r.deflection.limit_post.toFixed(2)} \\text{ mm}`)}
+                        ${r.deflectionStrips ? `<p style="font-size:12px;margin:6px 0 0;">Panel-centre deflection by the crossing-strip method (governing: ${r.deflectionStrips.governing}); column strip ${r.deflectionStrips.governing === 'cs(L1)+ms(L2)' ? r.deflectionStrips.cs1.a_total.toFixed(2) : r.deflectionStrips.cs2.a_total.toFixed(2)} mm + middle strip ${r.deflectionStrips.governing === 'cs(L1)+ms(L2)' ? r.deflectionStrips.ms2.a_total.toFixed(2) : r.deflectionStrips.ms1.a_total.toFixed(2)} mm (strip totals before camber).</p>` : ''}
                         <div style="margin-top:6px;">
                             ${r.deflection_safe
                                 ? `${statusChip(true, 'SAFE')} &nbsp; Total ${r.deflection.a_total.toFixed(2)} ≤ ${r.deflection.limit_total.toFixed(2)} mm`

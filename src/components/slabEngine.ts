@@ -19,6 +19,7 @@ import {
     selectBars,
     computeCostIndex,
     annexCDeflection,
+    staticBeta,
     getRequiredDeflectionCamber,
     type CostParameters,
     computeCost,
@@ -694,6 +695,24 @@ export function analyzeSlab(config: SlabConfig): SlabAnalysisResult {
 
     const supportCondDefl: SupportCondition = effectiveSupportCond;
 
+    // β = (M_A + M_B)/M_C for the deflection coefficient α = 0.104(1 − β/10)
+    // (BS 8110-2 Table 3.1). α must describe the same moment diagram as the
+    // midspan moment passed to Annex C:
+    //  • one-way: support moments from equilibrium with the design midspan
+    //    coefficient, (M_A + M_B)/2 = wL²/8 − M_C (the Table 12 support
+    //    coefficients are envelopes, not one consistent moment diagram);
+    //  • two-way: Table 26 short-span support/midspan coefficients, counting
+    //    only the continuous short-span ends.
+    let betaDefl: number | undefined;
+    if (!isCantilever) {
+        if (actualSlabType === 'one-way') {
+            betaDefl = staticBeta(ax_pos ?? 0);
+        } else {
+            const nContEnds = supportCondDefl === 'continuous' ? 2 : supportCondDefl === 'one_end' ? 1 : 0;
+            betaDefl = (ax_pos ?? 0) > 0 && ax_neg ? Math.min(4, nContEnds * ax_neg / (ax_pos as number)) : 0;
+        }
+    }
+
     const maxMu = Math.max(Mx_pos || 0, My_pos || 0, Math.abs(Mx_neg || 0), Math.abs(My_neg || 0));
     // IS 456 Cl. 38.1: d = √(M / (R·b))  where R = coeff × fck
     const bmDepth = computeRequiredDepthForBM(maxMu, fck, fy, 1000);
@@ -716,6 +735,7 @@ export function analyzeSlab(config: SlabConfig): SlabAnalysisResult {
             M_service: totalServiceMoment || Mx_governing / loadFactor,
             M_perm: permMoment || (totalDL / totalService) * Mx_governing / loadFactor,
             supportCondition: supportCondDefl,
+            beta: betaDefl,
             camber,
         },
     );

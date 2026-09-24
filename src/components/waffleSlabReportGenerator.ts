@@ -260,7 +260,8 @@ export async function generateWaffleSlabPDF(input: WaffleSlabInput, results: any
                         ${kx(`a_i = ${r.deflection.ai.toFixed(2)} \\text{ mm (short-term)}, \\quad a_{shrinkage} = ${r.deflection.a_shrinkage.toFixed(2)} \\text{ mm}, \\quad a_{creep} = ${r.deflection.a_creep.toFixed(2)} \\text{ mm}`)}
                         ${r.deflection.camber > 0 ? kx(`a_{camber} = ${r.deflection.camber.toFixed(2)} \\text{ mm (upward)}`) : ''}
                         ${kx(`a_{total,net} = ${r.deflection.a_total.toFixed(2)} \\text{ mm} \\quad \\text{vs} \\quad L/250 = ${r.deflection.limit_total.toFixed(2)} \\text{ mm}`)}
-                        ${kx(`a_{post,net} = ${r.deflection.a_post_construction.toFixed(2)} \\text{ mm} \\quad \\text{vs} \\quad L/350 = ${r.deflection.limit_post.toFixed(2)} \\text{ mm}`)}
+                        ${kx(`a_{post} = (a_i - a_{i,perm}) + a_{creep} + a_{shrinkage}${r.deflection.camber > 0 ? ' - a_{camber}' : ''} = ${r.deflection.a_post_construction.toFixed(2)} \\text{ mm} \\quad \\text{vs} \\quad \\min(L/350, 20) = ${r.deflection.limit_post.toFixed(2)} \\text{ mm}`)}
+                        ${r.hoggingWarning ? `<div style="margin-top:6px;padding:6px 10px;background:#fffbeb;border-left:3px solid #f59e0b;font-size:12px;color:#92400e;">${r.hoggingWarning}</div>` : ''}
                         <div style="margin-top:6px;">
                             ${r.deflection_safe
                                 ? `${statusChip(true, 'SAFE')} &nbsp; Total ${r.deflection.a_total.toFixed(2)} ≤ ${r.deflection.limit_total.toFixed(2)} mm`

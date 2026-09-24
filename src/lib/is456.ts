@@ -630,6 +630,9 @@ export const computeCostIndex =
 //  Key parameters:
 //    k3 = 0.5 (cantilever), 0.125 (simply), 0.086 (one_end), 0.063 (continuous)
 //    fcr = 0.7·√fck, Ece = Ec/(1+θ), Ieff via 1.2−(Mcr/Ms)(z/d)(1−x/d)
+//    α = 1/4 (cantilever UDL), 1/3 (cantilever tip load),
+//        0.104(1 − β/10) for spans, β = (M_A + M_B)/M_C  [BS 8110-2 Table 3.1]
+//    a_post = (a_i − a_i,perm) + a_creep + a_shrinkage   [Cl. 23.2 b]
 // ═══════════════════════════════════════════════════════════════
 
 export type SupportCondition = 'cantilever' | 'simply' | 'one_end' | 'continuous';
@@ -729,7 +732,7 @@ export interface AnnexCConfig {
     ageOfLoading?: string;   // '7' | '28' | '365' — default '28'
 }
 
-export interface AnnexCDesign {
+export interface AnnexCDesign extends AnnexCLoading {
     barDia_x_bot: number;    // tension bar diameter (mm)
     Ast_x_bot: number;       // tension steel area (mm²/m)
     Asc_x_top?: number;      // compression steel area (mm²/m) — default 0
@@ -739,10 +742,7 @@ export interface AnnexCDesign {
     // slabs where the compression face differs in cover / bar diameter.
     barDia_comp?: number;    // compression bar diameter (mm) — used to locate d'
     cover_comp?: number;     // clear cover on the compression face (mm)
-    M_service: number;       // total service moment (kN·m/m)
-    M_perm: number;          // permanent (dead) service moment (kN·m/m)
-    supportCondition: SupportCondition;
-    camber?: number;         // explicit upward camber (mm), default 0
+    // M_service, M_perm, supportCondition, beta, M_*_tip, camber: see AnnexCLoading
 }
 
 export interface DeflectionResult {
@@ -751,8 +751,14 @@ export interface DeflectionResult {
     pt: number; pc: number;
     Igr: number; Icr: number; Ieff: number; Ieff_perm: number; Icr_lt: number; Ieff_lt: number;
     x: number; x_lt: number; z: number; z_lt: number;
-    Mcr: number; fcr: number; alpha: number; k3: number; eps_cs: number; psi_cs: number;
-    ai: number; ai_perm: number; a1_perm: number; a_shrinkage: number; a_creep: number;
+    Mcr: number; fcr: number;
+    alpha: number;           // α applied to M_service (short-term)
+    alpha_perm: number;      // α applied to M_perm (differs only with a cantilever tip load)
+    beta?: number;           // (M_A + M_B)/M_C used for α, when supplied
+    k3: number; k4: number; eps_cs: number; psi_cs: number;
+    ai: number; ai_perm: number;
+    a_live: number;          // ai − ai_perm: short-term live-load deflection
+    a1_perm: number; a_shrinkage: number; a_creep: number;
     a_total: number; a_post_construction: number;
     limit_total: number; limit_post: number;
     status_total: 'OK' | 'FAIL'; status_post: 'OK' | 'FAIL';
@@ -794,27 +800,238 @@ export function getRequiredDeflectionCamber(
     return clampDeflectionCamber(roundedRequired, deflection.a_post_construction, step);
 }
 
-export function annexCDeflection(config: AnnexCConfig, design: AnnexCDesign): DeflectionResult {
-    const { Lx, D, cover, fck, fy, Es = 200000, ageOfLoading = '28' } = config;
-    const {
-        barDia_x_bot, Ast_x_bot, Asc_x_top = 0,
-        barDia_comp, cover_comp,
-        M_service, M_perm, supportCondition,
-    } = design;
+/**
+ * Deflection coefficient α (a = α·M·L²/(E·I)) for a UDL.
+ *
+ * IS 456 Annex C does not tabulate α; the values below are BS 8110-2:1985
+ * Table 3.1:
+ *   • cantilever, UDL ............ K = 1/4
+ *   • span with end moments ..... K = 0.104·(1 − β/10),  β = (M_A + M_B)/M_C
+ * where M_C is the midspan moment the deflection is computed from. K is only
+ * exact when the M passed in and β describe the SAME moment diagram, so the
+ * engines pass β explicitly. β is limited to [0, 4] (β = 4 is a fully fixed
+ * span, K = 1/16). The legacy fixed values (used only when β is not supplied)
+ * assume a simply supported / propped / fully fixed moment diagram.
+ */
+export function annexCAlpha(supportCondition: SupportCondition, beta?: number): number {
+    if (supportCondition === 'cantilever') return 1 / 4;
+    if (beta !== undefined && Number.isFinite(beta)) {
+        const bc = Math.max(0, Math.min(4, beta));
+        return 0.104 * (1 - bc / 10);
+    }
+    switch (supportCondition) {
+        case 'simply': return 5 / 48;
+        case 'one_end': return 1 / 12;
+        case 'continuous':
+        default: return 1 / 16;
+    }
+}
 
-    const b = 1000; // mm, unit strip
-    const d = D - cover - (barDia_x_bot || 10) / 2;
-    const L = Lx; // mm
+/**
+ * Midspan-moment ratio β = (M_A + M_B)/M_C for a span whose design midspan
+ * moment is M_C = coeffMid·wL² and whose support moments are whatever keeps
+ * the span in equilibrium with a UDL: (M_A + M_B)/2 + M_C = wL²/8.
+ * Returns 0 when the midspan coefficient already equals the free moment.
+ */
+export function staticBeta(coeffMid: number): number {
+    if (!(coeffMid > 0)) return 0;
+    return Math.max(0, 2 * (0.125 - coeffMid) / coeffMid);
+}
+
+/** Cantilever tip point load: δ = P·L³/(3EI) = (1/3)·(P·L)·L²/(EI). */
+const ALPHA_CANTILEVER_TIP_POINT = 1 / 3;
+
+/** α weighted between the UDL part and a cantilever tip point-load part of M. */
+function blendTipAlpha(alphaUdl: number, M: number, M_tip: number | undefined, sc: SupportCondition): number {
+    if (sc !== 'cantilever' || !M_tip || M <= 0.001) return alphaUdl;
+    const Mt = Math.max(0, Math.min(Math.abs(M_tip), M));
+    return (alphaUdl * (M - Mt) + ALPHA_CANTILEVER_TIP_POINT * Mt) / M;
+}
+
+/**
+ * IS 456 Annex C Cl. C-2.1:
+ *   I_eff = I_cr / [1.2 − (M_r/M)(z/d)(1 − x/d)(b_w/b)],  I_cr ≤ I_eff ≤ I_gr
+ */
+function annexCIeff(Icr: number, Igr: number, Mcr: number, M: number, z_d: number, x_d: number, bw_b: number): number {
+    if (M <= 0.001 || Mcr >= M) return Igr;
+    const factor = 1.2 - (Mcr / M) * z_d * (1 - x_d) * bw_b;
+    const I = factor > 0 ? Icr / factor : Igr;
+    return Math.max(Icr, Math.min(Igr, I));
+}
+
+/**
+ * IS 456 Annex C Cl. C-3.1 shrinkage factor k4.
+ * The clause gives k4 only for (pt − pc) ≥ 0.25. Below that range the 0.72
+ * expression is extended (engineering judgment) instead of taking k4 = 0,
+ * which would drop the shrinkage deflection of lightly reinforced slabs.
+ */
+export function annexCK4(pt: number, pc: number): number {
+    const diff = Math.max(0, pt - pc);
+    if (pt <= 0 || diff <= 0) return 0;
+    const k4 = diff < 1.0 ? 0.72 * diff / Math.sqrt(pt) : 0.65 * diff / Math.sqrt(pt);
+    return Math.min(1.0, k4);
+}
+
+function annexCK3(sc: SupportCondition): number {
+    switch (sc) {
+        case 'cantilever': return 0.500;
+        case 'simply': return 0.125;
+        case 'one_end': return 0.086;
+        case 'continuous':
+        default: return 0.063;
+    }
+}
+
+/** Loading shared by the rectangular-strip and T-beam Annex C routines. */
+export interface AnnexCLoading {
+    M_service: number;       // total service moment (kN·m)
+    M_perm: number;          // permanent (dead) service moment (kN·m)
+    supportCondition: SupportCondition;
+    // β = (M_A + M_B)/M_C for the moment diagram M_service belongs to (see
+    // annexCAlpha). Omit to use the legacy fixed α for the support condition.
+    beta?: number;
+    // Cantilever only: the part of M_service / M_perm caused by a point load at
+    // the free end (e.g. a parapet), deflected with α = 1/3 instead of 1/4.
+    M_service_tip?: number;
+    M_perm_tip?: number;
+    camber?: number;         // explicit upward camber (mm), default 0
+}
+
+interface AnnexCSection {
+    L: number; D: number; d: number; b: number; bw_b: number;
+    Es: number; fck: number; ageOfLoading: string;
+    Igr: number; Mcr: number; fcr: number; pt: number; pc: number;
+    cracked: (m: number) => { x: number; Icr: number };
+}
+
+/**
+ * Annex C short-term + shrinkage + creep deflection on a prepared section.
+ *
+ * Loading history: once the section has cracked under the full service moment
+ * it stays cracked, so I_eff for the permanent load (short- and long-term) is
+ * evaluated at max(M_service, M_perm), not at M_perm alone.
+ *
+ * Deflection after partitions/finishes (Cl. 23.2 b) =
+ *   (a_i − a_i,perm) [live load] + a_creep + a_shrinkage.
+ */
+function annexCCore(sec: AnnexCSection, loading: AnnexCLoading): DeflectionResult {
+    const { L, D, d, b, bw_b, Es, fck, ageOfLoading, Igr, Mcr, fcr, pt, pc } = sec;
+    const { supportCondition } = loading;
 
     const Ec = getEc(fck);
     const m = getAnnexCModularRatio(fck, Es);
-    const pt = 100 * Ast_x_bot / (b * d);
-    const pc = 100 * Asc_x_top / (b * d);
+    const { x, Icr } = sec.cracked(m);
+    const z = d - x / 3;
 
+    const Ms = Math.abs(loading.M_service);
+    const Mp = Math.abs(loading.M_perm);
+    const M_crack = Math.max(Ms, Mp);
+
+    const Ieff = annexCIeff(Icr, Igr, Mcr, M_crack, z / d, x / d, bw_b);
+    const Ieff_perm = Ieff;
+
+    const alpha0 = annexCAlpha(supportCondition, loading.beta);
+    const alpha = blendTipAlpha(alpha0, Ms, loading.M_service_tip, supportCondition);
+    const alpha_perm = blendTipAlpha(alpha0, Mp, loading.M_perm_tip, supportCondition);
+
+    const ai = alpha * Ms * 1e6 * L * L / (Ec * Ieff);
+    const ai_perm = alpha_perm * Mp * 1e6 * L * L / (Ec * Ieff_perm);
+
+    // Shrinkage (Annex C Cl. C-3)
+    const eps_cs = 0.0003;
+    const k4 = annexCK4(pt, pc);
+    const psi_cs = k4 * eps_cs / D;
+    const k3 = annexCK3(supportCondition);
+    const a_shrinkage = k3 * psi_cs * L * L;
+
+    // Creep (Annex C Cl. C-4)
+    const theta = CREEP_COEFF[ageOfLoading] ?? 1.6;
+    const Ece = Ec / (1 + theta);
+    const m_lt = Es / Ece;
+    const { x: x_lt, Icr: Icr_lt } = sec.cracked(m_lt);
+    const z_lt = d - x_lt / 3;
+    const Ieff_lt = annexCIeff(Icr_lt, Igr, Mcr, M_crack, z_lt / d, x_lt / d, bw_b);
+    const a1_perm = alpha_perm * Mp * 1e6 * L * L / (Ece * Ieff_lt);
+    const a_creep = Math.max(0, a1_perm - ai_perm);
+
+    const a_live = Math.max(0, ai - ai_perm);
+    const a_total_raw = ai + a_creep + a_shrinkage;
+    const a_post_raw = a_live + a_creep + a_shrinkage;
+
+    const limit_total = L / 250;
+    const limit_post = Math.min(L / 350, 20);
+
+    // Camber is credited only when supplied explicitly by the caller. It is kept
+    // on 5 mm increments and below the post-construction deflection being offset.
+    const camber = clampDeflectionCamber(loading.camber ?? 0, a_post_raw);
+    const a_total = Math.max(0, a_total_raw - camber);
+    const a_post_construction = Math.max(0, a_post_raw - camber);
+
+    const r2 = (v: number) => Math.round(v * 100) / 100;
+    const r3 = (v: number) => Math.round(v * 1000) / 1000;
+    return {
+        L, D, d, b,
+        Ec: r2(Ec), Es, m: r3(m), m_lt: r3(m_lt), theta, Ece,
+        pt: r3(pt), pc: r3(pc),
+        Igr, Icr, Ieff, Ieff_perm, Icr_lt, Ieff_lt,
+        x: r2(x), x_lt: r2(x_lt), z: r2(z), z_lt: r2(z_lt),
+        Mcr: r2(Mcr), fcr, alpha, alpha_perm, beta: loading.beta, k3, k4, eps_cs,
+        psi_cs: Math.round(psi_cs * 1e6) / 1e6,
+        ai: r2(ai), ai_perm: r2(ai_perm), a_live: r2(a_live),
+        a1_perm: r2(a1_perm), a_shrinkage: r2(a_shrinkage), a_creep: r2(a_creep),
+        a_total: r2(a_total), a_post_construction: r2(a_post_construction),
+        limit_total: r2(limit_total), limit_post: r2(limit_post),
+        status_total: a_total <= limit_total ? 'OK' : 'FAIL',
+        status_post: a_post_construction <= limit_post ? 'OK' : 'FAIL',
+        supportCondition,
+        camber: r2(camber),
+    };
+}
+
+/**
+ * Sum Annex C strip deflections at a common point (crossing-strip method for
+ * two-way systems such as flat slabs: panel-centre deflection = column strip
+ * in one direction + middle strip in the other). Short-term, live, creep and
+ * shrinkage components add; limits are taken on `L_limit`; camber is credited
+ * once on the combined result. Section properties are reported from parts[0].
+ */
+export function combineStripDeflections(parts: DeflectionResult[], L_limit: number, camberRequested: number = 0): DeflectionResult {
+    const sum = (k: 'ai' | 'ai_perm' | 'a_live' | 'a1_perm' | 'a_shrinkage' | 'a_creep') =>
+        parts.reduce((acc, p) => acc + p[k], 0);
+    const ai = sum('ai');
+    const a_live = sum('a_live');
+    const a_creep = sum('a_creep');
+    const a_shrinkage = sum('a_shrinkage');
+    const a_total_raw = ai + a_creep + a_shrinkage;
+    const a_post_raw = a_live + a_creep + a_shrinkage;
+    const limit_total = L_limit / 250;
+    const limit_post = Math.min(L_limit / 350, 20);
+    const camber = clampDeflectionCamber(camberRequested, a_post_raw);
+    const a_total = Math.max(0, a_total_raw - camber);
+    const a_post_construction = Math.max(0, a_post_raw - camber);
+    const r2 = (v: number) => Math.round(v * 100) / 100;
+    return {
+        ...parts[0],
+        L: L_limit,
+        ai: r2(ai), ai_perm: r2(sum('ai_perm')), a_live: r2(a_live),
+        a1_perm: r2(sum('a1_perm')), a_shrinkage: r2(a_shrinkage), a_creep: r2(a_creep),
+        a_total: r2(a_total), a_post_construction: r2(a_post_construction),
+        limit_total: r2(limit_total), limit_post: r2(limit_post),
+        status_total: a_total <= limit_total ? 'OK' : 'FAIL',
+        status_post: a_post_construction <= limit_post ? 'OK' : 'FAIL',
+        camber: r2(camber),
+    };
+}
+
+export function annexCDeflection(config: AnnexCConfig, design: AnnexCDesign): DeflectionResult {
+    const { Lx, D, cover, fck, Es = 200000, ageOfLoading = '28' } = config;
+    const { barDia_x_bot, Ast_x_bot, Asc_x_top = 0, barDia_comp, cover_comp } = design;
+
+    const b = 1000; // mm, unit strip
+    const d = D - cover - (barDia_x_bot || 10) / 2;
     const Igr = b * D * D * D / 12;
     const fcr = 0.7 * Math.sqrt(fck);
-    const yt = D / 2;
-    const Mcr = fcr * Igr / yt / 1e6;
+    const Mcr = fcr * Igr / (D / 2) / 1e6;
 
     // d' from the compression face to centroid of compression steel.
     // If the caller supplied explicit compression-face geometry, use it;
@@ -822,155 +1039,30 @@ export function annexCDeflection(config: AnnexCConfig, design: AnnexCDesign): De
     const d_comp = (barDia_comp !== undefined || cover_comp !== undefined)
         ? ((cover_comp ?? cover) + (barDia_comp ?? barDia_x_bot ?? 10) / 2)
         : cover + (barDia_x_bot || 10) / 2;
-    let x: number;
-    if (Asc_x_top > 0) {
-        const A = b / 2;
-        const B = (m - 1) * Asc_x_top + m * Ast_x_bot;
-        const C = -(m * Ast_x_bot * d + (m - 1) * Asc_x_top * d_comp);
-        x = (-B + Math.sqrt(B * B - 4 * A * C)) / (2 * A);
-    } else {
-        x = (-m * Ast_x_bot + Math.sqrt(Math.pow(m * Ast_x_bot, 2) + 2 * b * m * Ast_x_bot * d)) / b;
-    }
 
-    const Icr = b * x * x * x / 3
-        + m * Ast_x_bot * Math.pow(d - x, 2)
-        + (m - 1) * Asc_x_top * Math.pow(x - d_comp, 2);
-
-    const Ms = Math.abs(M_service);
-    const z = d - x / 3;
-    let Ieff: number;
-    if (Ms <= 0.001 || Mcr >= Ms) {
-        Ieff = Igr;
-    } else {
-        // IS 456 Annex C Cl. C-2.1. For a rectangular slab strip, bw / b = 1.0.
-        const factor = 1.2 - (Mcr / Ms) * (z / d) * (1 - x / d);
-        Ieff = factor > 0 ? Icr / factor : Igr;
-        Ieff = Math.max(Icr, Math.min(Igr, Ieff));
-    }
-
-    const Mp = Math.abs(M_perm);
-    let Ieff_perm: number;
-    if (Mp <= 0.001 || Mcr >= Mp) {
-        Ieff_perm = Igr;
-    } else {
-        const factor_p = 1.2 - (Mcr / Mp) * (z / d) * (1 - x / d);
-        Ieff_perm = factor_p > 0 ? Icr / factor_p : Igr;
-        Ieff_perm = Math.max(Icr, Math.min(Igr, Ieff_perm));
-    }
-
-    let alpha: number;
-    switch (supportCondition) {
-        case 'simply': alpha = 5 / 48; break;
-        case 'one_end': alpha = 1 / 12; break;
-        case 'continuous': alpha = 1 / 16; break;
-        case 'cantilever': alpha = 1 / 4; break;
-        default: alpha = 1 / 16;
-    }
-
-    const ai = alpha * Ms * 1e6 * L * L / (Ec * Ieff);
-    const ai_perm = alpha * Mp * 1e6 * L * L / (Ec * Ieff_perm);
-
-
-    const eps_cs = 0.0003;
-    const ptPcDiff = Math.max(0, pt - pc);
-    let k4: number;
-    if (pt <= 0 || ptPcDiff < 0.25) {
-        // Below the lower threshold IS 456 gives no formula — take k4 = 0
-        k4 = 0;
-    } else if (ptPcDiff < 1.0) {
-        k4 = 0.72 * ptPcDiff / Math.sqrt(pt);
-    } else {
-        k4 = 0.65 * ptPcDiff / Math.sqrt(pt);
-    }
-    k4 = Math.min(1.0, k4);
-    const psi_cs = k4 * eps_cs / D;
-
-    let k3: number;
-    switch (supportCondition) {
-        case 'cantilever': k3 = 0.500; break;
-        case 'simply': k3 = 0.125; break;
-        case 'one_end': k3 = 0.086; break;
-        case 'continuous': k3 = 0.063; break;
-        default: k3 = 0.063;
-    }
-    const a_shrinkage = k3 * psi_cs * L * L;
-
-    // Creep deflection (Annex C Cl. C-4)
-    const theta = CREEP_COEFF[ageOfLoading] ?? 1.6;
-    const Ece = Ec / (1 + theta);
-    const m_lt = Es / Ece;
-
-    let x_lt: number;
-    if (Asc_x_top > 0) {
-        const A = b / 2;
-        const B = (m_lt - 1) * Asc_x_top + m_lt * Ast_x_bot;
-        const C = -(m_lt * Ast_x_bot * d + (m_lt - 1) * Asc_x_top * d_comp);
-        x_lt = (-B + Math.sqrt(B * B - 4 * A * C)) / (2 * A);
-    } else {
-        x_lt = (-m_lt * Ast_x_bot + Math.sqrt(Math.pow(m_lt * Ast_x_bot, 2) + 2 * b * m_lt * Ast_x_bot * d)) / b;
-    }
-
-    const z_lt = d - x_lt / 3;
-    const Icr_lt = b * x_lt * x_lt * x_lt / 3
-        + m_lt * Ast_x_bot * Math.pow(d - x_lt, 2)
-        + (m_lt - 1) * Asc_x_top * Math.pow(x_lt - d_comp, 2);
-
-    let Ieff_lt: number;
-    if (Mp <= 0.001 || Mcr >= Mp) {
-        Ieff_lt = Igr;
-    } else {
-        const factor_lt = 1.2 - (Mcr / Mp) * (z_lt / d) * (1 - x_lt / d);
-        Ieff_lt = factor_lt > 0 ? Icr_lt / factor_lt : Igr;
-        Ieff_lt = Math.max(Icr_lt, Math.min(Igr, Ieff_lt));
-    }
-
-    const a1_perm = alpha * Mp * 1e6 * L * L / (Ece * Ieff_lt);
-    const a_creep = a1_perm - ai_perm;
-
-    const a_total_raw = ai + Math.max(0, a_creep) + a_shrinkage;
-    const a_post_raw = Math.max(0, a_creep) + a_shrinkage;
-
-    const limit_total = L / 250;
-    const limit_post = Math.min(L / 350, 20);
-
-    // Camber is credited only when supplied explicitly by the caller. It is kept
-    // on 5 mm increments and below the post-construction deflection being offset.
-    const camber = clampDeflectionCamber(design.camber ?? 0, a_post_raw);
-    const a_total = Math.max(0, a_total_raw - camber);
-    const a_post_construction = Math.max(0, a_post_raw - camber);
-
-    return {
-        L, D, d, b,
-        Ec: Math.round(Ec * 100) / 100,
-        Es,
-        m: Math.round(m * 1000) / 1000,
-        m_lt: Math.round(m_lt * 1000) / 1000,
-        theta,
-        Ece,
-        pt: Math.round(pt * 1000) / 1000,
-        pc: Math.round(pc * 1000) / 1000,
-        Igr, Icr, Ieff, Ieff_perm, Icr_lt, Ieff_lt,
-        x: Math.round(x * 100) / 100,
-        x_lt: Math.round(x_lt * 100) / 100,
-        z: Math.round(z * 100) / 100,
-        z_lt: Math.round(z_lt * 100) / 100,
-        Mcr: Math.round(Mcr * 100) / 100,
-        fcr, alpha, k3, eps_cs,
-        psi_cs: Math.round(psi_cs * 1e6) / 1e6,
-        ai: Math.round(ai * 100) / 100,
-        ai_perm: Math.round(ai_perm * 100) / 100,
-        a1_perm: Math.round(a1_perm * 100) / 100,
-        a_shrinkage: Math.round(a_shrinkage * 100) / 100,
-        a_creep: Math.round(Math.max(0, a_creep) * 100) / 100,
-        a_total: Math.round(a_total * 100) / 100,
-        a_post_construction: Math.round(a_post_construction * 100) / 100,
-        limit_total: Math.round(limit_total * 100) / 100,
-        limit_post: Math.round(limit_post * 100) / 100,
-        status_total: a_total <= limit_total ? 'OK' : 'FAIL',
-        status_post: a_post_construction <= limit_post ? 'OK' : 'FAIL',
-        supportCondition,
-        camber: Math.round(camber * 100) / 100,
+    const cracked = (m: number) => {
+        let x: number;
+        if (Asc_x_top > 0) {
+            const A = b / 2;
+            const B = (m - 1) * Asc_x_top + m * Ast_x_bot;
+            const C = -(m * Ast_x_bot * d + (m - 1) * Asc_x_top * d_comp);
+            x = (-B + Math.sqrt(B * B - 4 * A * C)) / (2 * A);
+        } else {
+            x = (-m * Ast_x_bot + Math.sqrt(Math.pow(m * Ast_x_bot, 2) + 2 * b * m * Ast_x_bot * d)) / b;
+        }
+        const Icr = b * x * x * x / 3
+            + m * Ast_x_bot * Math.pow(d - x, 2)
+            + (m - 1) * Asc_x_top * Math.pow(x - d_comp, 2);
+        return { x, Icr };
     };
+
+    return annexCCore({
+        L: Lx, D, d, b, bw_b: 1, Es, fck, ageOfLoading,
+        Igr, Mcr, fcr,
+        pt: 100 * Ast_x_bot / (b * d),
+        pc: 100 * Asc_x_top / (b * d),
+        cracked,
+    }, design);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -990,7 +1082,7 @@ export function annexCDeflection(config: AnnexCConfig, design: AnnexCDesign): De
 //    5. Short-term a_i = α·Ms·L²/(Ec·I_eff)
 //    6. Shrinkage a_sh = k3·ψ_cs·L²  (k3 per support condition)
 //    7. Creep a_cr = a1,perm − ai,perm  (Ece = Ec/(1+θ))
-//    8. Camber applied if total or post-construction exceeds limits.
+//    8. a_post = (a_i − a_i,perm) + a_cr + a_sh; explicit camber credited.
 // ═══════════════════════════════════════════════════════════════
 
 export interface TBeamDeflectionConfig {
@@ -1016,12 +1108,7 @@ export interface TBeamDeflectionConfig {
     ageOfLoading?: string;
 }
 
-export interface TBeamDeflectionDesign {
-    M_service: number;     // total service moment on the rib (kN·m)
-    M_perm: number;        // permanent (dead) service moment (kN·m)
-    supportCondition: SupportCondition;
-    camber?: number;       // explicit upward camber (mm), default 0
-}
+export type TBeamDeflectionDesign = AnnexCLoading;
 
 export function tBeamDeflection(config: TBeamDeflectionConfig, design: TBeamDeflectionDesign): DeflectionResult {
     const {
@@ -1036,7 +1123,6 @@ export function tBeamDeflection(config: TBeamDeflectionConfig, design: TBeamDefl
     const cover_t = cover_top ?? cover;
     const d_comp = Asc > 0 ? cover_t + (barDia_top || 0) / 2 : 0;
     const b = bf;                        // flange width (for unit-strip compat in return)
-    const m_ratio = getAnnexCModularRatio(fck, Es); // Modular ratio m = Es / Ec
 
     // ─── 1. Gross moment of inertia I_gr (T-section, uncracked) ─────────────
     // Flange: bf × Df, centroid at Df/2 from top
@@ -1083,157 +1169,32 @@ export function tBeamDeflection(config: TBeamDeflectionConfig, design: TBeamDefl
         return discB >= 0 ? (-bB + Math.sqrt(discB)) / (2 * aB) : Df;
     };
 
-    const x = solveX(m_ratio, Asc > 0);
-
-    // I_cr: cracked transformed inertia about NA (top fibre = 0)
-    const compTerm = Asc > 0 ? (m_ratio - 1) * Asc * Math.pow(x - d_comp, 2) : 0;
-    let Icr: number;
-    if (x <= Df) {
-        // Rectangular flange section
-        Icr = bf * Math.pow(x, 3) / 3 + m_ratio * Ast * Math.pow(d - x, 2) + compTerm;
-    } else {
-        // True T-section: bf·x³/3 − (bf−bw)·(x−Df)³/3 + m·Ast·(d−x)² + comp
-        Icr = bf * Math.pow(x, 3) / 3
-            - (bf - bw) * Math.pow(x - Df, 3) / 3
-            + m_ratio * Ast * Math.pow(d - x, 2)
-            + compTerm;
-    }
+    const crackedT = (m: number) => {
+        const x = solveX(m, Asc > 0);
+        const compTerm = Asc > 0 ? (m - 1) * Asc * Math.pow(x - d_comp, 2) : 0;
+        // Rectangular flange section when x ≤ Df, else true T:
+        //   bf·x³/3 − (bf−bw)·(x−Df)³/3 + m·Ast·(d−x)² + comp
+        const Icr = x <= Df
+            ? bf * Math.pow(x, 3) / 3 + m * Ast * Math.pow(d - x, 2) + compTerm
+            : bf * Math.pow(x, 3) / 3
+                - (bf - bw) * Math.pow(x - Df, 3) / 3
+                + m * Ast * Math.pow(d - x, 2)
+                + compTerm;
+        return { x, Icr };
+    };
 
     // ─── 3. Cracking moment Mcr ─────────────────────────────────────────────
-    const Ec = getEc(fck);
     const fcr = 0.7 * Math.sqrt(fck);
     const yt = D - y_bar; // extreme tension fibre (bottom) from centroid
     const Mcr = fcr * I_gr / yt / 1e6; // kN·m
 
-    // ─── 4. Effective moment of inertia I_eff (Annex C Cl. C-2) ─────────────
-    // IS 456:2000 Annex C Cl. C-2.1:
-    //   Ieff = Icr / [1.2 − (Mcr/M) × (bw/b) × (z/d) × (1 − x/d)]
-    // For T-sections b = bf (compression flange width); bw/bf < 1 for waffle ribs.
-    // annexCDeflection (rectangular strip) uses bw/b = 1 implicitly since bw = b = 1000 mm.
-    const bw_bf = bw / bf; // BUG-WS2 FIX: T-beam web-to-flange ratio per IS 456 Annex C Cl. C-2.1
-    const pt = 100 * Ast / (bw * d); // % tension steel on web (per IS 456)
-    const pc = Asc > 0 ? 100 * Asc / (bw * d) : 0; // % compression steel on web
-    const Ms = Math.abs(M_service);
-    const z = d - x / 3; // lever arm
-    let Ieff: number;
-    if (Ms <= 0.001 || Mcr >= Ms) {
-        Ieff = I_gr;
-    } else {
-        const factor = 1.2 - (Mcr / Ms) * bw_bf * (z / d) * (1 - x / d);
-        Ieff = factor > 0 ? Icr / factor : I_gr;
-        Ieff = Math.max(Icr, Math.min(I_gr, Ieff));
-    }
-
-    const Mp = Math.abs(M_perm);
-    let Ieff_perm: number;
-    if (Mp <= 0.001 || Mcr >= Mp) {
-        Ieff_perm = I_gr;
-    } else {
-        const factor_p = 1.2 - (Mcr / Mp) * bw_bf * (z / d) * (1 - x / d);
-        Ieff_perm = factor_p > 0 ? Icr / factor_p : I_gr;
-        Ieff_perm = Math.max(Icr, Math.min(I_gr, Ieff_perm));
-    }
-
-    // ─── α coefficient per support condition ────────────────────────────────
-    let alpha: number;
-    switch (supportCondition) {
-        case 'simply': alpha = 5 / 48; break;
-        case 'one_end': alpha = 1 / 12; break;
-        case 'continuous': alpha = 1 / 16; break;
-        case 'cantilever': alpha = 1 / 4; break;
-        default: alpha = 1 / 16;
-    }
-
-    // ─── 5. Short-term deflection ───────────────────────────────────────────
-    const ai = alpha * Ms * 1e6 * L * L / (Ec * Ieff);
-    const ai_perm = alpha * Mp * 1e6 * L * L / (Ec * Ieff_perm);
-
-    // ─── 6. Shrinkage deflection (Annex C Cl. C-3) ──────────────────────────
-    // BUG-TBEAM-04 FIX (2026-06-26 audit): same k4 correction as annexCDeflection.
-    // IS 456 Cl. C-3.1 keeps the /√pt divisor in BOTH branches; the second
-    // branch only swaps the leading coefficient from 0.72 → 0.65.
-    const eps_cs = 0.0003;
-    const ptPcDiff = Math.max(0, pt - pc);
-    let k4: number;
-    if (pt <= 0 || ptPcDiff < 0.25) {
-        k4 = 0;
-    } else if (ptPcDiff < 1.0) {
-        k4 = 0.72 * ptPcDiff / Math.sqrt(pt);
-    } else {
-        k4 = 0.65 * ptPcDiff / Math.sqrt(pt);
-    }
-    k4 = Math.min(1.0, k4);
-    const psi_cs = k4 * eps_cs / D;
-    let k3: number;
-    switch (supportCondition) {
-        case 'cantilever': k3 = 0.500; break;
-        case 'simply': k3 = 0.125; break;
-        case 'one_end': k3 = 0.086; break;
-        case 'continuous': k3 = 0.063; break;
-        default: k3 = 0.063;
-    }
-    const a_shrinkage = k3 * psi_cs * L * L;
-
-    // ─── 7. Creep deflection (Annex C Cl. C-4) ──────────────────────────────
-    const theta = CREEP_COEFF[ageOfLoading] ?? 1.6;
-    const Ece = Ec / (1 + theta);
-    const m_lt = Es / Ece;
-
-    // Re-compute cracked NA + Icr with long-term modular ratio for creep
-    const x_lt = solveX(m_lt, Asc > 0);
-    const compTerm_lt = Asc > 0 ? (m_lt - 1) * Asc * Math.pow(x_lt - d_comp, 2) : 0;
-    let Icr_lt: number;
-    if (x_lt <= Df) {
-        Icr_lt = bf * Math.pow(x_lt, 3) / 3 + m_lt * Ast * Math.pow(d - x_lt, 2) + compTerm_lt;
-    } else {
-        Icr_lt = bf * Math.pow(x_lt, 3) / 3
-            - (bf - bw) * Math.pow(x_lt - Df, 3) / 3
-            + m_lt * Ast * Math.pow(d - x_lt, 2)
-            + compTerm_lt;
-    }
-    const z_lt = d - x_lt / 3;
-    let Ieff_lt: number;
-    if (Mp <= 0.001 || Mcr >= Mp) {
-        Ieff_lt = I_gr;
-    } else {
-        const factor_lt = 1.2 - (Mcr / Mp) * bw_bf * (z_lt / d) * (1 - x_lt / d);
-        Ieff_lt = factor_lt > 0 ? Icr_lt / factor_lt : I_gr;
-        Ieff_lt = Math.max(Icr_lt, Math.min(I_gr, Ieff_lt));
-    }
-
-    const a1_perm = alpha * Mp * 1e6 * L * L / (Ece * Ieff_lt);
-    const a_creep = a1_perm - ai_perm;
-
-    // ─── 8. Total deflections + explicit camber ─────────────────────────────
-    const a_total_raw = ai + Math.max(0, a_creep) + a_shrinkage;
-    const a_post_raw = Math.max(0, a_creep) + a_shrinkage;
-    const limit_total = L / 250;
-    const limit_post = Math.min(L / 350, 20);
-
-    const camber = clampDeflectionCamber(design.camber ?? 0, a_post_raw);
-    const a_total = Math.max(0, a_total_raw - camber);
-    const a_post_construction = Math.max(0, a_post_raw - camber);
-
-    return {
-        L, D, d, b, Ec, Es, m: m_ratio, m_lt, theta, Ece,
-        pt: Math.round(pt * 1000) / 1000, pc,
-        Igr: I_gr, Icr, Ieff, Ieff_perm, Icr_lt, Ieff_lt,
-        x: Math.round(x * 100) / 100, x_lt: Math.round(x_lt * 100) / 100,
-        z: Math.round(z * 100) / 100, z_lt: Math.round(z_lt * 100) / 100,
-        Mcr: Math.round(Mcr * 100) / 100, fcr, alpha, k3, eps_cs,
-        psi_cs: Math.round(psi_cs * 1e6) / 1e6,
-        ai: Math.round(ai * 100) / 100,
-        ai_perm: Math.round(ai_perm * 100) / 100,
-        a1_perm: Math.round(a1_perm * 100) / 100,
-        a_shrinkage: Math.round(a_shrinkage * 100) / 100,
-        a_creep: Math.round(Math.max(0, a_creep) * 100) / 100,
-        a_total: Math.round(a_total * 100) / 100,
-        a_post_construction: Math.round(a_post_construction * 100) / 100,
-        limit_total: Math.round(limit_total * 100) / 100,
-        limit_post: Math.round(limit_post * 100) / 100,
-        status_total: a_total <= limit_total ? 'OK' : 'FAIL',
-        status_post: a_post_construction <= limit_post ? 'OK' : 'FAIL',
-        supportCondition,
-        camber: Math.round(camber * 100) / 100,
-    };
+    // ─── 4–8. I_eff (C-2.1, with b_w/b_f for T-sections), short-term, shrinkage,
+    // creep, post-construction and camber — shared Annex C core. pt/pc on b_w·d.
+    return annexCCore({
+        L, D, d, b, bw_b: bw / bf, Es, fck, ageOfLoading,
+        Igr: I_gr, Mcr, fcr,
+        pt: 100 * Ast / (bw * d),
+        pc: Asc > 0 ? 100 * Asc / (bw * d) : 0,
+        cracked: crackedT,
+    }, design);
 }
