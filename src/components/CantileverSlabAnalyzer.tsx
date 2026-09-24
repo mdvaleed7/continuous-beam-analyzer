@@ -159,9 +159,31 @@ export default function CantileverSlabAnalyzer() {
                         <select title="supportFixity" name="supportFixity" value={input.supportFixity ?? 'fixed'} onChange={handleInputChange} id="supportFixity">
                             <option value="fixed">Fixed (rigid support)</option>
                             <option value="backspan">Continuous with back-span (root rotates)</option>
+                            <option value="beam">On a supporting beam (beam twists)</option>
+                            <option value="beam_backspan">Beam + back-span (both)</option>
                         </select>
                     </div>
-                    {input.supportFixity === 'backspan' && (
+                    {(input.supportFixity === 'beam' || input.supportFixity === 'beam_backspan') && (
+                        <>
+                            <div className="control-group">
+                                <label htmlFor="beam_b">Supporting Beam Width (mm)</label>
+                                <input title="beam_b" type="number" min="0" step="10" name="beam_b" value={input.beam_b ?? 0} onChange={handleInputChange} id="beam_b" />
+                            </div>
+                            <div className="control-group">
+                                <label htmlFor="beam_D">Supporting Beam Depth (mm)</label>
+                                <input title="beam_D" type="number" min="0" step="10" name="beam_D" value={input.beam_D ?? 0} onChange={handleInputChange} id="beam_D" />
+                            </div>
+                            <div className="control-group">
+                                <label htmlFor="beam_span">Beam Span between Columns Lt (m)</label>
+                                <input title="beam_span" type="number" min="0" step="0.1" name="beam_span" value={input.beam_span ?? 0} onChange={handleInputChange} id="beam_span" />
+                            </div>
+                            <div className="control-group">
+                                <label htmlFor="beam_torsionStiffnessFactor">Torsional Stiffness Factor (1.0 = BS 8110-2 Cl. 2.4.3; reduce if cracked)</label>
+                                <input title="beam_torsionStiffnessFactor" type="number" min="0.05" max="1" step="0.05" name="beam_torsionStiffnessFactor" value={input.beam_torsionStiffnessFactor ?? 1} onChange={handleInputChange} id="beam_torsionStiffnessFactor" />
+                            </div>
+                        </>
+                    )}
+                    {(input.supportFixity === 'backspan' || input.supportFixity === 'beam_backspan') && (
                         <>
                             <div className="control-group">
                                 <label htmlFor="backSpan_L">Back-span Length Lb (m, c/c)</label>
@@ -371,8 +393,14 @@ export default function CantileverSlabAnalyzer() {
                             <div className="defl-summary">
                                 {results.supportRotation && (
                                     <div className="defl-result defl-ok">
-                                        <span>Includes back-span rotation: θ<sub>i</sub> = {results.supportRotation.theta_i_mrad} mrad → {results.supportRotation.a_i} mm short-term, {results.supportRotation.a_creep} mm creep at tip</span>
+                                        <span>Includes support rotation: θ<sub>i</sub> = {results.supportRotation.theta_i_mrad} mrad → {results.supportRotation.a_i} mm short-term, {results.supportRotation.a_creep} mm creep at tip</span>
                                         <span>Fixed-root total would be {results.deflectionRoot.a_total} mm</span>
+                                    </div>
+                                )}
+                                {results.supportRotation?.beam && (
+                                    <div className={`defl-result ${results.supportRotation.beam.cracked ? 'defl-fail' : 'defl-ok'}`}>
+                                        <span>Beam torque at columns: T<sub>u</sub> = {results.supportRotation.beam.Tu_end} kN·m{results.supportRotation.Lb > 0 ? ' (compatibility)' : ' (equilibrium — design beam per IS 456 Cl. 41)'}</span>
+                                        <span>τ<sub>t</sub> = {results.supportRotation.beam.tau_t} vs f<sub>cr</sub> = {results.supportRotation.beam.fcr} N/mm²{results.supportRotation.beam.cracked ? ' — cracks in torsion: reduce stiffness factor' : ''}</span>
                                     </div>
                                 )}
                                 {results.deflection.camber > 0 && (

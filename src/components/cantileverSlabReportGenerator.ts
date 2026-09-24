@@ -145,12 +145,30 @@ export async function generateCantileverSlabPDF(input: CantileverSlabInput, resu
                         ${kx(`a_i = \\alpha \\frac{M_s L^2}{E_c I_{eff}} = ${r.deflection.ai.toFixed(2)} \\text{ mm (short-term)}`)}
                         ${kx(`a_{shrinkage} = k_3 \\psi_{cs} L^2 = ${r.deflection.a_shrinkage.toFixed(2)} \\text{ mm} \\quad (k_3=0.5, \\psi_{cs}=${(r.deflection.psi_cs*1e6).toFixed(2)}\\times 10^{-6})`)}
                         ${kx(`a_{creep} = a_{1,perm} - a_{i,perm} = ${r.deflection.a_creep.toFixed(2)} \\text{ mm} \\quad (\\theta=${r.deflection.theta}, E_{ce}=${r.deflection.Ece.toFixed(0)})`)}
-                        ${r.supportRotation ? `
-                        <p style="font-size:12px;margin:6px 0 2px;"><strong>Support rotation (back-span, far end ${r.supportRotation.farEnd}):</strong>
-                        the values above include the tip movement &theta;&middot;L from rotation of the root. Back-span loads and shrinkage are ignored (conservative).</p>
-                        ${kx(`\\theta = k \\frac{M L_b}{E I}, \\ k = ${r.supportRotation.k === 0.25 ? '1/4' : '1/3'}, \\ L_b = ${r.supportRotation.Lb} \\text{ m} \\Rightarrow \\theta_i = ${r.supportRotation.theta_i_mrad} \\text{ mrad}, \\ \\theta_{perm,lt} = ${r.supportRotation.theta_lt_mrad} \\text{ mrad}`)}
-                        ${kx(`a_{i,rot} = \\theta_i L = ${r.supportRotation.a_i.toFixed(2)} \\text{ mm}, \\quad a_{creep,rot} = ${r.supportRotation.a_creep.toFixed(2)} \\text{ mm} \\quad (\\text{fixed-root } a_i = ${r.deflectionRoot.ai.toFixed(2)} \\text{ mm})`)}
-                        ` : ''}
+                        ${r.supportRotation ? (() => {
+                            const sr = r.supportRotation;
+                            const bm = sr.beam;
+                            const hasBack = sr.Lb > 0;
+                            const lines: string[] = [];
+                            lines.push(`<p style="font-size:12px;margin:6px 0 2px;"><strong>Support rotation</strong> (${hasBack && bm ? 'supporting beam torsion + back-span in parallel' : bm ? 'supporting beam torsion' : `back-span, far end ${sr.farEnd}`}):
+                                the values above include the tip movement &theta;&middot;L from rotation of the root. Back-span loads and shrinkage are ignored (conservative).</p>`);
+                            if (hasBack) lines.push(kx(`k_b = \\frac{E I}{k L_b}, \\ k = ${sr.k === 0.25 ? '1/4' : '1/3'}, \\ L_b = ${sr.Lb} \\text{ m}`));
+                            if (bm) {
+                                lines.push(kx(`C = 0.5\\,\\beta\\,b^3 h = 0.5 \\times ${bm.beta} \\times ${Math.min(bm.b, bm.D)}^3 \\times ${Math.max(bm.b, bm.D)} = ${(bm.C / 1e6).toFixed(1)}\\times 10^6 \\text{ mm}^4, \\quad G = 0.42 E \\quad (\\text{BS 8110-2 Cl. 2.4.3})${bm.stiffnessFactor !== 1 ? `, \\ \\times ${bm.stiffnessFactor}` : ''}`));
+                                lines.push(hasBack
+                                    ? kx(`\\theta_{mid} = \\frac{t}{k_b}\\left[1 - \\frac{1}{\\cosh(\\lambda L_t/2)}\\right], \\ \\lambda = \\sqrt{k_b/GJ}, \\ \\lambda L_t = ${bm.lambdaL}, \\ L_t = ${bm.span} \\text{ m}`)
+                                    : kx(`\\theta_{mid} = \\frac{t\\,L_t^2}{8\\,G C}, \\ t = M, \\ L_t = ${bm.span} \\text{ m}`));
+                            } else {
+                                lines.push(kx(`\\theta = \\frac{t}{k_b} = k \\frac{M L_b}{E I}`));
+                            }
+                            lines.push(kx(`\\theta_i = ${sr.theta_i_mrad} \\text{ mrad}, \\ \\theta_{perm,lt} = ${sr.theta_lt_mrad} \\text{ mrad} \\Rightarrow a_{i,rot} = \\theta_i L = ${sr.a_i.toFixed(2)} \\text{ mm}, \\ a_{creep,rot} = ${sr.a_creep.toFixed(2)} \\text{ mm} \\quad (\\text{fixed-root } a_i = ${r.deflectionRoot.ai.toFixed(2)} \\text{ mm})`));
+                            if (bm) {
+                                lines.push(kx(`T_{u,end} = ${bm.Tu_end.toFixed(2)} \\text{ kN·m}, \\ T_{end} = ${bm.T_end.toFixed(2)} \\text{ kN·m (service)}, \\ \\tau_t = \\frac{T}{\\alpha b^2 h} = ${bm.tau_t.toFixed(2)} \\text{ vs } f_{cr} = ${bm.fcr.toFixed(2)} \\text{ N/mm}^2`));
+                                lines.push(`<p style="font-size:12px;margin:2px 0;">${hasBack ? 'Compatibility torsion' : '<strong>Equilibrium torsion</strong> — the beam must be designed for T<sub>u</sub> (IS 456 Cl. 41).'}
+                                    ${bm.cracked ? ' <span style="color:#b45309;font-weight:bold;">&tau;<sub>t</sub> &gt; f<sub>cr</sub>: the beam cracks in torsion and its stiffness drops well below the uncracked value &mdash; reduce the torsional stiffness factor and re-check.</span>' : ''}</p>`);
+                            }
+                            return lines.join('\n');
+                        })() : ''}
                         ${r.deflection.camber > 0 ? kx(`\\text{Camber} = ${r.deflection.camber.toFixed(2)} \\text{ mm}`) : ''}
                         ${r.deflection.camber > 0
                             ? kx(`a_{total,net} = a_i + a_{creep} + a_{shrinkage} - a_{camber} = ${r.deflection.a_total.toFixed(2)} \\text{ mm} \\quad \\text{vs} \\quad L/250 = ${r.deflection.limit_total.toFixed(2)} \\text{ mm}`)
