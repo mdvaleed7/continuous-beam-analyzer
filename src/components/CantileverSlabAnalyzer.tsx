@@ -78,6 +78,8 @@ export default function CantileverSlabAnalyzer() {
         } else if (name === 'steelGrade') {
             const fy = parseInt(value.replace('Fe', ''));
             setInput(prev => ({ ...prev, steelGrade: value, fy }));
+        } else if (name === 'supportFixity' || name === 'backSpan_farEnd') {
+            setInput(prev => ({ ...prev, [name]: value }));
         } else {
             setInput(prev => ({ ...prev, [name]: parseFloat(value) }));
         }
@@ -149,6 +151,28 @@ export default function CantileverSlabAnalyzer() {
                             <div className="control-group">
                                 <label htmlFor="parapetDensity">Material Density (kN/m³) <br/><small>(20 for masonry, 25 for concrete)</small></label>
                                 <input title="parapetDensity" type="number" min="1" step="1" name="parapetDensity" value={input.parapetDensity} onChange={handleInputChange} id="parapetDensity" />
+                            </div>
+                        </>
+                    )}
+                    <div className="control-group">
+                        <label htmlFor="supportFixity">Support Fixity (deflection)</label>
+                        <select title="supportFixity" name="supportFixity" value={input.supportFixity ?? 'fixed'} onChange={handleInputChange} id="supportFixity">
+                            <option value="fixed">Fixed (rigid support)</option>
+                            <option value="backspan">Continuous with back-span (root rotates)</option>
+                        </select>
+                    </div>
+                    {input.supportFixity === 'backspan' && (
+                        <>
+                            <div className="control-group">
+                                <label htmlFor="backSpan_L">Back-span Length Lb (m, c/c)</label>
+                                <input title="backSpan_L" type="number" min="0" step="0.1" name="backSpan_L" value={input.backSpan_L ?? 0} onChange={handleInputChange} id="backSpan_L" />
+                            </div>
+                            <div className="control-group">
+                                <label htmlFor="backSpan_farEnd">Back-span Far End</label>
+                                <select title="backSpan_farEnd" name="backSpan_farEnd" value={input.backSpan_farEnd ?? 'pinned'} onChange={handleInputChange} id="backSpan_farEnd">
+                                    <option value="pinned">Pinned / simply supported (θ = M·Lb/3EI)</option>
+                                    <option value="continuous">Continuous / fixed (θ = M·Lb/4EI)</option>
+                                </select>
                             </div>
                         </>
                     )}
@@ -345,6 +369,12 @@ export default function CantileverSlabAnalyzer() {
                                 </div>
                             </div>
                             <div className="defl-summary">
+                                {results.supportRotation && (
+                                    <div className="defl-result defl-ok">
+                                        <span>Includes back-span rotation: θ<sub>i</sub> = {results.supportRotation.theta_i_mrad} mrad → {results.supportRotation.a_i} mm short-term, {results.supportRotation.a_creep} mm creep at tip</span>
+                                        <span>Fixed-root total would be {results.deflectionRoot.a_total} mm</span>
+                                    </div>
+                                )}
                                 {results.deflection.camber > 0 && (
                                     <div className="defl-result defl-ok">
                                         <span>Initial Upward Camber: <strong>{results.deflection.camber} mm</strong></span>

@@ -146,7 +146,7 @@ describe('Waffle slab (D7)', () => {
     test('simply supported grid moments → α = 0.104 even with continuous edges', () => {
         const r = analyzeWaffleSlab({ ...base, deflectionSupport: 'continuous' });
         expect(r.deflection.alpha).toBeCloseTo(0.104, 4);
-        expect(r.hoggingWarning).toBeTruthy();
+        expect(r.hogging).not.toBeNull();
     });
 });
 

@@ -221,6 +221,32 @@ export async function generateWaffleSlabPDF(input: WaffleSlabInput, results: any
                 <div style="page-break-before: always;"></div>
                 ${ribSection('Ribs Parallel to Y (Long Span)', r.M_rib_y, r.V_rib_y, r.ribY, spacing_x, input, r.D_eq)}
 
+                ${r.hogging ? `
+                <h2>4A. Support Hogging &mdash; IS 456 Table 12 / Table 13 (Cl. 22.5.1)</h2>
+                <div class="section-box avoid-break">
+                    <div class="section-body">
+                        <p style="font-size:13px;color:#475569;">
+                            Edge condition: <strong>${r.hogging.supportCondition}</strong>. Each rib direction is treated as a continuous member carrying its
+                            Rankine&ndash;Grashoff share of the load; factored dead (w<sub>D</sub>) and imposed (w<sub>L</sub>) parts are kept separate.
+                            Compression zone at the support: <strong>${r.hogging.solidZone ? 'solid zone, b = rib spacing' : 'rib web, b = b<sub>w</sub>'}</strong>.
+                            Moments at support centre-line (conservative). Sagging design keeps the simply supported qL&sup2;/8 (upper bound).
+                        </p>
+                        ${kx(r.hogging.supportCondition === 'continuous'
+                            ? `M^- = -\\left(\\frac{w_D}{12} + \\frac{w_L}{9}\\right) L^2, \\quad V = (0.5\\,w_D + 0.6\\,w_L) L`
+                            : `M^- = -\\left(\\frac{w_D}{10} + \\frac{w_L}{9}\\right) L^2, \\quad V = 0.6\\,(w_D + w_L) L`)}
+                        <table class="result-table">
+                            <thead><tr><th>Direction</th><th>M<sup>&minus;</sup> (kN&middot;m/rib)</th><th>b &times; d (mm)</th><th>M<sub>u,lim</sub></th><th>A<sub>st,req</sub> (mm&sup2;)</th><th>Provided</th><th>Status</th></tr></thead>
+                            <tbody>
+                                ${[['Ribs &parallel; X', r.hogging.x], ['Ribs &parallel; Y', r.hogging.y]].map(([lab, h]: any) => `
+                                <tr><td>${lab}</td><td>${h.M_hog.toFixed(2)}</td><td>${h.b} &times; ${h.d}</td><td>${h.Mu_lim.toFixed(2)}</td>
+                                    <td>${h.Ast_req.toFixed(0)} (min ${h.Ast_min.toFixed(0)})</td><td>${h.n_bars}&ndash;&Oslash;${h.bar_dia} = ${h.Ast_provided.toFixed(0)}</td>
+                                    <td>${statusChip(h.ok, h.ok ? 'OK' : h.isDoubly ? 'Mu &gt; Mu,lim' : !h.fits ? 'BARS DO NOT FIT' : 'ADD STEEL')}</td></tr>`).join('')}
+                            </tbody>
+                        </table>
+                        <p style="font-size:12px;color:#475569;">Min steel: ${r.hogging.solidZone ? 'slab rule Cl. 26.5.2.1' : 'beam rule 0.85&middot;b&middot;d/f<sub>y</sub>, Cl. 26.5.1.1(a)'}; bar clear spacing &ge; max(&Oslash;, 25 mm), Cl. 26.3.2. Curtail top bars per Cl. 26.2.3.</p>
+                    </div>
+                </div>` : ''}
+
                 <h2>5. Topping Slab Design</h2>
                 <div class="section-box avoid-break">
                     <div class="section-header">Topping (Continuous Slab between Ribs — BOTH Faces Designed)</div>
@@ -261,7 +287,6 @@ export async function generateWaffleSlabPDF(input: WaffleSlabInput, results: any
                         ${r.deflection.camber > 0 ? kx(`a_{camber} = ${r.deflection.camber.toFixed(2)} \\text{ mm (upward)}`) : ''}
                         ${kx(`a_{total,net} = ${r.deflection.a_total.toFixed(2)} \\text{ mm} \\quad \\text{vs} \\quad L/250 = ${r.deflection.limit_total.toFixed(2)} \\text{ mm}`)}
                         ${kx(`a_{post} = (a_i - a_{i,perm}) + a_{creep} + a_{shrinkage}${r.deflection.camber > 0 ? ' - a_{camber}' : ''} = ${r.deflection.a_post_construction.toFixed(2)} \\text{ mm} \\quad \\text{vs} \\quad \\min(L/350, 20) = ${r.deflection.limit_post.toFixed(2)} \\text{ mm}`)}
-                        ${r.hoggingWarning ? `<div style="margin-top:6px;padding:6px 10px;background:#fffbeb;border-left:3px solid #f59e0b;font-size:12px;color:#92400e;">${r.hoggingWarning}</div>` : ''}
                         <div style="margin-top:6px;">
                             ${r.deflection_safe
                                 ? `${statusChip(true, 'SAFE')} &nbsp; Total ${r.deflection.a_total.toFixed(2)} ≤ ${r.deflection.limit_total.toFixed(2)} mm`
