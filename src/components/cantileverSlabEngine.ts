@@ -143,7 +143,10 @@ export function analyzeCantileverSlab(input: CantileverSlabInput) {
     // Deflection Check — IS 456 Annex C (short-term + shrinkage + creep).
     // Per the user's instruction: the simplified L/d = 7 span/depth check is NOT
     // used for cantilever slabs; instead the full Annex C deflection calculation governs.
-    // Cantilever support condition → alpha = 1/4, k3 = 0.5.
+    // Cantilever support condition → alpha = 1/4 (UDL), 1/3 (tip load), k3 = 0.5.
+    // The cantilever is taken as fixed at the support: rotation of the
+    // back-span / supporting beam is NOT included and must be added by the
+    // engineer where the support is flexible.
     const w_service_total = w_dead + w_live + w_finish;   // kN/m² (per m width)
     const w_perm = w_dead + w_finish;                      // permanent (dead) load
     const M_service = (w_service_total * Math.pow(L_eff, 2)) / 2 + P_parapet * L_eff;  // kN·m/m
@@ -166,6 +169,10 @@ export function analyzeCantileverSlab(input: CantileverSlabInput) {
             M_service,
             M_perm,
             supportCondition: 'cantilever',
+            // Parapet line load at the tip deflects with α = 1/3 (PL³/3EI),
+            // not the UDL α = 1/4.
+            M_service_tip: P_parapet * L_eff,
+            M_perm_tip: P_parapet * L_eff,
             camber: input.camber ?? 0,
         },
     );

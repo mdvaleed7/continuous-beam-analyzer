@@ -315,7 +315,8 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
     // and I_eff, and therefore the deflection. This replaces the previous
     // per-meter strip approximation which lost the T-beam geometry.
     const govRib = ribX.Ast_req >= ribY.Ast_req ? ribX : ribY;
-    const govSpan = Lx >= Ly ? Lx : Ly; // governing (longer) rib span
+    // Each rib's moment is paired with its OWN span (ribX spans Lx, ribY spans Ly).
+    const govSpan = govRib === ribX ? Lx : Ly;
     const govSpacing = (govRib === ribX ? spacing_y : spacing_x) * 1000; // mm (flange width bf)
     // Rib reinforcement: use provided bars, or fall back to required Ast
     const ribBarDia = input.rib_bar_dia || 16;
@@ -354,6 +355,11 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
             M_service: M_service_rib,
             M_perm: M_perm_rib,
             supportCondition: deflSupport,
+            // The rib moments above are simply supported Rankine–Grashoff
+            // moments (qL²/8), so the deflection coefficient must be the
+            // simply supported one (β = 0 → α = 0.104 ≈ 5/48) whatever the
+            // edge condition; `deflectionSupport` only sets shrinkage k3.
+            beta: 0,
             camber: input.camber ?? 0,
         },
     );
@@ -410,6 +416,11 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
         Df, Df_min, Df_min_geom: Math.round(Df_min_geom),
         messages: [] as string[],
     };
+    // The grid moments are simply supported; continuous edges develop hogging
+    // moments at the supports that this engine does not design.
+    const hoggingWarning = deflSupport !== 'simply'
+        ? 'Rib moments use a simply supported Rankine–Grashoff model. For continuous edges, design the support hogging moment (solid zone / rib top steel) separately.'
+        : null;
     if (!ribGeometryCheck.bwOk)
         ribGeometryCheck.messages.push(`Rib width ${bw}mm < 65mm (IS 456 Cl. 30.5)`);
     if (!ribGeometryCheck.spacingOk)
@@ -487,7 +498,7 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
         deflection_safe,
         Ld_actual,  // = a_total (mm) for UI compat
         Ld_max,     // = limit_total (mm) for UI compat
-        mf,         // = alpha (continuous = 1/16)
+        mf,         // = alpha (simply supported moment model)
         // Span/Depth ratio check (IS 456 Cl. 23.2) — informational, IGNORED for
         // design (Annex C governs). Surfaced for all slabs per user request.
         ldCheck,
@@ -498,6 +509,7 @@ export function analyzeWaffleSlab(input: WaffleSlabInput) {
         ribGeometryCheck,  // Cl. 30.5 (bw >= 65 mm, c/c <= 1500 mm, Dr <= 4bw) + topping >= max(50, clearSpacing/12)
         barChecks,
         deflectionSupport: deflSupport,
+        hoggingWarning,
     };
 }
 

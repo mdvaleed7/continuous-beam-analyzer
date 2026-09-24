@@ -26,7 +26,7 @@ export interface FlatSlabInput {
     costParams?: CostParameters;
 }
 
-import { flexuralDesign as flexuralDesignShared, annexCDeflection, getRequiredDeflectionCamber, computeSpanDepthCheck, type SupportCondition, type CostParameters, type SpanDepthCheckResult, computeCost } from '../lib/is456';
+import { flexuralDesign as flexuralDesignShared, annexCDeflection, combineStripDeflections, staticBeta, getRequiredDeflectionCamber, computeSpanDepthCheck, type SupportCondition, type CostParameters, type SpanDepthCheckResult, computeCost } from '../lib/is456';
 
 export function analyzeFlatSlab(input: FlatSlabInput) {
     const { L1, L2, c1, c2, hasDrop, dropL1, dropL2, dropDepth, D, cover, fck, fy, w_live, w_finish, panelType } = input;
@@ -75,10 +75,9 @@ export function analyzeFlatSlab(input: FlatSlabInput) {
         M_pos = 0.52 * M0; 
     }
     
-    // Column Strip Width — IS 456 Cl. 31.2: one-quarter of the transverse span
-    // L2 on each side of the column centreline → total width = L2/2.
-    // (The previous min(0.25·L1, 0.25·L2)·2 was only correct for square panels.)
-    const colStripWidth = 0.5 * L2; // m
+    // Column Strip Width — IS 456 Cl. 31.1.1(a): 0.25·l2 on each side of the
+    // column centre-line, but not greater than 0.25·l1 → total = 0.5·min(L1, L2).
+    const colStripWidth = 0.5 * Math.min(L1, L2); // m
     const midStripWidth = L2 - colStripWidth; // m
     
     // Distribution to Column and Middle strips
@@ -126,40 +125,68 @@ export function analyzeFlatSlab(input: FlatSlabInput) {
     const Ast_neg_mid = calcAst(M_neg_mid, midStripWidth, d_slab);
     const Ast_pos_mid = calcAst(M_pos_mid, midStripWidth, d_slab);
 
-    // ─── Deflection check (IS 456 Annex C — full short-term + shrinkage + creep) ──
-    // Per the user's instruction: the simplified L/d check is NOT used; the full
-    // Annex C deflection calculation governs. The support condition is now
-    // user-selectable (continuous / simply / one_end) via the deflectionSupport
-    // input — default 'continuous' for flat slabs.
+    // ─── Deflection check (IS 456 Annex C — short-term + shrinkage + creep) ──
+    // Crossing-strip method (ACI 435R / Concrete Society TR 58): the panel-
+    // centre deflection = column strip spanning one way + middle strip spanning
+    // the other way. Both combinations are evaluated and the larger governs.
+    // Strip deflections use centre-to-centre spans; moments use the same
+    // positive-moment fraction of M0 as the design (interior 0.35, exterior
+    // 0.52 in the L1 direction; the L2 direction is taken as interior), with
+    // α = 0.104(1 − β/10), β from equilibrium with that fraction.
+    // `deflectionSupport` sets the shrinkage coefficient k3 (Annex C-3).
     const w_service = w_dead_slab + w_live + w_finish;  // kN/m²
     const w_perm = w_dead_slab + w_finish;              // permanent (dead) load
-    const M0_service = (w_service * L2 * Ln * Ln) / 8;
-    const M0_perm = (w_perm * L2 * Ln * Ln) / 8;
-    const M_pos_col_service = 0.35 * 0.60 * M0_service;  // positive column-strip moment
-    const M_pos_col_perm = 0.35 * 0.60 * M0_perm;
-    const M_service_per_m = M_pos_col_service / colStripWidth;
-    const M_perm_per_m = M_pos_col_perm / colStripWidth;
-    // Use the PROVIDED reinforcement (bar dia + spacing) for the deflection
-    // check — not the required Ast. The user provides the actual steel; the
-    // deflection is controlled by what's actually in the slab.
-    const barDia_defl = input.bar_dia || 12;
+    const posFrac1 = panelType === 'exterior' ? 0.52 : 0.35;
+    const posFrac2 = 0.35;
+    let Ln2 = L2 - c2;
+    if (Ln2 < 0.65 * L2) Ln2 = 0.65 * L2;
+    const colStripWidth2 = 0.5 * Math.min(L1, L2);       // column strip spanning L2
+    const midStripWidth2 = L1 - colStripWidth2;          // middle strip spanning L2
+    // Bars spanning L2 sit in the inner layer.
+    const cover2 = cover + flatSlabBarDia;
+    const d_slab2 = d_slab - flatSlabBarDia;
+
+    // Use the PROVIDED reinforcement (bar dia + spacing) for the L1 column
+    // strip — not the required Ast. The other strips use the required Ast.
+    const barDia_defl = flatSlabBarDia;
     const barSpacing_defl = input.bar_spacing || 150;
     const Abar_defl = Math.PI * barDia_defl * barDia_defl / 4;
     const Ast_provided_defl = (1000 / barSpacing_defl) * Abar_defl; // mm²/m
     const Ast_req_defl_per_m = Number.isNaN(Ast_pos_col) || colStripWidth <= 0 ? 0 : Ast_pos_col / colStripWidth;
     const Ast_defl = Math.max(Ast_provided_defl, Ast_req_defl_per_m);
-    const deflection = annexCDeflection(
-        { Lx: Ln * 1000, D, cover, fck, fy },
-        {
-            barDia_x_bot: barDia_defl,
-            Ast_x_bot: Ast_defl,
-            Asc_x_top: 0,
-            M_service: M_service_per_m,
-            M_perm: M_perm_per_m,
-            supportCondition: deflSupport,
-            camber: input.camber ?? 0,
-        },
-    );
+
+    const stripDefl = (
+        span: number, Ln_: number, trib: number, posFrac: number, share: number,
+        width: number, cov: number, d_: number, AstFloor: number,
+    ) => {
+        const M0_s = (w_service * trib * Ln_ * Ln_) / 8;
+        const M0_p = (w_perm * trib * Ln_ * Ln_) / 8;
+        const Ms_per_m = posFrac * share * M0_s / width;
+        const Mp_per_m = posFrac * share * M0_p / width;
+        const Mu_strip = 1.5 * posFrac * share * M0_s;
+        const Ast_req = calcAst(Mu_strip, width, d_) / width;
+        return annexCDeflection(
+            { Lx: span * 1000, D, cover: cov, fck, fy },
+            {
+                barDia_x_bot: barDia_defl,
+                Ast_x_bot: Math.max(Number.isNaN(Ast_req) ? 0 : Ast_req, AstFloor),
+                Asc_x_top: 0,
+                M_service: Ms_per_m,
+                M_perm: Mp_per_m,
+                supportCondition: deflSupport,
+                beta: staticBeta(posFrac / 8),
+            },
+        );
+    };
+    const cs1 = stripDefl(L1, Ln, L2, posFrac1, 0.60, colStripWidth, cover, d_slab, Ast_defl);
+    const ms1 = stripDefl(L1, Ln, L2, posFrac1, 0.40, midStripWidth, cover, d_slab, 0);
+    const cs2 = stripDefl(L2, Ln2, L1, posFrac2, 0.60, colStripWidth2, cover2, d_slab2, 0);
+    const ms2 = stripDefl(L2, Ln2, L1, posFrac2, 0.40, midStripWidth2, cover2, d_slab2, 0);
+    const L_defl = Math.max(L1, L2) * 1000;  // panel-centre deflection judged on the longer span
+    const comboA = combineStripDeflections([cs1, ms2], L_defl, input.camber ?? 0);
+    const comboB = combineStripDeflections([cs2, ms1], L_defl, input.camber ?? 0);
+    const deflection = comboA.a_total >= comboB.a_total ? comboA : comboB;
+    const deflectionStrips = { cs1, ms1, cs2, ms2, governing: deflection === comboA ? 'cs(L1)+ms(L2)' : 'cs(L2)+ms(L1)' };
     const deflection_safe = deflection.status_total === 'OK' && deflection.status_post === 'OK';
     // Legacy-field aliases for UI/PDF backwards-compat
     const Ld_actual = deflection.a_total;
@@ -280,9 +307,10 @@ export function analyzeFlatSlab(input: FlatSlabInput) {
         // deflection (Annex C)
         deflection,
         deflection_safe,
+        deflectionStrips,
         Ld_actual,  // = a_total (mm) for UI compat
         Ld_max,     // = limit_total (mm) for UI compat
-        mf,         // = alpha (continuous = 1/16)
+        mf,         // = alpha of the governing strip
         // Span/Depth ratio check (IS 456 Cl. 23.2) — informational, IGNORED for
         // design (Annex C governs). Surfaced for all slabs per user request.
         ldCheck,

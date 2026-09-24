@@ -136,6 +136,7 @@ function deflectionSection(r: any): string {
                     ${kx(`M_{cr} = \\frac{f_{cr} I_{gr}}{y_t} = ${dfl.Mcr} \\text{ kN}\\cdot\\text{m}`)}
                     ${kx(`I_{cr} = \\frac{bx^3}{3} + m A_{st} (d-x)^2 = ${Icr_str} \\times 10^6 \\text{ mm}^4`)}
                     ${kx(`I_{eff} = \\frac{I_{cr}}{1.2 - \\frac{M_{cr}}{M_a} \\frac{z}{d} \\left(1 - \\frac{x}{d}\\right)} = ${Ieff_str} \\times 10^6 \\text{ mm}^4 \\le I_{gr}`)}
+                    ${kx(`\\alpha = ${dfl.alpha.toFixed(4)}${dfl.beta !== undefined ? ` = 0.104\\left(1 - \\frac{\\beta}{10}\\right),\\ \\beta = \\frac{M_A + M_B}{M_C} = ${dfl.beta.toFixed(2)} \\quad (\\text{BS 8110-2 Table 3.1})` : ''}`)}
                     ${kx(`a_i = \\alpha \\frac{M_{service} L^2}{E_c I_{eff}} = ${dfl.ai} \\text{ mm} \\quad (\\text{short-term})`)}
 
                     <h4 style="margin-top:15px;">B. Shrinkage Deflection</h4>
@@ -175,8 +176,8 @@ function deflectionSection(r: any): string {
 
                     <div style="margin-top:15px;"></div>
                     ${dfl.camber > 0
-                        ? kx(`a_{post} = a_{cc} + a_{cs} - a_{camber} = ${dfl.a_post_construction} \\text{ mm}`)
-                        : kx(`a_{post} = a_{cc} + a_{cs} = ${dfl.a_post_construction} \\text{ mm}`)
+                        ? kx(`a_{post} = (a_i - a_{i,perm}) + a_{cc} + a_{cs} - a_{camber} = ${dfl.a_post_construction} \\text{ mm}`)
+                        : kx(`a_{post} = (a_i - a_{i,perm}) + a_{cc} + a_{cs} = ${dfl.a_post_construction} \\text{ mm}`)
                     }
                     <div style="font-weight: bold; color: ${dfl.status_post === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: left;">
                         Result: ${kxInline(`a_{post} ${dfl.status_post === 'OK' ? '\\le' : '>'} ${dfl.limit_post} \\text{ mm}`)} &rarr; ${dfl.status_post}

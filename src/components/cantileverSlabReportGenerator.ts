@@ -155,8 +155,8 @@ export async function generateCantileverSlabPDF(input: CantileverSlabInput, resu
                         </div>
                         <div style="margin-top:6px;"></div>
                         ${r.deflection.camber > 0
-                            ? kx(`a_{post,net} = a_{creep} + a_{shrinkage} - a_{camber} = ${r.deflection.a_post_construction.toFixed(2)} \\text{ mm}`)
-                            : kx(`a_{post} = a_{creep} + a_{shrinkage} = ${r.deflection.a_post_construction.toFixed(2)} \\text{ mm}`)
+                            ? kx(`a_{post,net} = (a_i - a_{i,perm}) + a_{creep} + a_{shrinkage} - a_{camber} = ${r.deflection.a_post_construction.toFixed(2)} \\text{ mm}`)
+                            : kx(`a_{post} = (a_i - a_{i,perm}) + a_{creep} + a_{shrinkage} = ${r.deflection.a_post_construction.toFixed(2)} \\text{ mm}`)
                         }
                         <div style="font-weight: bold; color: ${r.deflection.status_post === 'FAIL' ? '#ef4444' : '#10b981'}; text-align: left;">
                             Result: ${kxInline(`a_{post} ${r.deflection.status_post === 'OK' ? '\\le' : '>'} ${r.deflection.limit_post} \\text{ mm}`)} &rarr; ${r.deflection.status_post}
