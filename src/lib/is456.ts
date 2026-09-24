@@ -442,13 +442,26 @@ export function sectionMomentCapacityAtAxial(
     };
     const Pu = Math.max(0, Pu_kN);
     let lo = 1e-3 * D, hi = 50 * D;
-    if (resultants(hi).P < Pu) return 0;             // beyond axial capacity
-    if (resultants(lo).P > Pu) return resultants(lo).M;
-    for (let it = 0; it < 50; it++) {
-        const mid = 0.5 * (lo + hi);
-        if (resultants(mid).P < Pu) lo = mid; else hi = mid;
+    let fLo = resultants(lo).P - Pu, fHi = resultants(hi).P - Pu;
+    if (fHi < 0) return 0;                           // beyond axial capacity
+    if (fLo > 0) return resultants(lo).M;
+    // P(xu) rises monotonically: bracketed regula falsi (Illinois variant),
+    // with a bisection step whenever the bracket shrinks too slowly.
+    let xu = lo, side = 0;
+    for (let it = 0; it < 60 && hi - lo > 1e-9 * D; it++) {
+        const width = hi - lo;
+        xu = (lo * fHi - hi * fLo) / (fHi - fLo);
+        const f = resultants(xu).P - Pu;
+        if (Math.abs(f) <= 1e-9 * Math.max(1, Math.abs(Pu))) break;
+        if (f < 0) { lo = xu; fLo = f; if (side === -1) fHi /= 2; side = -1; }
+        else { hi = xu; fHi = f; if (side === 1) fLo /= 2; side = 1; }
+        if (hi - lo > 0.5 * width) {
+            const mid = 0.5 * (lo + hi), fm = resultants(mid).P - Pu;
+            if (fm < 0) { lo = mid; fLo = fm; } else { hi = mid; fHi = fm; }
+            side = 0;
+        }
     }
-    return Math.max(0, resultants(0.5 * (lo + hi)).M);
+    return Math.max(0, resultants(xu).M);
 }
 
 // ─── Surface crack width — IS 456:2000 Annex F ──────────────────────────────

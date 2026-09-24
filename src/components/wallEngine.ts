@@ -109,9 +109,13 @@ export interface ProfileNode extends PressurePoint {
 interface ZoneDesign {
     zone: number;
     height: number;
-    thickness: number;
-    d_hogging: number;
-    d_sagging: number;
+    thickness: number;          // mean thickness (volume); tapered sections use their own
+    thicknessTop: number;
+    thicknessBot: number;
+    d_hogging: number;          // at the governing earth-face section
+    d_sagging: number;          // at the governing inner-face section
+    x_hogging: number;          // governing sections, m below the zone top
+    x_sagging: number;
     EI: number;
     M_left: number;
     M_right: number;
@@ -133,8 +137,8 @@ interface ZoneDesign {
     mainBars_sagging: BarSelection;
     distBars: BarSelection;    // horizontal steel per face (Cl. 32.5 c)
     crack: {                    // Ms = service moment M/γf (in-service, propped)
-        hogging: CrackWidthResult & { Ms: number; limit: number; ok: boolean };
-        sagging: CrackWidthResult & { Ms: number; limit: number; ok: boolean };
+        hogging: CrackWidthResult & { Ms: number; x: number; limit: number; ok: boolean };
+        sagging: CrackWidthResult & { Ms: number; x: number; limit: number; ok: boolean };
     };
     pm: {                       // axial + bending with slenderness (Cl. 32.2 / 39)
         Pu: number; He: number; slenderness: number; slendernessOk: boolean; ea: number;
@@ -643,12 +647,16 @@ export function analyzeWall(config: WallConfig): WallAnalysisResult {
         const tTop = isTapered ? (zones[i].thicknessTop || zones[i].thickness) : zones[i].thickness;
         const tBot = isTapered ? (zones[i].thicknessBot || zones[i].thickness) : zones[i].thickness;
         const t_mm = isTapered ? (tTop + tBot) / 2 : zones[i].thickness;
-        // Conservative first-pass d with the largest available bar (CALC-004);
-        // refined below from the bars actually selected.
-        const barDia = maxBarDia;
-        const d_mm = t_mm - cover - barDia / 2;
         const h_m = zones[i].height;
         const zoneTopDepth = cumDepths[i];
+        // Thickness varies linearly over a tapered zone. Every section is
+        // designed at its own thickness — the zone used to be designed at the
+        // mean thickness, which over-states d at the thin end (unconservative
+        // where the thin end carries the larger moment, e.g. a continuous
+        // support at the top of a lower zone).
+        const tAt = (x: number) => tTop + (tBot - tTop) * Math.min(1, Math.max(0, x / h_m));
+        const tMin = Math.min(tTop, tBot), tMax = Math.max(tTop, tBot);
+        const xThick = tBot >= tTop ? h_m : 0;
 
         // Shear and moment (physical units) at a distance x below the zone top.
         const forcesAt = (xFromZoneTop: number): { V: number; M: number } => {
@@ -672,95 +680,147 @@ export function analyzeWall(config: WallConfig): WallAnalysisResult {
         const VL = firstSp.VLeft * L_ref;
         const VR = lastSp.VRight * L_ref;
 
-        // Governing moments separated by face — earth face (hogging) / inner face (sagging)
-        let M_hogging = 0;
-        let M_sagging = 0;
+        // Moment samples along the zone, separated by face — earth face
+        // (hogging, M < 0) / inner face (sagging, M > 0); x from the zone top.
+        type Sample = { x: number; M: number; t: number };
+        const hogService: Sample[] = [];
+        const sagService: Sample[] = [];
         const nSteps = 40;
         for (const k of segs) {
             const sp = beamResult.spans[k];
+            const s = segDepths[k];
             const aL = sp.alpha.fl();
             for (let j = 0; j <= nSteps; j++) {
                 const M_val = sp.M((j / nSteps) * aL) * L_ref * L_ref;
-                if (M_val > 0) M_sagging = Math.max(M_sagging, M_val);
-                else if (M_val < 0) M_hogging = Math.max(M_hogging, Math.abs(M_val));
+                const x = s.top - zoneTopDepth + (j / nSteps) * (s.bot - s.top);
+                if (M_val > 0) sagService.push({ x, M: M_val, t: tAt(x) });
+                else if (M_val < 0) hogService.push({ x, M: -M_val, t: tAt(x) });
             }
         }
-        const M_hogging_propped = M_hogging;
+        const maxOf = (list: Sample[]) => list.reduce((m, s) => Math.max(m, s.M), 0);
+        const M_hogging_propped = maxOf(hogService);
+        const M_sagging = maxOf(sagService);
+
+        // Sections that can govern: steel demand and stress ∝ M/d, so sections
+        // below half the largest M/d are skipped (always well below the peak).
+        const candidates = (list: Sample[]) => {
+            const ratio = (q: Sample) => q.M / Math.max(1, q.t - cover);
+            const top = list.reduce((m, q) => Math.max(m, ratio(q)), 0);
+            return list.filter(q => ratio(q) >= 0.5 * top);
+        };
 
         // Construction stage: the earth face carries the cantilever moment,
         // largest at the bottom of each zone.
         let construction: { M: number; V: number } | null = null;
+        const hogDemand: Sample[] = [...hogService];
         if (consStage) {
             const c = cantileverAt(cumDepths[i + 1]);
             construction = { M: c.M, V: c.V };
-            M_hogging = Math.max(M_hogging, c.M);
+            hogDemand.push({ x: h_m, M: c.M, t: tAt(h_m) });
         }
+        const M_hogging = maxOf(hogDemand);
         const M_gov = Math.max(M_hogging, M_sagging);
+        // The thickest section fixes the minimum steel of the (uniform) bars.
+        const sagDemand: Sample[] = [...candidates(sagService), { x: xThick, M: 0, t: tMax }];
+        const hogDesign: Sample[] = [...candidates(hogDemand), { x: xThick, M: 0, t: tMax }];
 
-        // Flexural design + bar selection with d from the selected bar
-        let flex_hogging = flexuralDesign(M_hogging, b, d_mm, fck, fy, t_mm, true);
-        let flex_sagging = flexuralDesign(M_sagging, b, d_mm, fck, fy, t_mm, true);
-        let mainBars_hogging = selectBars(flex_hogging.Ast_req, barDias, spacings, b);
-        let mainBars_sagging = selectBars(flex_sagging.Ast_req, barDias, spacings, b);
-        let d_hogging = t_mm - cover - mainBars_hogging.dia / 2;
-        let d_sagging = t_mm - cover - mainBars_sagging.dia / 2;
-        if (mainBars_hogging.dia !== barDia || mainBars_sagging.dia !== barDia) {
-            flex_hogging = flexuralDesign(M_hogging, b, d_hogging, fck, fy, t_mm, true);
-            flex_sagging = flexuralDesign(M_sagging, b, d_sagging, fck, fy, t_mm, true);
-            mainBars_hogging = selectBars(flex_hogging.Ast_req, barDias, spacings, b);
-            mainBars_sagging = selectBars(flex_sagging.Ast_req, barDias, spacings, b);
-            d_hogging = t_mm - cover - mainBars_hogging.dia / 2;
-            d_sagging = t_mm - cover - mainBars_sagging.dia / 2;
+        // Flexural design of one face: the section needing the most steel at
+        // its own depth governs (a section needing compression steel or more
+        // than 4 % governs outright).
+        const designFace = (dem: Sample[], dia: number) => {
+            let gov: { flex: FlexuralDesign; x: number; M: number; t: number } | null = null;
+            // ties (minimum steel governing) go to the larger moment
+            const rank = (f: FlexuralDesign, M: number) => (f.isDoubly || f.governs === 'maximum' ? 1e12 : 0) + f.Ast_req + 1e-6 * M;
+            for (const s of dem) {
+                const flex = flexuralDesign(s.M, b, s.t - cover - dia / 2, fck, fy, s.t, true);
+                if (!gov || rank(flex, s.M) > rank(gov.flex, gov.M)) gov = { flex, x: s.x, M: s.M, t: s.t };
+            }
+            return gov!;
+        };
+        // First pass with the largest available bar (conservative d, CALC-004),
+        // then again with the diameter actually selected.
+        let hogGov = designFace(hogDesign, maxBarDia);
+        let sagGov = designFace(sagDemand, maxBarDia);
+        let mainBars_hogging = selectBars(hogGov.flex.Ast_req, barDias, spacings, b);
+        let mainBars_sagging = selectBars(sagGov.flex.Ast_req, barDias, spacings, b);
+        if (mainBars_hogging.dia !== maxBarDia || mainBars_sagging.dia !== maxBarDia) {
+            hogGov = designFace(hogDesign, mainBars_hogging.dia);
+            sagGov = designFace(sagDemand, mainBars_sagging.dia);
+            mainBars_hogging = selectBars(hogGov.flex.Ast_req, barDias, spacings, b);
+            mainBars_sagging = selectBars(sagGov.flex.Ast_req, barDias, spacings, b);
         }
+        const flex_hogging = hogGov.flex;
+        const flex_sagging = sagGov.flex;
 
         const setBars = (face: 'h' | 's', bars: BarSelection) => {
-            if (face === 'h') { mainBars_hogging = bars; d_hogging = t_mm - cover - bars.dia / 2; }
-            else { mainBars_sagging = bars; d_sagging = t_mm - cover - bars.dia / 2; }
+            if (face === 'h') mainBars_hogging = bars; else mainBars_sagging = bars;
         };
         const barsOf = (face: 'h' | 's') => face === 'h' ? mainBars_hogging : mainBars_sagging;
-        const dOf = (face: 'h' | 's') => face === 'h' ? d_hogging : d_sagging;
+        // Effective depth of a face at x (local thickness, bars of that face)
+        const dAt = (face: 'h' | 's', x: number) => tAt(x) - cover - barsOf(face).dia / 2;
 
-        // Crack width — IS 456 Annex F on the service moments (M/γf). Earth face
-        // in contact with soil / ground water: 0.2 mm; inner face 0.3 mm
-        // (Cl. 35.3.2). The propped (in-service) moments are used.
-        const crackOf = (face: 'h' | 's') => {
+        // Crack width — IS 456 Annex F on the service moments (M/γf) at every
+        // section, each at its own thickness. Earth face in contact with soil /
+        // ground water: 0.2 mm; inner face 0.3 mm (Cl. 35.3.2). The propped
+        // (in-service) moments are used.
+        const crackAt = (face: 'h' | 's', s: Sample) => {
             const bars = barsOf(face);
-            const M = face === 'h' ? M_hogging_propped : M_sagging;
-            return crackWidthAnnexF(M / loadFactor, b, t_mm, dOf(face), bars.Ast_provided, bars.dia, bars.spacing, cover, fck, fy);
+            return crackWidthAnnexF(s.M / loadFactor, b, s.t, s.t - cover - bars.dia / 2, bars.Ast_provided, bars.dia, bars.spacing, cover, fck, fy);
+        };
+        const hogCrackList = candidates(hogService);
+        const sagCrackList = candidates(sagService);
+        // Memoised per bar arrangement (the bars change only when increased)
+        const crackMemo = { h: new Map<BarSelection, { cw: CrackWidthResult; s: Sample } | null>(), s: new Map<BarSelection, { cw: CrackWidthResult; s: Sample } | null>() };
+        const worstCrack = (face: 'h' | 's') => {
+            const key = barsOf(face), memo = crackMemo[face];
+            if (!memo.has(key)) memo.set(key, worstCrackUncached(face));
+            return memo.get(key)!;
+        };
+        const worstCrackUncached = (face: 'h' | 's') => {
+            const list = face === 'h' ? hogCrackList : sagCrackList;
+            const limit = face === 'h' ? crackLimitEarth : crackLimitInner;
+            let worst: { cw: CrackWidthResult; s: Sample } | null = null;
+            for (const s of list) {
+                const cw = crackAt(face, s);
+                const score = (cw.fs_ok ? 0 : 1e6) + cw.w / limit;
+                if (!worst || score > (worst.cw.fs_ok ? 0 : 1e6) + worst.cw.w / limit) worst = { cw, s };
+            }
+            return worst;
         };
         const crackFails = (face: 'h' | 's') => {
-            const M = face === 'h' ? M_hogging_propped : M_sagging;
-            if (!checkCrack || M <= 0) return false;
-            const cw = crackOf(face);
-            return cw.w > (face === 'h' ? crackLimitEarth : crackLimitInner) || !cw.fs_ok;
+            if (!checkCrack) return false;
+            const wc = worstCrack(face);
+            if (!wc) return false;
+            return wc.cw.w > (face === 'h' ? crackLimitEarth : crackLimitInner) || !wc.cw.fs_ok;
         };
 
         // Shear without links — the wall is designed as a vertical slab:
         // τv ≤ k·τc (Cl. 40.2.1.1), at d from the face of BOTH supports of the
         // zone (Cl. 22.6.2.1), with pt of the face in tension at that section
-        // (Table 19). The tension face follows the sign of M there: sagging
-        // (inner face) below a pinned top, hogging (earth face) at continuous
-        // supports and at the fixed base.
-        const k_shear = kSlab(t_mm);
+        // (Table 19) and the thickness of that end. The tension face follows
+        // the sign of M there: sagging (inner face) below a pinned top, hogging
+        // (earth face) at continuous supports and at the fixed base.
         const shearCases = () => {
-            const cases: { V: number; face: 'h' | 's'; at: 'top' | 'bottom' }[] = [];
+            const cases: { V: number; face: 'h' | 's'; at: 'top' | 'bottom'; d: number; k: number }[] = [];
             for (const at of ['top', 'bottom'] as const) {
+                const xEnd = at === 'top' ? 0 : h_m;
                 const sec = (face: 'h' | 's') => {
-                    const dm = dOf(face) / 1000;
-                    const x = dm >= h_m ? (at === 'top' ? 0 : h_m) : (at === 'top' ? dm : h_m - dm);
-                    return forcesAt(x);
+                    const dm = dAt(face, xEnd) / 1000;
+                    const x = dm >= h_m ? xEnd : (at === 'top' ? dm : h_m - dm);
+                    return { ...forcesAt(x), x };
                 };
                 const fh = sec('h'), fs = sec('s');
                 let face: 'h' | 's';
                 if (fh.M < 0 && !(fs.M > 0)) face = 'h';
                 else if (fs.M > 0 && !(fh.M < 0)) face = 's';
                 else face = mainBars_hogging.Ast_provided <= mainBars_sagging.Ast_provided ? 'h' : 's';
-                cases.push({ V: Math.abs(face === 'h' ? fh.V : fs.V), face, at });
+                const f = face === 'h' ? fh : fs;
+                cases.push({ V: Math.abs(f.V), face, at, d: dAt(face, f.x), k: kSlab(tAt(f.x)) });
             }
             // Construction stage: cantilever shear at d above the base, earth face in tension
             if (consStage) {
-                const dm = Math.min(d_hogging / 1000, h_m);
-                cases.push({ V: cantileverAt(cumDepths[i + 1] - dm).V, face: 'h', at: 'bottom' });
+                const dm = Math.min(dAt('h', h_m) / 1000, h_m);
+                cases.push({ V: cantileverAt(cumDepths[i + 1] - dm).V, face: 'h', at: 'bottom', d: dAt('h', h_m - dm), k: kSlab(tAt(h_m - dm)) });
             }
             return cases;
         };
@@ -787,11 +847,12 @@ export function analyzeWall(config: WallConfig): WallAnalysisResult {
                 }
             }
             for (const c of shearCases()) {
-                const d = dOf(c.face);
-                const tau_v = c.V * 1e3 / (b * d);
-                const pt = ptForTauC(tau_v / k_shear);
+                const tau_v = c.V * 1e3 / (b * c.d);
+                const ptNow = 100 * barsOf(c.face).Ast_provided / (b * c.d);
+                if (tau_v <= c.k * getTauC(ptNow, fck)) continue;  // already enough
+                const pt = ptForTauC(tau_v / c.k);
                 if (pt === null) continue;                        // needs a thicker section
-                const AstReq = pt * b * d / 100;
+                const AstReq = pt * b * c.d / 100;
                 if (barsOf(c.face).Ast_provided < AstReq - 1e-6 && barsOf(c.face).adequate !== false) {
                     setBars(c.face, selectBars(AstReq, barDias, spacings, b));
                     changed = true;
@@ -800,51 +861,78 @@ export function analyzeWall(config: WallConfig): WallAnalysisResult {
             if (!changed) break;
         }
 
-        const crH = crackOf('h'), crS = crackOf('s');
+        // Reported effective depths: at the governing flexural section of each face
+        const d_hogging = dAt('h', hogGov.x);
+        const d_sagging = dAt('s', sagGov.x);
+
+        const crackEntry = (face: 'h' | 's', limit: number) => {
+            const wc = worstCrack(face);
+            const bars = barsOf(face);
+            const cw = wc ? wc.cw : crackWidthAnnexF(0, b, tMax, dAt(face, xThick), bars.Ast_provided, bars.dia, bars.spacing, cover, fck, fy);
+            return { ...cw, Ms: wc ? wc.s.M / loadFactor : 0, x: wc ? wc.s.x : xThick, limit, ok: !crackFails(face) };
+        };
         const crack = {
-            hogging: { ...crH, Ms: M_hogging_propped / loadFactor, limit: crackLimitEarth, ok: !crackFails('h') },
-            sagging: { ...crS, Ms: M_sagging / loadFactor, limit: crackLimitInner, ok: !crackFails('s') },
+            hogging: crackEntry('h', crackLimitEarth),
+            sagging: crackEntry('s', crackLimitInner),
         };
 
         // Governing shear case: the largest τv / (k·τc)
         let shear = shearDesign(0, b, d_sagging, mainBars_sagging.Ast_provided, fck, fy, material.grade);
-        let V_gov = 0, shearRatio = -1;
+        let V_gov = 0, shearRatio = -1, k_shear = kSlab(tMin);
         let shearAt: ZoneDesign['shearAt'] = { at: 'bottom', face: 'h', d: d_hogging };
         for (const c of shearCases()) {
-            const sd = shearDesign(c.V, b, dOf(c.face), barsOf(c.face).Ast_provided, fck, fy, material.grade);
-            const ratio = sd.tau_v / (k_shear * sd.tau_c);
-            if (ratio > shearRatio) { shearRatio = ratio; shear = sd; V_gov = c.V; shearAt = { at: c.at, face: c.face, d: dOf(c.face) }; }
+            const sd = shearDesign(c.V, b, c.d, barsOf(c.face).Ast_provided, fck, fy, material.grade);
+            const ratio = sd.tau_v / (c.k * sd.tau_c);
+            if (ratio > shearRatio) {
+                shearRatio = ratio; shear = sd; V_gov = c.V; k_shear = c.k;
+                shearAt = { at: c.at, face: c.face, d: c.d };
+            }
         }
         const shearOk = shear.tau_v <= k_shear * shear.tau_c;
 
         // Axial load + bending with slenderness — IS 456 Cl. 32.2 / Cl. 39.
+        // Slenderness and ea on the thinnest section (conservative for a
+        // tapered zone); capacity at each face's governing section, at its
+        // own thickness, under the axial load at the zone bottom.
         const Pu = loadFactor * (axialTop + selfWeightAbove(cumDepths[i + 1]));
         const He = 0.75 * h_m;                                  // Cl. 32.2.3(a), floors restrain rotation
-        const slenderness = He * 1000 / t_mm;
-        const ea = (He * 1000) ** 2 / (2500 * t_mm);            // mm, Cl. 32.2.5
-        const emin = 0.05 * t_mm;                               // mm, Cl. 32.2.4
-        const Mu_h = Math.max(M_hogging, Pu * emin / 1000) + Pu * ea / 1000;
-        const Mu_s = Math.max(M_sagging, Pu * emin / 1000) + Pu * ea / 1000;
-        const cap_h = sectionMomentCapacityAtAxial(b, t_mm, [
-            { As: mainBars_sagging.Ast_provided, y: cover + mainBars_sagging.dia / 2 },
-            { As: mainBars_hogging.Ast_provided, y: d_hogging },
-        ], fck, fy, Pu);
-        const cap_s = sectionMomentCapacityAtAxial(b, t_mm, [
-            { As: mainBars_hogging.Ast_provided, y: cover + mainBars_hogging.dia / 2 },
-            { As: mainBars_sagging.Ast_provided, y: d_sagging },
-        ], fck, fy, Pu);
+        const slenderness = He * 1000 / tMin;
+        const ea = (He * 1000) ** 2 / (2500 * tMin);            // mm, Cl. 32.2.5
+        const pmAt = (face: 'h' | 's', x: number, M: number) => {
+            const t = tAt(x);
+            const emin = 0.05 * t;                              // mm, Cl. 32.2.4
+            const Mu = Math.max(M, Pu * emin / 1000) + Pu * ea / 1000;
+            const other = face === 'h' ? mainBars_sagging : mainBars_hogging;
+            const cap = sectionMomentCapacityAtAxial(b, t, [
+                { As: other.Ast_provided, y: cover + other.dia / 2 },
+                { As: barsOf(face).Ast_provided, y: dAt(face, x) },
+            ], fck, fy, Pu);
+            return { Mu, cap };
+        };
+        // Each face checked at its governing flexural section and at its
+        // largest moment; the worse ratio is reported.
+        const peak = (list: Sample[]) => list.reduce<Sample | null>((m, q) => (!m || q.M > m.M ? q : m), null);
+        const worsePM = (face: 'h' | 's', a: Sample, bSample: Sample | null) => {
+            const pa = pmAt(face, a.x, a.M);
+            if (!bSample || (bSample.x === a.x && bSample.M === a.M)) return pa;
+            const pb = pmAt(face, bSample.x, bSample.M);
+            return pb.Mu / Math.max(pb.cap, 1e-9) > pa.Mu / Math.max(pa.cap, 1e-9) ? pb : pa;
+        };
+        const hogPM = worsePM('h', hogGov, peak(hogDemand));
+        const sagPM = worsePM('s', sagGov, peak(sagService));
         const pm = {
             Pu: Math.round(Pu * 10) / 10, He: Math.round(He * 1000) / 1000,
             slenderness: Math.round(slenderness * 10) / 10, slendernessOk: slenderness <= 30,
             ea: Math.round(ea * 10) / 10,
-            Mu_h: Math.round(Mu_h * 100) / 100, cap_h: Math.round(cap_h * 100) / 100,
-            Mu_s: Math.round(Mu_s * 100) / 100, cap_s: Math.round(cap_s * 100) / 100,
-            ok: slenderness <= 30 && cap_h >= Mu_h - 1e-6 && cap_s >= Mu_s - 1e-6,
+            Mu_h: Math.round(hogPM.Mu * 100) / 100, cap_h: Math.round(hogPM.cap * 100) / 100,
+            Mu_s: Math.round(sagPM.Mu * 100) / 100, cap_s: Math.round(sagPM.cap * 100) / 100,
+            ok: slenderness <= 30 && hogPM.cap >= hogPM.Mu - 1e-6 && sagPM.cap >= sagPM.Mu - 1e-6,
         };
 
-        // Horizontal (distribution) steel — Cl. 32.5(c), half on each face
-        const distPerFace = distRatio * 1000 * t_mm / 2;
-        const distSpacings = spacings.filter(sp => sp <= Math.min(3 * t_mm, 450));
+        // Horizontal (distribution) steel — Cl. 32.5(c), half on each face,
+        // sized for the thickest section of the zone
+        const distPerFace = distRatio * 1000 * tMax / 2;
+        const distSpacings = spacings.filter(sp => sp <= Math.min(3 * tMin, 450));
         const distBars = selectBars(distPerFace, [8, 10, 12, 16], distSpacings.length ? distSpacings : spacings, b);
 
         const barsOk = mainBars_hogging.adequate !== false && mainBars_sagging.adequate !== false;
@@ -852,14 +940,18 @@ export function analyzeWall(config: WallConfig): WallAnalysisResult {
             && flex_hogging.governs !== 'maximum' && flex_sagging.governs !== 'maximum'
             && barsOk && shearOk && shear.status !== 'FAIL'
             && crack.hogging.ok && crack.sagging.ok && pm.ok
-            && t_mm >= WALL_MIN_THICKNESS;
+            && tMin >= WALL_MIN_THICKNESS;
 
         zoneDesigns.push({
             zone: i + 1,
             height: h_m,
             thickness: t_mm,
+            thicknessTop: tTop,
+            thicknessBot: tBot,
             d_hogging,
             d_sagging,
+            x_hogging: hogGov.x,
+            x_sagging: sagGov.x,
             EI: zoneEIs[i],
             M_left: ML,
             M_right: MR,
@@ -1124,8 +1216,9 @@ function wallCost(result: WallAnalysisResult, costRatio: number): { costIndex: n
  *      floor — the minimum comes from a uniform-thickness analysis and the
  *      moments shift when the zone stiffnesses change). Thin upper zones are
  *      therefore evaluated even when a lower zone needs a thick section.
- *      Tapered walls: the zone is designed on the mean of its two node
- *      thicknesses, so the pruning is applied to that mean.
+ *      Tapered walls: every section is designed at its own thickness and the
+ *      peak moment may sit at the thick end, so a combination is pruned only
+ *      when even the thicker node of a zone is below its floor.
  *   3. Enumerate all combinations (full enumeration for small search spaces,
  *      greedy sequential for large ones).
  *   4. Select the combination with the lowest cost:
@@ -1176,9 +1269,9 @@ export function optimizeWall(config: WallConfig, costRatio: number = 90, onProgr
             const opts = grid.filter(t => t >= Math.min(f, gridMax) - 1e-9);
             return opts.length ? opts : [gridMax];
         });
-    // Tapered: prune on the mean thickness of every zone.
+    // Tapered: prune only when the thicker node of a zone is below its floor.
     const passesFloors = (vars: number[]): boolean => !config.isTapered
-        || zoneFloor.every((f, i) => (vars[i] + vars[i + 1]) / 2 >= Math.min(f, gridMax) - 1e-9);
+        || zoneFloor.every((f, i) => Math.max(vars[i], vars[i + 1]) >= Math.min(f, gridMax) - 1e-9);
 
     // ── Step 4: Enumeration ──────────────────────────────────────────────
     // Full enumeration is the only path that proves a global optimum. Keep the

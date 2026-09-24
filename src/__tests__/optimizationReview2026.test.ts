@@ -465,3 +465,70 @@ describe('Waffle slab optimizer', () => {
         expect(o.costBreakdown.steel_INR).toBeCloseTo(o.steelWeight_net * 90 * 1.07, 6);
     });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Tapered basement wall — every section at its own thickness
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('Tapered basement wall — local thickness design', () => {
+    // Zone 2 tapers 200 → 450 mm; its top is a continuous support (floor slab)
+    // with a hogging moment at the THIN end.
+    const cfg = {
+        isTapered: true,
+        zones: [
+            { height: 3.5, thickness: 250, thicknessTop: 200, thicknessBot: 300 },
+            { height: 3.5, thickness: 325, thicknessTop: 200, thicknessBot: 450 },
+        ],
+        soilParams: soilDry, material: matWall, loadFactor: 1.5,
+    };
+    const astReq = (Mu: number, d: number) =>
+        0.5 * 25 / 500 * (1 - Math.sqrt(1 - 4.6 * Mu * 1e6 / (25 * 1000 * d * d))) * 1000 * d;
+
+    test('earth face of zone 2 is designed at the 200 mm top, not at the 325 mm mean', () => {
+        const r = analyzeWall(cfg);
+        const zd = r.zoneDesigns[1];
+        expect(zd.thicknessTop).toBe(200);
+        expect(zd.thicknessBot).toBe(450);
+        expect(zd.thickness).toBe(325);                        // mean, for the concrete volume
+        // governing section: the top support, M = |M_left|, d = 200 − 40 − φ/2
+        expect(zd.x_hogging).toBeCloseTo(0, 6);
+        const d = 200 - 40 - zd.mainBars_hogging.dia / 2;
+        expect(zd.d_hogging).toBeCloseTo(d, 6);
+        const Mtop = Math.abs(zd.M_left);
+        expect(zd.flex_hogging.Ast_req).toBeCloseTo(Math.max(astReq(Mtop, d), 0.0012 * 1000 * 200 / 2), -1);
+        // the mean-thickness design would have needed far less steel at this section
+        const dMean = 325 - 40 - zd.mainBars_hogging.dia / 2;
+        expect(astReq(Mtop, dMean)).toBeLessThan(0.7 * astReq(Mtop, d));
+        expect(zd.mainBars_hogging.Ast_provided).toBeGreaterThanOrEqual(zd.flex_hogging.Ast_req);
+    });
+
+    test('minimum steel follows the thickest section; slenderness uses the thinnest', () => {
+        const zd = analyzeWall(cfg).zoneDesigns[1];
+        expect(zd.mainBars_sagging.Ast_provided).toBeGreaterThanOrEqual(0.0012 * 1000 * 450 / 2);
+        expect(zd.distBars.Ast_provided).toBeGreaterThanOrEqual(0.002 * 1000 * 450 / 2);
+        expect(zd.pm.slenderness).toBeCloseTo(0.75 * 3500 / 200, 1);
+        expect(zd.pm.ea).toBeCloseTo((0.75 * 3500) ** 2 / (2500 * 200), 1);
+    });
+
+    test('shear at the fixed base uses the local depth near the 450 mm end', () => {
+        const zd = analyzeWall(cfg).zoneDesigns[1];
+        expect(zd.shearAt.at).toBe('bottom');
+        expect(zd.shearAt.face).toBe('h');
+        // critical section at d_end = 450 − 40 − φ/2 above the base (Cl. 22.6.2.1),
+        // designed with the thickness there: t = 200 + 250·x/3.5
+        const phi = zd.mainBars_hogging.dia;
+        const dEnd = 450 - 40 - phi / 2;
+        const x = 3.5 - dEnd / 1000;
+        const dLocal = 200 + 250 * x / 3.5 - 40 - phi / 2;
+        expect(zd.shearAt.d).toBeCloseTo(dLocal, 6);
+    });
+
+    test('τc at p_t ≤ 0.15 % needs no extra steel (Table 19): lightly loaded top zone keeps its flexural bars', () => {
+        const r = analyzeWall({ zones: [{ height: 3.5, thickness: 300 }, { height: 3.5, thickness: 350 }, { height: 4, thickness: 450 }], soilParams: soilDry, material: matWall, loadFactor: 1.5 });
+        const zd = r.zoneDesigns[0];
+        expect(zd.shearOk).toBe(true);
+        // Inner face: M ≈ 21.9 kN·m → Ast,req ≈ 200 mm²/m → 8 @ 250 (201), below 0.15 %·b·d = 384
+        expect(zd.mainBars_sagging.label).toBe('8mm @ 250 c/c');
+        expect(zd.mainBars_sagging.Ast_provided).toBeLessThan(0.0015 * 1000 * zd.d_sagging);
+    });
+});
