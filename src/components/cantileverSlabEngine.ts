@@ -57,15 +57,35 @@ export interface CantileverSlabInput {
     //               cantilever is the extension of a flexible back-span).
     //  'backspan' — the cantilever continues from an adjoining slab span whose
     //               flexibility lets the root rotate; the tip moves θ·L.
-    supportFixity?: 'fixed' | 'backspan';
+    //  'beam'     — the cantilever is carried by a beam that twists between
+    //               columns restraining it against twist.
+    //  'beam_backspan' — both (beam torsion and back-span in parallel).
+    supportFixity?: 'fixed' | 'backspan' | 'beam' | 'beam_backspan';
     backSpan_L?: number;                          // back-span c/c length (m)
     backSpan_farEnd?: 'pinned' | 'continuous';    // far-end restraint of the back-span
+    beam_b?: number;                              // supporting beam width (mm)
+    beam_D?: number;                              // supporting beam overall depth (mm)
+    beam_span?: number;                           // beam span between torsional restraints (m)
+    // Multiplier on the BS 8110-2 Cl. 2.4.3 torsional stiffness (default 1).
+    // Reduce it when the beam cracks in torsion (see result.supportRotation.beam.cracked).
+    beam_torsionStiffnessFactor?: number;
     
     // Optional parapet / railing line load at the free end
     parapetHeight?: number;    // m
     parapetThickness?: number; // mm
     parapetDensity?: number;   // kN/m3 (typically 20 for masonry)
     costParams?: CostParameters; // AUDIT FIX OPT-3: optional cost overrides
+}
+
+/** Supporting-beam torsion results for the cantilever support rotation. */
+export interface CantileverBeamTorsion {
+    b: number; D: number; span: number;   // beam width / depth (mm), span between torsional restraints (m)
+    beta: number; C: number;              // St Venant β and C = 0.5·β·b³·h (mm⁴, BS 8110-2 Cl. 2.4.3)
+    stiffnessFactor: number; GJ: number;  // user factor, short-term G·C (N·mm²)
+    lambdaL: number;                      // λ·Lt (0 without a back-span)
+    Tu_end: number; T_end: number;        // torque at each column end, factored / service (kN·m)
+    tau_t: number; fcr: number;           // elastic torsional shear stress vs 0.7√fck (N/mm²)
+    cracked: boolean;                     // τ_t > f_cr → torsional stiffness overestimated
 }
 
 export function analyzeCantileverSlab(input: CantileverSlabInput) {
@@ -186,32 +206,71 @@ export function analyzeCantileverSlab(input: CantileverSlabInput) {
     };
     const deflectionRoot: DeflectionResult = annexCDeflection(deflConfig, deflLoading);
 
-    // ─── Support rotation from a flexible back-span ─────────────────────────
-    // The cantilever root moment M rotates the near end of the back-span by
-    //   θ = k·M·Lb/(E·I),  k = 1/3 (far end pinned), 1/4 (far end fixed/continuous)
-    // (stiffness of a prismatic member: 3EI/L and 4EI/L). The tip deflects θ·L.
-    // E·I is the cracked hogging section at the root (same top steel carried
-    // into the back-span), I_eff short-term with Ec and I_eff,lt with Ece for
-    // the creep part — conservative, as the back-span moment falls off from M.
-    // Loads on the back-span (which rotate the root the other way) and
-    // back-span shrinkage are ignored — conservative.
-    const Lb_m = input.supportFixity === 'backspan' ? Math.max(0, input.backSpan_L ?? 0) : 0;
+    // ─── Support rotation: flexible back-span and/or supporting beam torsion ─
+    // The cantilever root moment M (per metre) rotates the root; the tip then
+    // moves θ·L. Two sources of flexibility, acting in parallel:
+    //
+    //  • Back-span (slab continuing behind the support): rotational stiffness
+    //    per metre k_b = E·I/(k·Lb), k = 1/3 far end pinned, 1/4 far end
+    //    continuous (3EI/L and 4EI/L). E·I is the cracked hogging root section
+    //    (I_eff with Ec short-term, I_eff,lt with Ece for creep) — conservative.
+    //    Back-span loads and shrinkage are ignored — conservative.
+    //
+    //  • Supporting beam twisting between columns that restrain it against
+    //    twist (span Lt). Torsional stiffness per BS 8110-2:1985 Cl. 2.4.3:
+    //    G = 0.42·E and C = half the St Venant constant of the plain section,
+    //    C = 0.5·β·b³·h, β = (1/3)(1 − 0.63 b/h + 0.052 (b/h)⁵) (b ≤ h). A
+    //    user factor reduces it for a torsionally cracked beam.
+    //
+    //  The distributed torque t = M acts along the beam. With both sources
+    //  (GJ·θ'' − k_b·θ = −t, θ = 0 at the columns) the mid-length rotation is
+    //     θ = (t/k_b)·[1 − 1/cosh(λ·Lt/2)],  λ = √(k_b/GJ)
+    //  which reduces to t·Lt²/(8GJ) for the beam alone (k_b → 0) and to t/k_b
+    //  for the back-span alone. The deflection reported is at mid-length of
+    //  the beam, where the rotation is largest.
+    const mode = input.supportFixity ?? 'fixed';
+    const Lb_m = (mode === 'backspan' || mode === 'beam_backspan') ? Math.max(0, input.backSpan_L ?? 0) : 0;
+    const beamOn = (mode === 'beam' || mode === 'beam_backspan')
+        && (input.beam_b ?? 0) > 0 && (input.beam_D ?? 0) > 0 && (input.beam_span ?? 0) > 0;
     let supportRotation: {
+        mode: 'backspan' | 'beam' | 'beam_backspan';
         Lb: number; farEnd: 'pinned' | 'continuous'; k: number;
         theta_i_mrad: number; theta_perm_mrad: number; theta_lt_mrad: number;
         a_i: number; a_i_perm: number; a1_perm: number; a_creep: number;
+        beam: CantileverBeamTorsion | null;
     } | null = null;
     let deflection: DeflectionResult = annexCDeflection(deflConfig, { ...deflLoading, camber: input.camber ?? 0 });
-    if (Lb_m > 0) {
+    if (Lb_m > 0 || beamOn) {
         const farEnd = input.backSpan_farEnd ?? 'pinned';
         const k = farEnd === 'continuous' ? 1 / 4 : 1 / 3;
         const Lb = Lb_m * 1000;                    // mm
         const Lc = deflectionRoot.L;               // mm
         const Ec = deflectionRoot.Ec, Ece = deflectionRoot.Ece;
-        const Ms = Math.abs(M_service) * 1e6, Mp = Math.abs(M_perm) * 1e6;   // N·mm
-        const theta_i = k * Ms * Lb / (Ec * deflectionRoot.Ieff);
-        const theta_perm = k * Mp * Lb / (Ec * deflectionRoot.Ieff_perm);
-        const theta_lt = k * Mp * Lb / (Ece * deflectionRoot.Ieff_lt);
+
+        // Beam torsion constant (mm⁴) — BS 8110-2 Cl. 2.4.3
+        const bb = Math.min(input.beam_b ?? 0, input.beam_D ?? 0);
+        const hb = Math.max(input.beam_b ?? 0, input.beam_D ?? 0);
+        const rb = hb > 0 ? bb / hb : 0;
+        const beta = (1 / 3) * (1 - 0.63 * rb + 0.052 * Math.pow(rb, 5));
+        const C = beamOn ? 0.5 * beta * Math.pow(bb, 3) * hb : 0;
+        const fT = input.beam_torsionStiffnessFactor && input.beam_torsionStiffnessFactor > 0
+            ? input.beam_torsionStiffnessFactor : 1;
+        const Lt = (input.beam_span ?? 0) * 1000;  // mm
+
+        // Rotation (rad) for a root moment M (kN·m per m) with the section
+        // stiffness E·I (per 1000 mm strip) and concrete modulus E.
+        const rotation = (M_kNm: number, E: number, I: number) => {
+            const t = Math.abs(M_kNm) * 1e6 / 1000;                  // N·mm per mm
+            const kb = Lb > 0 ? (E * I / 1000) / (k * Lb) : 0;        // N·mm/rad per mm
+            if (!beamOn) return t / kb;
+            const GJ = fT * 0.42 * E * C;                            // N·mm²
+            if (kb <= 0) return t * Lt * Lt / (8 * GJ);
+            const lam = Math.sqrt(kb / GJ);
+            return (t / kb) * (1 - 1 / Math.cosh(lam * Lt / 2));
+        };
+        const theta_i = rotation(M_service, Ec, deflectionRoot.Ieff);
+        const theta_perm = rotation(M_perm, Ec, deflectionRoot.Ieff_perm);
+        const theta_lt = rotation(M_perm, Ece, deflectionRoot.Ieff_lt);
         const a_i = theta_i * Lc, a_i_perm = theta_perm * Lc, a1_perm = theta_lt * Lc;
         const a_creep = Math.max(0, a1_perm - a_i_perm);
         const rotPart: DeflectionResult = {
@@ -221,10 +280,42 @@ export function analyzeCantileverSlab(input: CantileverSlabInput) {
         };
         deflection = combineStripDeflections([deflectionRoot, rotPart], Lc, input.camber ?? 0);
         const r2 = (v: number) => Math.round(v * 100) / 100;
+
+        let beam: CantileverBeamTorsion | null = null;
+        if (beamOn) {
+            // Torque at the column ends (short-term stiffness distribution):
+            //   T_end = GJ·θ'(0) = t·tanh(λLt/2)/λ  →  t·Lt/2 for the beam alone.
+            // With no back-span this is equilibrium torsion and the beam MUST be
+            // designed for it (IS 456 Cl. 41).
+            const GJ = fT * 0.42 * Ec * C;
+            const kb = Lb > 0 ? (Ec * deflectionRoot.Ieff / 1000) / (k * Lb) : 0;
+            const lam = kb > 0 ? Math.sqrt(kb / GJ) : 0;
+            const endTorque = (M_kNm: number) => {
+                const t = Math.abs(M_kNm) * 1e6 / 1000;
+                return (lam > 0 ? t * Math.tanh(lam * Lt / 2) / lam : t * Lt / 2) / 1e6;  // kN·m
+            };
+            const T_end = endTorque(M_service);
+            // Elastic torsional shear stress τ = T/(α·b²·h), α ≈ 1/(3 + 1.8 b/h),
+            // compared with f_cr = 0.7√fck as a torsional-cracking indicator.
+            const alphaT = 1 / (3 + 1.8 * rb);
+            const tau_t = T_end * 1e6 / (alphaT * bb * bb * hb);
+            const fcr = 0.7 * Math.sqrt(fck);
+            beam = {
+                b: input.beam_b!, D: input.beam_D!, span: input.beam_span!,
+                beta: Math.round(beta * 10000) / 10000, C,
+                stiffnessFactor: fT, GJ,
+                lambdaL: Math.round(lam * Lt * 1000) / 1000,
+                Tu_end: r2(endTorque(Mu)), T_end: r2(T_end),
+                tau_t: Math.round(tau_t * 1000) / 1000, fcr: Math.round(fcr * 1000) / 1000,
+                cracked: tau_t > fcr,
+            };
+        }
         supportRotation = {
+            mode: mode as 'backspan' | 'beam' | 'beam_backspan',
             Lb: Lb_m, farEnd, k,
             theta_i_mrad: r2(theta_i * 1000), theta_perm_mrad: r2(theta_perm * 1000), theta_lt_mrad: r2(theta_lt * 1000),
             a_i: r2(a_i), a_i_perm: r2(a_i_perm), a1_perm: r2(a1_perm), a_creep: r2(a_creep),
+            beam,
         };
     }
     // User instruction: evaluate both total and post-construction checks.
