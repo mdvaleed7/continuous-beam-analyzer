@@ -994,16 +994,57 @@ function computeTorsionSteelWeight(result: SlabAnalysisResult): number {
     return (total_area_mm2 * length_m * 7850) / 1e6;
 }
 
-// Quantities and cost of an analysed panel. Steel = provided bars (mm²/m)
-// over the panel area + corner torsion steel; the wastage factor is applied
+// Number of continuous SHORT edges (supports of the long span) per Table 26
+// case — the long edges follow getSupportCondForDeflection.
+const SHORT_EDGES_CONTINUOUS: readonly number[] = [2, 1, 2, 1, 0, 2, 0, 1, 0];
+
+/**
+ * Steel (kg per panel) of the provided bars, with the top bars only where
+ * IS 456 Annex D places them instead of over the whole panel:
+ *   • continuous edge (D-1.6): 100 % of the top bars to 0.15·l from the
+ *     support and 50 % to 0.3·l → 0.225·l of the full area per edge;
+ *   • discontinuous edge (D-1.7): 50 % of the mid-span steel over 0.1·l;
+ *   • distribution bars under the top bars over the 0.3·l strip, at the
+ *     minimum steel of the section (one-way: the designed distribution bars).
+ * l is taken as the span in the direction of the bars (the long span for
+ * the y bars, conservative where the short span is meant). Bottom bars stay
+ * over the full span; anchorage beyond the support is not counted
+ * (the bars continue into the adjacent panel, costed there).
+ * Cantilevers keep their top bars over the full span.
+ */
+export function slabSteelKg(r: SlabAnalysisResult): { bottom: number; top: number; total: number } {
+    const kg = (Ast: number, width: number, length: number) => Ast * width * length * 7850 / 1e6;
+    const bottom = kg(r.bars_x_bot.Ast_provided, r.Ly, r.Lx) + kg(r.bars_y_bot.Ast_provided, r.Lx, r.Ly);
+    if (r.slabType === 'cantilever') {
+        const top = kg(r.bars_x_top.Ast_provided, r.Ly, r.Lx) + kg(r.bars_y_top.Ast_provided, r.Lx, r.Ly);
+        return { bottom, top, total: bottom + top };
+    }
+    const nx = r.supportCondition === 'continuous' ? 2 : r.supportCondition === 'one_end' ? 1 : 0;
+    // x-direction top bars at the long edges (width Ly), l = Lx
+    let top = nx * kg(r.bars_x_top.Ast_provided, r.Ly, 0.225 * r.Lx)
+        + (2 - nx) * kg(0.5 * r.bars_x_bot.Ast_provided, r.Ly, 0.1 * r.Lx);
+    if (r.slabType === 'one-way') {
+        // designed distribution bars under the top bars, 0.3·Lx strip per continuous edge
+        top += nx * kg(r.bars_y_top.Ast_provided, 0.3 * r.Lx, r.Ly);
+    } else {
+        const ny = SHORT_EDGES_CONTINUOUS[r.boundaryCase - 1] ?? 2;
+        top += ny * kg(r.bars_y_top.Ast_provided, r.Lx, 0.225 * r.Ly)
+            + (2 - ny) * kg(0.5 * r.bars_y_bot.Ast_provided, r.Lx, 0.1 * r.Ly);
+        // distribution under the top bars at minimum steel
+        top += nx * kg(r.flex_y_top.Ast_min ?? 0, 0.3 * r.Lx, r.Ly) + ny * kg(r.flex_x_top.Ast_min ?? 0, 0.3 * r.Ly, r.Lx);
+    }
+    return { bottom, top, total: bottom + top };
+}
+
+// Quantities and cost of an analysed panel. Steel = provided bars, top
+// bars curtailed per Annex D (slabSteelKg) + corner torsion steel; the wastage factor is applied
 // ONCE, inside computeCost (a separate lap factor used to be applied on top
 // of it). Utilizations: flexure = max Mu / Mu,R with the provided bars,
 // deflection = a_total / limit, shear = τv / (k·τc).
 function slabDesignRecord(result: SlabAnalysisResult, D: number, costParams: CostParameters) {
     const slabArea_m2 = result.Lx * result.Ly;
     const concreteVol = (D / 1000) * slabArea_m2;
-    const barSteel_kg = ((result.bars_x_bot.Ast_provided + result.bars_x_top.Ast_provided +
-        result.bars_y_bot.Ast_provided + result.bars_y_top.Ast_provided) * slabArea_m2 * 7850) / 1e6;
+    const barSteel_kg = slabSteelKg(result).total;
     const torsionSteel_kg = result.requiresTorsionSteel ? computeTorsionSteelWeight(result) : 0;
     const steelWeight_net = barSteel_kg + torsionSteel_kg;
     const fw = costParams.wastage_factor ?? 1.07;
