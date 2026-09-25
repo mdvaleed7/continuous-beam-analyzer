@@ -119,12 +119,15 @@ export interface MemberDef {
     reverse: boolean;            // section profile runs from j to i
     Ly: number;                  // unbraced length out-of-plane / LTB (m)
     sway: boolean;               // IS 800: Cmz = 0.9 (sway) or from ψ (non-sway)
+    breaks?: number[];           // extra FE nodes at these fractions (i → j), e.g. crane brackets
 }
 
 export interface MemberLoad { member: number; wx: number; wy: number }   // kN/m of member length, global
 export interface NodalLoad { node: number; fx: number; fy: number; mz: number }   // kN, kN·m
+// concentrated load on a member at fraction `at` (i → j), which must be one of its breaks
+export interface MemberPointLoad { member: number; at: number; fx: number; fy: number; mz: number }
 
-export interface LoadCaseDef { memberLoads: MemberLoad[]; nodalLoads: NodalLoad[] }
+export interface LoadCaseDef { memberLoads: MemberLoad[]; nodalLoads: NodalLoad[]; pointLoads?: MemberPointLoad[] }
 
 export interface ComboDef {
     name: string;
@@ -171,16 +174,52 @@ export interface FEModel {
     nodeXY: { x: number; y: number }[];
     mainNode: number[];                 // main node → FE node
     memberNodes: number[][];            // FE nodes along each member (i → j)
+    memberFr: number[][];               // their fractions along the member
     elements: Element[];
     ndof: number;
     hb: number;
     fixed: boolean[];
 }
 
+/** Reverse Cuthill–McKee order (new index → old index). */
+function rcmOrder(nNodes: number, edges: [number, number][]): number[] {
+    const adj: number[][] = Array.from({ length: nNodes }, () => []);
+    for (const [a, b] of edges) { adj[a].push(b); adj[b].push(a); }
+    const deg = adj.map(a => a.length);
+    const bfs = (start: number, seen: boolean[]) => {
+        const order = [start];
+        seen[start] = true;
+        for (let h = 0; h < order.length; h++) {
+            const nb = adj[order[h]].filter(v => !seen[v]).sort((p, q) => deg[p] - deg[q]);
+            for (const v of nb) { if (!seen[v]) { seen[v] = true; order.push(v); } }
+        }
+        return order;
+    };
+    const done = new Array<boolean>(nNodes).fill(false);
+    const out: number[] = [];
+    for (let s0 = 0; s0 < nNodes; s0++) {
+        if (done[s0]) continue;
+        // pseudo-peripheral start: last node of a BFS from any node of the component
+        const comp = bfs(s0, [...done]);
+        const far = comp[comp.length - 1];
+        const order = bfs(far, done);
+        out.push(...order.reverse());
+    }
+    return out;
+}
+
+/** Node fractions of a member: nSub equal parts plus the break points. */
+function memberFractions(nSub: number, breaks: number[] = []): number[] {
+    const fr = Array.from({ length: nSub + 1 }, (_, k) => k / nSub);
+    for (const b of breaks) if (b > 1e-6 && b < 1 - 1e-6 && !fr.some(f => Math.abs(f - b) < 1e-6)) fr.push(b);
+    return fr.sort((a, b) => a - b);
+}
+
 function buildFE(model: StructureModel): FEModel {
     const nodeXY: { x: number; y: number }[] = [];
     const mainNode = new Array(model.nodes.length).fill(-1);
     const memberNodes: number[][] = [];
+    const memberFr: number[][] = [];
     const elements: Element[] = [];
     const nodeOf = (m: number) => {
         if (mainNode[m] < 0) { mainNode[m] = nodeXY.length; nodeXY.push({ ...model.nodes[m] }); }
@@ -188,22 +227,34 @@ function buildFE(model: StructureModel): FEModel {
     };
     model.members.forEach((mem, mi) => {
         const A = model.nodes[mem.i], B = model.nodes[mem.j];
+        const fr = memberFractions(model.nSub, mem.breaks);
         const list = [nodeOf(mem.i)];
-        for (let k = 1; k < model.nSub; k++) {
-            const r = k / model.nSub;
+        for (let k = 1; k < fr.length - 1; k++) {
+            const r = fr[k];
             nodeXY.push({ x: A.x + (B.x - A.x) * r, y: A.y + (B.y - A.y) * r });
             list.push(nodeXY.length - 1);
         }
         list.push(nodeOf(mem.j));
         memberNodes.push(list);
-        const L = Math.hypot(B.x - A.x, B.y - A.y) / model.nSub;
-        const c = (B.x - A.x) / (L * model.nSub), s = (B.y - A.y) / (L * model.nSub);
-        for (let k = 0; k < model.nSub; k++) {
-            const sMid = (k + 0.5) / model.nSub;
+        memberFr.push(fr);
+        const Ltot = Math.hypot(B.x - A.x, B.y - A.y);
+        const c = (B.x - A.x) / Ltot, s = (B.y - A.y) / Ltot;
+        for (let k = 0; k < fr.length - 1; k++) {
+            const sMid = 0.5 * (fr[k] + fr[k + 1]);
             const p = memberSectionAt(mem.section, mem.reverse ? 1 - sMid : sMid);
-            elements.push({ member: mi, k, n1: list[k], n2: list[k + 1], L, c, s, sMid, A: p.A, I: p.Iz });
+            elements.push({ member: mi, k, n1: list[k], n2: list[k + 1], L: Ltot * (fr[k + 1] - fr[k]), c, s, sMid, A: p.A, I: p.Iz });
         }
     });
+    // Reverse Cuthill–McKee renumbering: narrow band for branched frames
+    // (interior columns of multi-span frames)
+    const perm = rcmOrder(nodeXY.length, elements.map(e => [e.n1, e.n2] as [number, number]));
+    const newOf = new Array<number>(nodeXY.length);
+    perm.forEach((old, nw) => { newOf[old] = nw; });
+    const xy = perm.map(old => nodeXY[old]);
+    nodeXY.length = 0; nodeXY.push(...xy);
+    for (let m = 0; m < mainNode.length; m++) if (mainNode[m] >= 0) mainNode[m] = newOf[mainNode[m]];
+    memberNodes.forEach(list => list.forEach((v, k) => { list[k] = newOf[v]; }));
+    for (const e of elements) { e.n1 = newOf[e.n1]; e.n2 = newOf[e.n2]; }
     const ndof = nodeXY.length * 3;
     let hb = 0;
     for (const e of elements) hb = Math.max(hb, Math.abs(e.n1 - e.n2) * 3 + 2);
@@ -214,7 +265,7 @@ function buildFE(model: StructureModel): FEModel {
         if (sp.uy) fixed[3 * n + 1] = true;
         if (sp.rz) fixed[3 * n + 2] = true;
     }
-    return { nodeXY, mainNode, memberNodes, elements, ndof, hb, fixed };
+    return { nodeXY, mainNode, memberNodes, memberFr, elements, ndof, hb, fixed };
 }
 
 // local stiffness (kN, m) — E in MPa, A mm², I mm⁴
@@ -330,12 +381,17 @@ function combineLoads(model: StructureModel, fe: FEModel, combo: ComboDef): Fact
         if (lc === 'D') {
             fe.elements.forEach((e, idx) => { elemLoads[idx].wy -= factor * e.A * 1e-6 * STEEL_UNIT_WEIGHT; });
         }
-        for (const nl of def.nodalLoads) {
-            const n = fe.mainNode[nl.node];
-            F[3 * n] += factor * nl.fx;
-            F[3 * n + 1] += factor * nl.fy;
-            F[3 * n + 2] += factor * nl.mz;
-            totalGravity += -factor * nl.fy;
+        const point = (n: number, fx: number, fy: number, mz: number) => {
+            F[3 * n] += factor * fx;
+            F[3 * n + 1] += factor * fy;
+            F[3 * n + 2] += factor * mz;
+            totalGravity += -factor * fy;
+        };
+        for (const nl of def.nodalLoads) point(fe.mainNode[nl.node], nl.fx, nl.fy, nl.mz);
+        for (const pl of def.pointLoads ?? []) {
+            const q = fe.memberFr[pl.member].findIndex(f => Math.abs(f - pl.at) < 1e-6);
+            if (q < 0) throw new Error(`point load at ${pl.at} is not a node of member ${pl.member}`);
+            point(fe.memberNodes[pl.member][q], pl.fx, pl.fy, pl.mz);
         }
     }
     fe.elements.forEach((e, idx) => {
@@ -421,13 +477,57 @@ function solve(fe: FEModel, E: number, stiff: Stiff, loads: FactoredLoads, secon
     return { u, forces: res.forces, axial: res.axial, stable: true, iterations: it + 1 };
 }
 
-/** Smallest λ > 0 with K + λ·KG(axial) singular (Sturm count bisection). */
+/**
+ * Smallest λ > 0 with K + λ·KG(axial) singular. Inverse iteration with a
+ * Rayleigh quotient gives the estimate; two Sturm counts confirm that no
+ * buckling mode lies below it (0.1 %). Otherwise: Sturm-count bisection.
+ */
 function bucklingFactor(fe: FEModel, E: number, stiff: Stiff, axial: number[]): number {
     if (!axial.some(a => a < -1e-9)) return Infinity;
     const count = (lam: number) => ldl(assemble(fe, E, stiff, axial, lam)).neg;
+    const tol = 1e-3;
+    const K = assemble(fe, E, stiff, null);
+    const fK = ldl(K);
+    if (fK.neg === 0 && !fK.singular) {
+        const G = assemble(fe, E, stiff.map(() => ({ a: 0, i: 0 })), axial, 1);
+        const n = fe.ndof;
+        const mv = (M: BandMatrix, x: Float64Array) => {
+            const y = new Float64Array(n), w = M.hb + 1;
+            for (let i = 0; i < n; i++) {
+                if (fe.fixed[i]) continue;
+                for (let k = 0; k <= Math.min(M.hb, i); k++) {
+                    const j = i - k;
+                    if (fe.fixed[j]) continue;
+                    const v = M.a[i * w + k];
+                    y[i] += v * x[j];
+                    if (k > 0) y[j] += v * x[i];
+                }
+            }
+            return y;
+        };
+        const dot = (p: Float64Array, q: Float64Array) => { let t = 0; for (let i = 0; i < n; i++) t += p[i] * q[i]; return t; };
+        let x: Float64Array = new Float64Array(n);
+        for (let i = 0; i < n; i++) x[i] = fe.fixed[i] ? 0 : 1 + 0.37 * Math.sin(i);
+        let lam = NaN;
+        for (let it = 0; it < 40; it++) {
+            const g = mv(G, x);
+            for (let i = 0; i < n; i++) g[i] = fe.fixed[i] ? 0 : -g[i];
+            const y = ldlSolve(fK, g);
+            for (let i = 0; i < n; i++) if (fe.fixed[i]) y[i] = 0;
+            const Ky = mv(K, y), Gy = mv(G, y);
+            const den = -dot(y, Gy);
+            const prev = lam;
+            lam = den !== 0 ? dot(y, Ky) / den : NaN;
+            const nrm = Math.sqrt(dot(y, y)) || 1;
+            for (let i = 0; i < n; i++) y[i] /= nrm;
+            x = y;
+            if (it > 2 && Number.isFinite(lam) && Math.abs(lam - prev) < 1e-5 * Math.abs(lam)) break;
+        }
+        if (Number.isFinite(lam) && lam > 0 && count(lam * (1 - tol)) === 0 && count(lam * (1 + tol)) > 0) return lam;
+    }
     let lo = 0, hi = 1;
     while (count(hi) === 0) { hi *= 2; if (hi > 1e6) return Infinity; }
-    for (let k = 0; k < 40 && (hi - lo) > 1e-3 * hi; k++) {           // 0.1 % on the load factor
+    for (let k = 0; k < 40 && (hi - lo) > tol * hi; k++) {           // 0.1 % on the load factor
         const mid = 0.5 * (lo + hi);
         if (count(mid) > 0) hi = mid; else lo = mid;
     }
@@ -479,6 +579,7 @@ export interface ComboResult {
     stable: boolean;
     gammaE: number;                     // elastic buckling load factor (first-order axial forces)
     ampRatio: number;                   // Δ2nd / Δ1st (max horizontal node displacement)
+    maxUtil: number;                    // strength: largest station utilization (99 if unstable); service: 0
     notional: boolean;
     reactions: { node: number; Rx: number; Ry: number; Mz: number }[];
     members: { name: string; s: number[]; N: number[]; V: number[]; M: number[] }[];
@@ -510,7 +611,12 @@ const interp = (xs: number[], ys: number[], x: number) => {
     return ys[ys.length - 1];
 };
 
-export function designStructure(model: StructureModel, opts: { detail?: boolean } = {}): DesignResult {
+/**
+ * opts.only: run only these strength combinations, in this order (service
+ * combinations first) — optimizer screening; opts.stopAbove: stop as soon as
+ * a utilization or deflection ratio exceeds it (the result is then partial).
+ */
+export function designStructure(model: StructureModel, opts: { detail?: boolean; only?: string[]; stopAbove?: number } = {}): DesignResult {
     const { code, fy } = model;
     const E = code === 'IS800' ? IS800.E : AISC.E;
     const fe = buildFE(model);
@@ -545,19 +651,37 @@ export function designStructure(model: StructureModel, opts: { detail?: boolean 
         });
     });
 
-    const stationS = Array.from({ length: model.nSub + 1 }, (_, k) => k / model.nSub);
-    const env: StationResult[][] = model.members.map((m, mi) => stationS.map(s => {
-        const n = fe.memberNodes[mi][Math.round(s * model.nSub)];
-        return { s, x: fe.nodeXY[n].x, y: fe.nodeXY[n].y, D: secAt(mi, s).D, N: 0, V: 0, M: 0, util: 0, combo: '', governing: '' };
-    }));
+    // Stations: every FE node of the member; at a break point both sides of
+    // the node (actions jump under a concentrated load or moment).
+    // Each station reads element `el` at end 1 (start) or 2 (end).
+    const stationDefs = model.members.map((m, mi) => {
+        const fr = fe.memberFr[mi];
+        const els = fe.elements.map((e, idx) => ({ e, idx })).filter(o => o.e.member === mi).map(o => o.idx);
+        const isBreak = (f: number) => (m.breaks ?? []).some(b => Math.abs(b - f) < 1e-6);
+        const out: { s: number; node: number; el: number; end: 1 | 2 }[] = [{ s: 0, node: fe.memberNodes[mi][0], el: els[0], end: 1 }];
+        for (let k = 1; k < fr.length; k++) {
+            out.push({ s: fr[k], node: fe.memberNodes[mi][k], el: els[k - 1], end: 2 });
+            if (k < fr.length - 1 && isBreak(fr[k])) out.push({ s: fr[k], node: fe.memberNodes[mi][k], el: els[k], end: 1 });
+        }
+        return out;
+    });
+    const env: StationResult[][] = model.members.map((m, mi) => stationDefs[mi].map(({ s, node }) =>
+        ({ s, x: fe.nodeXY[node].x, y: fe.nodeXY[node].y, D: secAt(mi, s).D, N: 0, V: 0, M: 0, util: 0, combo: '', governing: '' })));
     const gov = model.members.map(() => ({ util: -1, combo: '', s: 0, check: '', detail: null as ISStationResult | AISCStationResult | null, section: null as SectionProps | null }));
     // per member: segment data of each strength combination (reported for the governing one)
     const segByCombo: Record<string, MemberResult['segments']>[] = model.members.map(() => ({}));
     const combos: ComboResult[] = [];
     const deflections: DeflectionResult[] = [];
 
-    for (const combo of model.combos) {
+    const comboOrder = opts.only
+        ? [...model.combos.filter(c => c.kind === 'service'),
+            ...opts.only.map(nm => model.combos.find(c => c.name === nm && c.kind === 'strength')).filter((c): c is ComboDef => !!c)]
+        : model.combos;
+    for (const combo of comboOrder) {
+        if (opts.stopAbove !== undefined
+            && (gov.some(g => g.util > opts.stopAbove!) || deflections.some(dr => dr.ratio > opts.stopAbove!))) break;
         const strength = combo.kind === 'strength';
+        let comboMax = 0;
         // AISC direct analysis (strength): 0.8·EA and 0.8·τb·EI; otherwise nominal
         let stiff: Stiff = fe.elements.map(() => (strength && code === 'AISC360' ? { a: 0.8, i: 0.8 } : { a: 1, i: 1 }));
         const loads = combineLoads(model, fe, combo);
@@ -602,14 +726,13 @@ export function designStructure(model: StructureModel, opts: { detail?: boolean 
 
         // Member actions at stations
         const memActs = model.members.map((m, mi) => {
-            const els = fe.elements.map((e, idx) => ({ e, idx })).filter(o => o.e.member === mi);
             const N: number[] = [], V: number[] = [], M: number[] = [];
-            stationS.forEach((s, k) => {
-                const f = k === 0 ? sol.forces[els[0].idx] : sol.forces[els[k - 1].idx];
-                if (!f) { N.push(0); V.push(0); M.push(0); return; }
-                if (k === 0) { N.push(f.N1); V.push(f.V1); M.push(f.M1); } else { N.push(f.N2); V.push(f.V2); M.push(f.M2); }
-            });
-            return { name: m.name, s: stationS, N, V, M };
+            for (const st of stationDefs[mi]) {
+                const f = sol.forces[st.el];
+                if (!f) { N.push(0); V.push(0); M.push(0); continue; }
+                if (st.end === 1) { N.push(f.N1); V.push(f.V1); M.push(f.M1); } else { N.push(f.N2); V.push(f.V2); M.push(f.M2); }
+            }
+            return { name: m.name, s: stationDefs[mi].map(st => st.s), N, V, M };
         });
 
         const reactions = model.supports.map(sp => {
@@ -632,7 +755,7 @@ export function designStructure(model: StructureModel, opts: { detail?: boolean 
         });
 
         combos.push({
-            name: combo.name, kind: combo.kind, stable: sol.stable, gammaE, ampRatio, notional: useNotional, reactions,
+            name: combo.name, kind: combo.kind, stable: sol.stable, gammaE, ampRatio, maxUtil: 0, notional: useNotional, reactions,
             members: memActs,
             maxDisp: {
                 ux: Math.max(...Array.from({ length: fe.nodeXY.length }, (_, n) => Math.abs(sol.u[3 * n]))) * 1000,
@@ -651,6 +774,7 @@ export function designStructure(model: StructureModel, opts: { detail?: boolean 
         if (!sol.stable) {
             warnings.push(`${combo.name}: frame unstable under the factored loads (second-order analysis)`);
             model.members.forEach((m, mi) => { if (gov[mi].util < 99) { gov[mi] = { ...gov[mi], util: 99, combo: combo.name, check: 'instability' }; } });
+            combos[combos.length - 1].maxUtil = 99;
             continue;
         }
 
@@ -697,6 +821,7 @@ export function designStructure(model: StructureModel, opts: { detail?: boolean 
                         util = r.max; gname = r.governing; detail = r;
                     }
                     const st = env[mi][k];
+                    if (util > comboMax) comboMax = util;
                     if (util > st.util) {
                         env[mi][k] = { ...st, N: act.N[k], V: act.V[k], M: act.M[k], util, combo: combo.name, governing: gname };
                     }
@@ -706,6 +831,7 @@ export function designStructure(model: StructureModel, opts: { detail?: boolean 
                 });
             });
         });
+        combos[combos.length - 1].maxUtil = comboMax;
     }
 
     const members: MemberResult[] = model.members.map((m, mi) => ({
@@ -762,6 +888,57 @@ export function strengthCombos(code: SteelCode, windCases: string[], hasLive = t
 // ═══════════════════════════════════════════════════════════════
 export interface WindCoefficients { windwardWall: number; leewardWall: number; windwardRoof: number; leewardRoof: number }
 
+/**
+ * Overhead travelling crane on brackets of the two columns of one span.
+ * Wheel loads → column reactions: two wheels per end carriage (wheel base
+ * w), runway girders simply supported between frames at spacing B; the
+ * maximum column reaction has one wheel over the frame:
+ *   k = 1 + (B − w)/B  (w < B), else 1.
+ * Vertical impact and lateral surge as fractions (IS 875-2 Cl. 6.3 Table 3;
+ * ASCE 7-22 §4.9.3 / §4.9.4); longitudinal surge acts out of the frame plane
+ * and is not part of this 2D analysis.
+ */
+export interface CraneInput {
+    span: number;               // crane span index (0 = first span from the left)
+    capacity: number;           // kN — rated capacity (lifted load)
+    crabWeight: number;         // kN — crab / trolley and hoist
+    bridgeWeight: number;       // kN — bridge girders and end carriages
+    hookApproach: number;       // m — minimum distance from the rail to the hook (crab centre)
+    wheelBase: number;          // m — wheel spacing on each end carriage (2 wheels per rail)
+    eccentricity: number;       // m — runway girder centreline from the column centreline (toward the crane)
+    bracketLevel: number;       // m — level of the bracket seat (vertical load)
+    railLevel: number;          // m — top of rail (lateral surge)
+    impact: number;             // vertical impact, fraction of the wheel loads
+    surge: number;              // lateral surge, fraction of (capacity + crab), shared equally by the two rails
+    girderWeight: number;       // kN/m — runway girder + rail (dead load)
+    lateralLimit: number;       // rail-level lateral deflection limit: height / this
+    spreadLimit: number;        // mm — change of the rail gauge
+}
+
+export interface CraneReactions {
+    craneSpan: number;          // m — rail centres
+    Pmax: number; Pmin: number; // kN per wheel, static
+    k: number;                  // wheel-pair influence factor on the column reaction
+    Rmax: number; Rmin: number; // kN on the column, static (no impact)
+    H: number;                  // kN surge on each column
+    Rg: number;                 // kN runway girder dead load on each column
+}
+
+export function craneReactions(c: CraneInput, frameSpan: number, frameSpacing: number): CraneReactions {
+    const Lc = frameSpan - 2 * c.eccentricity;
+    if (!(Lc > 0)) throw new Error('Crane span (frame span − 2 × eccentricity) must be positive');
+    const a = Math.min(Math.max(0, c.hookApproach), Lc / 2);
+    const W = c.capacity + c.crabWeight;
+    const Pmax = (c.bridgeWeight / 2 + W * (Lc - a) / Lc) / 2;
+    const Pmin = (c.bridgeWeight / 2 + W * a / Lc) / 2;
+    const B = frameSpacing;
+    const k = c.wheelBase < B ? 1 + (B - c.wheelBase) / B : 1;
+    return {
+        craneSpan: Lc, Pmax, Pmin, k, Rmax: Pmax * k, Rmin: Pmin * k,
+        H: c.surge * W / 4 * k, Rg: c.girderWeight * B,
+    };
+}
+
 export interface PortalFrameInput {
     code: SteelCode;
     fy: number;                 // MPa
@@ -779,7 +956,7 @@ export interface PortalFrameInput {
     windPressure: number;       // kN/m² — IS 875-3: pd; ASCE 7-22: qh·Kd
     cpe: WindCoefficients;      // Cpe or GCp, wind from the left (windward = left wall / left rafter)
     cpeRight?: WindCoefficients; // wind from the right (windward = right wall / right rafter); default: cpe
-    // 'auto': wind from the right as well whenever the frame or its coefficients are unsymmetric
+    // 'auto': wind from the right as well whenever the frame or its loads are unsymmetric
     windDirections?: 'auto' | 'left' | 'both';
     cpi: number[];              // internal pressure coefficients (e.g. +0.2, −0.2)
     columnLy: number;           // m — flange-brace spacing on the columns
@@ -787,10 +964,40 @@ export interface PortalFrameInput {
     verticalLimit: number;      // span / this (rafter, live load)
     lateralLimit: number;       // height / this (eave, wind)
     windServiceFactor: number;  // wind factor for the drift check
+    crane?: CraneInput | null;
     nSub?: number;
 }
 
-/** Apex position of a (possibly unsymmetric) duo-pitch frame. */
+/** Multi-span (multi-gable) frame: n duo-pitch spans on n + 1 columns. */
+export interface MultiSpanFrameInput {
+    code: SteelCode;
+    fy: number;
+    spans: { span: number; slopeL: number; slopeR: number }[];   // m, degrees — left to right
+    heights: number[];          // m — column heights, left to right (n + 1): eaves and valleys
+    baySpacing: number;         // m — frame spacing
+    base: 'pinned' | 'fixed';
+    column: MemberSection;      // exterior columns, base (0) → top (1)
+    interiorColumn: MemberSection;
+    rafter: MemberSection;      // every rafter, eave/valley (0) → apex (1)
+    dead: number;
+    live: number;
+    windPressure: number;
+    wallCpe: { windward: number; leeward: number };
+    roofCpe: number[];          // per roof slope counted from the windward end (the last value repeats)
+    wallCpeRight?: { windward: number; leeward: number };   // wind from the right (default: as from the left)
+    roofCpeRight?: number[];    //   … counted from the right-hand end
+    windDirections?: 'auto' | 'left' | 'both';
+    cpi: number[];
+    columnLy: number;
+    rafterLy: number;
+    verticalLimit: number;
+    lateralLimit: number;
+    windServiceFactor: number;
+    crane?: CraneInput | null;
+    nSub?: number;
+}
+
+/** Apex position of a (possibly unsymmetric) duo-pitch span. */
 export function portalGeometry(inp: Pick<PortalFrameInput, 'span' | 'eaveHeight' | 'roofSlope' | 'eaveHeightR' | 'roofSlopeR'>) {
     const S = inp.span, HL = inp.eaveHeight, HR = inp.eaveHeightR ?? inp.eaveHeight;
     const thL = inp.roofSlope * Math.PI / 180, thR = (inp.roofSlopeR ?? inp.roofSlope) * Math.PI / 180;
@@ -803,94 +1010,300 @@ export function portalGeometry(inp: Pick<PortalFrameInput, 'span' | 'eaveHeight'
     return { S, HL, HR, thL, thR, xA, yA: HL + xA * Math.tan(thL) };
 }
 
-export function isSymmetricPortal(inp: PortalFrameInput): boolean {
-    const g = portalGeometry(inp);
-    const same = (a: WindCoefficients, b: WindCoefficients) =>
-        a.windwardWall === b.windwardWall && a.leewardWall === b.leewardWall && a.windwardRoof === b.windwardRoof && a.leewardRoof === b.leewardRoof;
-    return Math.abs(g.HL - g.HR) < 1e-9 && Math.abs(g.thL - g.thR) < 1e-12 && (!inp.cpeRight || same(inp.cpe, inp.cpeRight));
+// ── internal: general multi-gable definition ──
+interface WindSet { wallW: number; wallL: number; roof: number[] }   // roof: from the windward end
+interface GableDef {
+    code: SteelCode; fy: number;
+    spans: { span: number; slopeL: number; slopeR: number }[];
+    heights: number[];
+    B: number; base: 'pinned' | 'fixed';
+    column: MemberSection; interiorColumn: MemberSection; rafter: MemberSection;
+    dead: number; live: number; windPressure: number;
+    left: WindSet; right: WindSet; windDirections: 'auto' | 'left' | 'both'; cpi: number[];
+    columnLy: number; rafterLy: number; verticalLimit: number; lateralLimit: number; windServiceFactor: number;
+    crane: CraneInput | null;
+    nSub: number;
+    single: boolean;            // one span: portal naming
 }
 
-export function portalFrameModel(inp: PortalFrameInput): StructureModel {
-    const { S, HL, HR, thL, thR, xA, yA } = portalGeometry(inp);
-    const B = inp.baySpacing;
-    const nodes = [{ x: 0, y: 0 }, { x: 0, y: HL }, { x: xA, y: yA }, { x: S, y: HR }, { x: S, y: 0 }];
-    // chain order keeps the band narrow: base L → eave L → apex → eave R → base R
-    const members: MemberDef[] = [
-        { name: 'Column L', group: 'Column', i: 0, j: 1, section: inp.column, reverse: false, Ly: inp.columnLy, sway: true },
-        { name: 'Rafter L', group: 'Rafter', i: 1, j: 2, section: inp.rafter, reverse: false, Ly: inp.rafterLy, sway: true },
-        { name: 'Rafter R', group: 'Rafter', i: 2, j: 3, section: inp.rafter, reverse: true, Ly: inp.rafterLy, sway: true },
-        { name: 'Column R', group: 'Column', i: 3, j: 4, section: inp.column, reverse: true, Ly: inp.columnLy, sway: true },
-    ];
-    const rest = inp.base === 'fixed';
-    const supports = [{ node: 0, ux: true, uy: true, rz: rest }, { node: 4, ux: true, uy: true, rz: rest }];
-    // Dead on slope; live on plan (per member length: × cos θ of each rafter)
-    const D: LoadCaseDef = { memberLoads: [1, 2].map(m => ({ member: m, wx: 0, wy: -inp.dead * B })), nodalLoads: [] };
+const sameArr = (a: number[], b: number[]) => a.length === b.length && a.every((v, i) => Math.abs(v - b[i]) < 1e-12);
+const roofAt = (list: number[], k: number) => list.length ? list[Math.min(k, list.length - 1)] : 0;
+
+function gableGeometry(d: GableDef) {
+    const n = d.spans.length;
+    if (n < 1) throw new Error('At least one span is required');
+    if (d.heights.length !== n + 1) throw new Error(`${n} spans need ${n + 1} column heights`);
+    if (d.heights.some(h => !(h > 0))) throw new Error('Column heights must be positive');
+    const colX = [0];
+    d.spans.forEach(s => { if (!(s.span > 0)) throw new Error('Spans must be positive'); colX.push(colX[colX.length - 1] + s.span); });
+    const apex = d.spans.map((s, k) => {
+        const g = portalGeometry({ span: s.span, eaveHeight: d.heights[k], roofSlope: s.slopeL, eaveHeightR: d.heights[k + 1], roofSlopeR: s.slopeR });
+        return { x: colX[k] + g.xA, y: g.yA, thL: g.thL, thR: g.thR };
+    });
+    return { n, colX, apex };
+}
+
+/** Is the frame, with its loads, its own mirror image? (then wind from the right adds nothing) */
+function gableSymmetric(d: GableDef): boolean {
+    const n = d.spans.length;
+    for (let k = 0; k < n; k++) {
+        const a = d.spans[k], b = d.spans[n - 1 - k];
+        if (Math.abs(a.span - b.span) > 1e-9 || Math.abs(a.slopeL - b.slopeR) > 1e-9 || Math.abs(a.slopeR - b.slopeL) > 1e-9) return false;
+    }
+    if (!sameArr(d.heights, [...d.heights].reverse())) return false;
+    if (d.crane && d.crane.span !== n - 1 - d.crane.span) return false;
+    const L = d.left, R = d.right;
+    const len = Math.max(2 * n, L.roof.length, R.roof.length);
+    const roofSame = Array.from({ length: len }, (_, k) => Math.abs(roofAt(L.roof, k) - roofAt(R.roof, k)) < 1e-12).every(Boolean);
+    return Math.abs(L.wallW - R.wallW) < 1e-12 && Math.abs(L.wallL - R.wallL) < 1e-12 && roofSame;
+}
+
+function gableFrameModel(d: GableDef): StructureModel {
+    const { n, colX, apex } = gableGeometry(d);
+    const H = d.heights, B = d.B;
+    // chain numbering keeps the band narrow: b0, t0, then per span apex k, top k+1, base k+1
+    const top = (k: number) => (k === 0 ? 1 : 3 * k);
+    const bot = (k: number) => (k === 0 ? 0 : 3 * k + 1);
+    const nodes: { x: number; y: number }[] = [{ x: 0, y: 0 }, { x: 0, y: H[0] }];
+    for (let k = 0; k < n; k++) nodes.push({ x: apex[k].x, y: apex[k].y }, { x: colX[k + 1], y: H[k + 1] }, { x: colX[k + 1], y: 0 });
+    const colName = (k: number) => (d.single ? (k === 0 ? 'Column L' : 'Column R') : `Column ${k + 1}`);
+    const rafName = (k: number, side: 'L' | 'R') => (d.single ? `Rafter ${side}` : `Rafter ${k + 1}${side}`);
+    const members: MemberDef[] = [];
+    const colMember: number[] = [];
+    const rafMember: [number, number][] = [];
+    const colSec = (k: number) => (k === 0 || k === n ? d.column : d.interiorColumn);
+    const colGroup = (k: number) => (k === 0 || k === n ? 'Column' : 'Interior column');
+    colMember.push(members.length);
+    members.push({ name: colName(0), group: colGroup(0), i: bot(0), j: top(0), section: colSec(0), reverse: false, Ly: d.columnLy, sway: true });
+    for (let k = 0; k < n; k++) {
+        const a = 2 + 3 * k;
+        rafMember.push([members.length, members.length + 1]);
+        members.push({ name: rafName(k, 'L'), group: 'Rafter', i: top(k), j: a, section: d.rafter, reverse: false, Ly: d.rafterLy, sway: true });
+        members.push({ name: rafName(k, 'R'), group: 'Rafter', i: a, j: top(k + 1), section: d.rafter, reverse: true, Ly: d.rafterLy, sway: true });
+        colMember.push(members.length);
+        members.push({ name: colName(k + 1), group: colGroup(k + 1), i: top(k + 1), j: bot(k + 1), section: colSec(k + 1), reverse: true, Ly: d.columnLy, sway: true });
+    }
+    const rest = d.base === 'fixed';
+    const supports: SupportDef[] = Array.from({ length: n + 1 }, (_, k) => ({ node: bot(k), ux: true, uy: true, rz: rest }));
+
+    // Gravity: dead on slope, live on plan (× cos θ per unit rafter length)
+    const D: LoadCaseDef = { memberLoads: rafMember.flat().map(m => ({ member: m, wx: 0, wy: -d.dead * B })), nodalLoads: [], pointLoads: [] };
     const L: LoadCaseDef = {
-        memberLoads: [{ member: 1, wx: 0, wy: -inp.live * B * Math.cos(thL) }, { member: 2, wx: 0, wy: -inp.live * B * Math.cos(thR) }],
+        memberLoads: rafMember.flatMap(([ml, mr], k) => [
+            { member: ml, wx: 0, wy: -d.live * B * Math.cos(apex[k].thL) },
+            { member: mr, wx: 0, wy: -d.live * B * Math.cos(apex[k].thR) },
+        ]),
         nodalLoads: [],
     };
-    // Net pressure p·(Cpe − Cpi) acts toward a surface when positive:
-    // force per unit length = −p_net·n_out (outward normal n_out).
-    const nOut = [
-        { x: -1, y: 0 },                                // Column L
-        { x: -Math.sin(thL), y: Math.cos(thL) },        // Rafter L
-        { x: Math.sin(thR), y: Math.cos(thR) },         // Rafter R
-        { x: 1, y: 0 },                                 // Column R
-    ];
+
+    // Wind: net pressure p·(Cpe − Cpi) toward a surface when positive,
+    // force per unit length −p_net·n_out. Interior columns carry no wall wind.
+    const slopes = rafMember.flatMap(([ml, mr], k) => [
+        { member: ml, n: { x: -Math.sin(apex[k].thL), y: Math.cos(apex[k].thL) } },
+        { member: mr, n: { x: Math.sin(apex[k].thR), y: Math.cos(apex[k].thR) } },
+    ]);
     const windCase = (cpi: number, fromLeft: boolean): LoadCaseDef => {
-        const c = fromLeft ? inp.cpe : (inp.cpeRight ?? inp.cpe);
-        // surface coefficients in member order: Column L, Rafter L, Rafter R, Column R
-        const cp = fromLeft
-            ? [c.windwardWall, c.windwardRoof, c.leewardRoof, c.leewardWall]
-            : [c.leewardWall, c.leewardRoof, c.windwardRoof, c.windwardWall];
+        const w = fromLeft ? d.left : d.right;
+        const pn = (cpe: number) => d.windPressure * B * (cpe - cpi);
+        const wallL = fromLeft ? w.wallW : w.wallL, wallR = fromLeft ? w.wallL : w.wallW;
         return {
-            memberLoads: cp.map((cpe, m) => {
-                const pn = inp.windPressure * B * (cpe - cpi);
-                return { member: m, wx: -pn * nOut[m].x, wy: -pn * nOut[m].y };
-            }),
+            memberLoads: [
+                { member: colMember[0], wx: pn(wallL), wy: 0 },                 // outward normal −x
+                ...slopes.map((sl, j) => {
+                    const cpe = roofAt(w.roof, fromLeft ? j : slopes.length - 1 - j);
+                    return { member: sl.member, wx: -pn(cpe) * sl.n.x, wy: -pn(cpe) * sl.n.y };
+                }),
+                { member: colMember[n], wx: -pn(wallR), wy: 0 },                // outward normal +x
+            ],
             nodalLoads: [],
         };
     };
-    const dirs = inp.windDirections ?? 'auto';
-    const both = dirs === 'both' || (dirs === 'auto' && !isSymmetricPortal(inp));
+    const both = d.windDirections === 'both' || (d.windDirections === 'auto' && !gableSymmetric(d));
     const loadCases: Record<string, LoadCaseDef> = { D, L };
     const windNames: string[] = [];
+    const windDir: Record<string, 1 | -1> = {};
     for (const fromLeft of both ? [true, false] : [true]) {
-        inp.cpi.forEach((cpi, k) => {
+        d.cpi.forEach((cpi, k) => {
             const name = both ? `W${fromLeft ? 'L' : 'R'}${k + 1}` : `W${k + 1}`;
             loadCases[name] = windCase(cpi, fromLeft);
             windNames.push(name);
+            windDir[name] = fromLeft ? 1 : -1;
         });
     }
-    const combos = strengthCombos(inp.code, windNames, inp.live > 0);
+    const hasLive = d.live > 0;
+    const combos = strengthCombos(d.code, windNames, hasLive);
+
+    // Crane
+    const cr = d.crane;
+    let craneNodes: { left: { member: number; at: number }; right: { member: number; at: number } } | null = null;
+    let craneRx: CraneReactions | null = null;
+    if (cr) {
+        const c = cr.span;
+        if (!(c >= 0 && c < n) || Math.floor(c) !== c) throw new Error('Crane span index out of range');
+        if (!(cr.bracketLevel > 0) || cr.railLevel < cr.bracketLevel) throw new Error('Crane: 0 < bracket level ≤ rail level');
+        if (cr.railLevel >= Math.min(H[c], H[c + 1])) throw new Error('Crane rail level must be below the tops of the crane-span columns');
+        const rx = craneReactions(cr, d.spans[c].span, B);
+        craneRx = rx;
+        // fraction along a column member (i → j) of a level y
+        const frAt = (k: number, y: number) => (k === 0 ? y / H[0] : 1 - y / H[k]);
+        const mL = colMember[c], mR = colMember[c + 1];
+        const fbL = frAt(c, cr.bracketLevel), fbR = frAt(c + 1, cr.bracketLevel);
+        const frL = frAt(c, cr.railLevel), frR = frAt(c + 1, cr.railLevel);
+        members[mL] = { ...members[mL], breaks: [fbL, frL] };
+        members[mR] = { ...members[mR], breaks: [fbR, frR] };
+        craneNodes = { left: { member: mL, at: frL }, right: { member: mR, at: frR } };
+        const e = cr.eccentricity;
+        // bracket of the left column is on its right (+e): M = −R·e; right column: +R·e
+        const vert = (RL: number, RR: number): MemberPointLoad[] => [
+            { member: mL, at: fbL, fx: 0, fy: -RL, mz: -RL * e },
+            { member: mR, at: fbR, fx: 0, fy: -RR, mz: RR * e },
+        ];
+        const imp = 1 + cr.impact;
+        D.pointLoads = vert(rx.Rg, rx.Rg);
+        loadCases.CV1 = { memberLoads: [], nodalLoads: [], pointLoads: vert(rx.Rmax * imp, rx.Rmin * imp) };
+        loadCases.CV2 = { memberLoads: [], nodalLoads: [], pointLoads: vert(rx.Rmin * imp, rx.Rmax * imp) };
+        loadCases.CH = {
+            memberLoads: [], nodalLoads: [],
+            pointLoads: [{ member: mL, at: frL, fx: rx.H, fy: 0, mz: 0 }, { member: mR, at: frR, fx: rx.H, fy: 0, mz: 0 }],
+        };
+        combos.push(...craneCombos(d.code, windNames, windDir, hasLive));
+    }
+
     combos.push({ name: 'SLS: L', factors: { L: 1 }, kind: 'service', gravityOnly: true });
-    const slsWind = windNames.map(w => `SLS: ${inp.windServiceFactor}${w}`);
-    windNames.forEach((w, k) => combos.push({ name: slsWind[k], factors: { [w]: inp.windServiceFactor }, kind: 'service', gravityOnly: false }));
-    const drift = (name: string, H: number, eaves: number[]): DeflectionCheckDef => ({
-        name: `${name} (H/${inp.lateralLimit})`, combos: slsWind, limit: H * 1000 / inp.lateralLimit,
-        evaluate: (u, fe) => Math.max(...eaves.map(e => Math.abs(u[3 * fe.mainNode[e]]))) * 1000,
+    const slsWind = windNames.map(w => `SLS: ${d.windServiceFactor}${w}`);
+    windNames.forEach((w, k) => combos.push({ name: slsWind[k], factors: { [w]: d.windServiceFactor }, kind: 'service', gravityOnly: false }));
+
+    const deflections: DeflectionCheckDef[] = [];
+    // rafters: vertical movement relative to the chord between the span's column tops
+    const spanGroups = d.single ? [[0]] : d.spans.map((_, k) => [k]);
+    const allSame = d.spans.every(s => Math.abs(s.span - d.spans[0].span) < 1e-9);
+    const rafterCheck = (ks: number[], name: string): DeflectionCheckDef => ({
+        name, combos: ['SLS: L'], limit: Math.min(...ks.map(k => d.spans[k].span)) * 1000 / d.verticalLimit,
+        evaluate: (u, fe) => Math.max(...ks.map(k => {
+            const tl = fe.mainNode[top(k)], tr = fe.mainNode[top(k + 1)];
+            const [ml, mr] = rafMember[k];
+            return Math.max(...[...fe.memberNodes[ml], ...fe.memberNodes[mr]].map(nd => {
+                const r = (fe.nodeXY[nd].x - colX[k]) / d.spans[k].span;
+                return Math.abs(u[3 * nd + 1] - ((1 - r) * u[3 * tl + 1] + r * u[3 * tr + 1]));
+            }));
+        })) * 1000,
     });
-    const deflections: DeflectionCheckDef[] = [
-        {
-            name: `Rafter vertical (span/${inp.verticalLimit})`, combos: ['SLS: L'], limit: S * 1000 / inp.verticalLimit,
-            evaluate: (u, fe) => {
-                // largest vertical movement of the rafter nodes relative to the chord between the eaves
-                const eaveL = fe.mainNode[1], eaveR = fe.mainNode[3];
-                return Math.max(...[...fe.memberNodes[1], ...fe.memberNodes[2]].map(n => {
-                    const r = fe.nodeXY[n].x / S;
-                    return Math.abs(u[3 * n + 1] - ((1 - r) * u[3 * eaveL + 1] + r * u[3 * eaveR + 1]));
-                })) * 1000;
-            },
-        },
-        ...(Math.abs(HL - HR) < 1e-9
-            ? [drift('Eave drift', HL, [1, 3])]
-            : [drift('Left eave drift', HL, [1]), drift('Right eave drift', HR, [3])]),
-    ];
+    if (d.single || allSame) deflections.push(rafterCheck(d.spans.map((_, k) => k), `Rafter vertical (span/${d.verticalLimit})`));
+    else spanGroups.forEach(([k]) => deflections.push(rafterCheck([k], `Span ${k + 1} rafter vertical (span/${d.verticalLimit})`)));
+    // column-top drift under wind, each against its own height
+    const drift = (name: string, h: number, tops: number[]): DeflectionCheckDef => ({
+        name: `${name} (H/${d.lateralLimit})`, combos: slsWind, limit: h * 1000 / d.lateralLimit,
+        evaluate: (u, fe) => Math.max(...tops.map(t => Math.abs(u[3 * fe.mainNode[t]]))) * 1000,
+    });
+    const allTops = Array.from({ length: n + 1 }, (_, k) => k);
+    if (H.every(h => Math.abs(h - H[0]) < 1e-9)) deflections.push(drift('Eave drift', H[0], allTops.map(top)));
+    else if (d.single) deflections.push(drift('Left eave drift', H[0], [top(0)]), drift('Right eave drift', H[1], [top(1)]));
+    else allTops.forEach(k => deflections.push(drift(`Column ${k + 1} top drift`, H[k], [top(k)])));
+
+    if (cr && craneNodes && craneRx) {
+        // crane serviceability: static crane loads (no impact) with surge either way
+        const f = 1 / (1 + cr.impact);
+        const sls: string[] = [];
+        for (const p of [1, 2]) for (const sg of [1, -1]) {
+            const name = `SLS: CV${p}${sg > 0 ? '+' : '−'}CH`;
+            sls.push(name);
+            combos.push({ name, factors: { [`CV${p}`]: f, CH: sg }, kind: 'service', gravityOnly: false });
+        }
+        const nodeAt = (fe: FEModel, q: { member: number; at: number }) =>
+            fe.memberNodes[q.member][fe.memberFr[q.member].findIndex(v => Math.abs(v - q.at) < 1e-6)];
+        const cn = craneNodes;
+        deflections.push({
+            name: `Crane rail lateral (H/${cr.lateralLimit})`, combos: sls, limit: cr.railLevel * 1000 / cr.lateralLimit,
+            evaluate: (u, fe) => Math.max(Math.abs(u[3 * nodeAt(fe, cn.left)]), Math.abs(u[3 * nodeAt(fe, cn.right)])) * 1000,
+        });
+        deflections.push({
+            name: 'Crane rail spread', combos: sls, limit: cr.spreadLimit,
+            evaluate: (u, fe) => Math.abs(u[3 * nodeAt(fe, cn.right)] - u[3 * nodeAt(fe, cn.left)]) * 1000,
+        });
+    }
     return {
-        code: inp.code, fy: inp.fy, nodes, members, supports, loadCases, combos,
-        notionalNodes: [1, 3], deflections, nSub: inp.nSub ?? 10,
+        code: d.code, fy: d.fy, nodes, members, supports, loadCases, combos,
+        notionalNodes: allTops.map(top), deflections, nSub: d.nSub,
     };
 }
+
+/**
+ * Crane combinations. Crane load C = CVp ± CH (p = 1: maximum reaction on
+ * the left crane column, 2: on the right), including impact.
+ *   IS 800:2007 Table 4 — crane and roof live load are both imposed loads;
+ *     the leading one takes the full factor, the other the accompanying
+ *     factor (1.05 without wind; 1.05 with 0.6W, 0.53 with 1.2W). Both
+ *     orders are generated.
+ *   ASCE 7-22 §2.3.1 — crane load as L (factor 1.0 in combinations 3 and 4,
+ *     the 0.5 reduction does not apply to crane loads); roof live as Lr.
+ * With wind, the surge acts in the direction of the wind.
+ */
+function craneCombos(code: SteelCode, windNames: string[], windDir: Record<string, 1 | -1>, hasLive: boolean): ComboDef[] {
+    const out: ComboDef[] = [];
+    const C = (p: number, sg: number, f: number) => ({ [`CV${p}`]: f, CH: sg * f });
+    const cName = (p: number, sg: number) => `(CV${p}${sg > 0 ? '+' : '−'}CH)`;
+    const add = (name: string, factors: Record<string, number>) => out.push({ name, factors, kind: 'strength', gravityOnly: false });
+    for (const p of [1, 2]) {
+        for (const sg of [1, -1]) {
+            if (code === 'IS800') {
+                add(`1.5D+1.5${cName(p, sg)}${hasLive ? '+1.05L' : ''}`, { D: 1.5, ...C(p, sg, 1.5), ...(hasLive ? { L: 1.05 } : {}) });
+                if (hasLive) add(`1.5D+1.5L+1.05${cName(p, sg)}`, { D: 1.5, L: 1.5, ...C(p, sg, 1.05) });
+            } else {
+                add(`1.2D+1.6${cName(p, sg)}${hasLive ? '+0.5Lr' : ''}`, { D: 1.2, ...C(p, sg, 1.6), ...(hasLive ? { L: 0.5 } : {}) });
+                if (hasLive) add(`1.2D+1.6Lr+1.0${cName(p, sg)}`, { D: 1.2, L: 1.6, ...C(p, sg, 1.0) });
+            }
+        }
+        for (const w of windNames) {
+            const sg = windDir[w];
+            if (code === 'IS800') {
+                add(`1.2D+1.2${cName(p, sg)}${hasLive ? '+1.05L' : ''}+0.6${w}`, { D: 1.2, ...C(p, sg, 1.2), ...(hasLive ? { L: 1.05 } : {}), [w]: 0.6 });
+                add(`1.2D+1.2${cName(p, sg)}${hasLive ? '+0.53L' : ''}+1.2${w}`, { D: 1.2, ...C(p, sg, 1.2), ...(hasLive ? { L: 0.53 } : {}), [w]: 1.2 });
+                if (hasLive) {
+                    add(`1.2D+1.2L+1.05${cName(p, sg)}+0.6${w}`, { D: 1.2, L: 1.2, ...C(p, sg, 1.05), [w]: 0.6 });
+                    add(`1.2D+1.2L+0.53${cName(p, sg)}+1.2${w}`, { D: 1.2, L: 1.2, ...C(p, sg, 0.53), [w]: 1.2 });
+                }
+            } else {
+                add(`1.2D+1.0${w}+1.0${cName(p, sg)}${hasLive ? '+0.5Lr' : ''}`, { D: 1.2, [w]: 1.0, ...C(p, sg, 1.0), ...(hasLive ? { L: 0.5 } : {}) });
+            }
+        }
+    }
+    return out;
+}
+
+function portalToGable(inp: PortalFrameInput): GableDef {
+    const c = inp.cpe, r = inp.cpeRight ?? inp.cpe;
+    return {
+        code: inp.code, fy: inp.fy,
+        spans: [{ span: inp.span, slopeL: inp.roofSlope, slopeR: inp.roofSlopeR ?? inp.roofSlope }],
+        heights: [inp.eaveHeight, inp.eaveHeightR ?? inp.eaveHeight],
+        B: inp.baySpacing, base: inp.base, column: inp.column, interiorColumn: inp.column, rafter: inp.rafter,
+        dead: inp.dead, live: inp.live, windPressure: inp.windPressure,
+        left: { wallW: c.windwardWall, wallL: c.leewardWall, roof: [c.windwardRoof, c.leewardRoof] },
+        right: { wallW: r.windwardWall, wallL: r.leewardWall, roof: [r.windwardRoof, r.leewardRoof] },
+        windDirections: inp.windDirections ?? 'auto', cpi: inp.cpi,
+        columnLy: inp.columnLy, rafterLy: inp.rafterLy, verticalLimit: inp.verticalLimit, lateralLimit: inp.lateralLimit,
+        windServiceFactor: inp.windServiceFactor, crane: inp.crane ?? null, nSub: inp.nSub ?? 10, single: true,
+    };
+}
+
+function multiToGable(inp: MultiSpanFrameInput): GableDef {
+    const wr = inp.wallCpeRight ?? inp.wallCpe;
+    return {
+        code: inp.code, fy: inp.fy, spans: inp.spans, heights: inp.heights,
+        B: inp.baySpacing, base: inp.base, column: inp.column, interiorColumn: inp.interiorColumn, rafter: inp.rafter,
+        dead: inp.dead, live: inp.live, windPressure: inp.windPressure,
+        left: { wallW: inp.wallCpe.windward, wallL: inp.wallCpe.leeward, roof: inp.roofCpe },
+        right: { wallW: wr.windward, wallL: wr.leeward, roof: inp.roofCpeRight ?? inp.roofCpe },
+        windDirections: inp.windDirections ?? 'auto', cpi: inp.cpi,
+        columnLy: inp.columnLy, rafterLy: inp.rafterLy, verticalLimit: inp.verticalLimit, lateralLimit: inp.lateralLimit,
+        windServiceFactor: inp.windServiceFactor, crane: inp.crane ?? null, nSub: inp.nSub ?? 8, single: inp.spans.length === 1,
+    };
+}
+
+export function isSymmetricPortal(inp: PortalFrameInput): boolean { return gableSymmetric(portalToGable(inp)); }
+export function isSymmetricMultiSpan(inp: MultiSpanFrameInput): boolean { return gableSymmetric(multiToGable(inp)); }
+export function portalFrameModel(inp: PortalFrameInput): StructureModel { return gableFrameModel(portalToGable(inp)); }
+export function multiSpanFrameModel(inp: MultiSpanFrameInput): StructureModel { return gableFrameModel(multiToGable(inp)); }
 
 // ═══════════════════════════════════════════════════════════════
 //  Single column
@@ -1027,22 +1440,36 @@ export interface SteelOptimizeParams {
     maxPasses?: number;
 }
 
-export type SteelMode = 'frame' | 'column' | 'beam';
+export type SteelMode = 'frame' | 'multispan' | 'column' | 'beam';
 export type SteelInput =
     | { mode: 'frame'; input: PortalFrameInput }
+    | { mode: 'multispan'; input: MultiSpanFrameInput }
     | { mode: 'column'; input: ColumnInput }
     | { mode: 'beam'; input: BeamInput };
 
 export function buildModel(si: SteelInput): StructureModel {
-    return si.mode === 'frame' ? portalFrameModel(si.input) : si.mode === 'column' ? columnModel(si.input) : beamModel(si.input);
+    switch (si.mode) {
+        case 'frame': return portalFrameModel(si.input);
+        case 'multispan': return multiSpanFrameModel(si.input);
+        case 'column': return columnModel(si.input);
+        default: return beamModel(si.input);
+    }
 }
 
 /** Build the model and run the design. */
-export function runDesign(si: SteelInput, opts: { detail?: boolean } = {}): DesignResult {
+export function runDesign(si: SteelInput, opts: { detail?: boolean; only?: string[]; stopAbove?: number } = {}): DesignResult {
     return designStructure(buildModel(si), opts);
 }
 
-type VarKey = { group: 'a' | 'b'; field: 'D0' | 'D1' | 'bf' | 'tf' | 'tw' };
+type Grp = 'a' | 'b' | 'c';
+type VarKey = { group: Grp; field: 'D0' | 'D1' | 'bf' | 'tf' | 'tw' };
+
+// optimizer groups: a = column (exterior) / member, b = rafter, c = interior column
+const groupField = (mode: SteelMode, g: Grp): 'column' | 'rafter' | 'interiorColumn' | 'member' =>
+    mode === 'frame' || mode === 'multispan' ? (g === 'a' ? 'column' : g === 'b' ? 'rafter' : 'interiorColumn') : 'member';
+const getSecOf = (x: SteelInput, g: Grp): MemberSection => (x.input as unknown as Record<string, MemberSection>)[groupField(x.mode, g)];
+const withSecOf = (x: SteelInput, g: Grp, sec: MemberSection): SteelInput =>
+    ({ mode: x.mode, input: { ...x.input, [groupField(x.mode, g)]: sec } }) as SteelInput;
 
 export interface SteelOptimizeResult {
     best: SteelInput | null;
@@ -1072,23 +1499,16 @@ export function optimizeSteel(si: SteelInput, p: SteelOptimizeParams, onProgress
     const sorted = (a: number[]) => [...new Set(a)].sort((x, y) => x - y);
     const lists: Record<VarKey['field'], number[]> = { D0: depths, D1: depths, bf: sorted(p.bfList), tf: sorted(p.tfList), tw: sorted(p.twList) };
 
-    // Variables: group a = column / beam; group b = rafter (frame only)
-    const groupsOf = si.mode === 'frame' ? (['a', 'b'] as const) : (['a'] as const);
+    // Variables per group: depths D0 / D1, bf, tf, tw
+    const groupsOf: Grp[] = si.mode === 'frame' ? ['a', 'b']
+        : si.mode === 'multispan' ? (si.input.spans.length > 1 ? ['a', 'b', 'c'] : ['a', 'b'])
+            : ['a'];
     const keys: VarKey[] = [];
-    const getSec0 = (g: 'a' | 'b'): MemberSection =>
-        si.mode === 'frame' ? (g === 'a' ? si.input.column : si.input.rafter) : si.input.member;
     for (const g of groupsOf) for (const f of ['D0', 'D1', 'bf', 'tf', 'tw'] as const) {
-        if (f === 'D1' && getSec0(g).profile.D.length < 2) continue;
+        if (f === 'D1' && getSecOf(si, g).profile.D.length < 2) continue;
         keys.push({ group: g, field: f });
     }
-
-    const getSec = (x: SteelInput, g: 'a' | 'b'): MemberSection =>
-        x.mode === 'frame' ? (g === 'a' ? x.input.column : x.input.rafter) : x.input.member;
-    const withSec = (x: SteelInput, g: 'a' | 'b', sec: MemberSection): SteelInput => {
-        if (x.mode === 'frame') return { mode: 'frame', input: { ...x.input, [g === 'a' ? 'column' : 'rafter']: sec } };
-        if (x.mode === 'column') return { mode: 'column', input: { ...x.input, member: sec } };
-        return { mode: 'beam', input: { ...x.input, member: sec } };
-    };
+    const getSec = getSecOf, withSec = withSecOf;
     // D0 = depth at the first profile point; D1 = at the second and beyond
     const varOf = (sec: MemberSection, q: number) => sec.profile.vars?.[q] ?? (q === 0 ? 0 : 1);
     const getVar = (x: SteelInput, k: VarKey): number => {
@@ -1112,10 +1532,10 @@ export function optimizeSteel(si: SteelInput, p: SteelOptimizeParams, onProgress
     const practical = (x: SteelInput) => groupsOf.every(g => {
         const sc = getSec(x, g);
         if (sc.tf < sc.tw || sc.bf > 30 * sc.tf) return false;
-        if (x.mode === 'frame') {
+        if (x.mode === 'frame' || x.mode === 'multispan') {
             const D = sc.profile.D;
             if (g === 'b' && D.length > 1 && D[0] < D[1]) return false;                  // rafter haunch at the eave
-            if (g === 'a' && x.input.base === 'pinned' && D.length > 1 && D[1] < D[0]) return false;   // pinned-base column deepest at the top
+            if (g !== 'b' && x.input.base === 'pinned' && D.length > 1 && D[1] < D[0]) return false;   // pinned-base column deepest at the top
         }
         return true;
     });
@@ -1136,17 +1556,54 @@ export function optimizeSteel(si: SteelInput, p: SteelOptimizeParams, onProgress
         if (onProgress && evaluations % 10 === 0) onProgress(evaluations, budget, feasibleFound);
         return r;
     };
+    // Active-set screening when there are many strength combinations (crane,
+    // two wind directions): a trial is first checked for the combinations
+    // that have governed so far; only a trial passing that screen and lighter
+    // than the current design gets the full check. A combination found
+    // governing in a full check joins the active set.
+    const nStrength = buildModel(si).combos.filter(c => c.kind === 'strength').length;
+    const useScreen = nStrength > 10;
+    const score = new Map<string, number>();       // latest full-check utilization per combination
+    const active = new Set<string>();
+    let activeVer = 0;
+    const screenMemo = new Map<string, DesignResult>();
+    const learn = (r: DesignResult) => {
+        const str = r.combos.filter(c => c.kind === 'strength');
+        str.forEach(c => score.set(c.name, c.maxUtil));
+        const before = active.size;
+        [...str].sort((p, q) => q.maxUtil - p.maxUtil).slice(0, 3).forEach(c => active.add(c.name));
+        str.forEach(c => { if (c.maxUtil > 1) active.add(c.name); });
+        if (active.size !== before) activeVer++;
+    };
+    const screen = (x: SteelInput): DesignResult => {
+        if (!useScreen) return evaluate(x);
+        const kx = key(x);
+        const full = memo.get(kx);
+        if (full) return full;
+        const ks = `${kx}#${activeVer}`;
+        const hit = screenMemo.get(ks);
+        if (hit) return hit;
+        evaluations += active.size / Math.max(1, nStrength);   // cost in full-check units
+        const only = [...active].sort((p, q) => (score.get(q) ?? 0) - (score.get(p) ?? 0));
+        const r = runDesign(x, { detail: false, only, stopAbove: 1 + 1e-9 });
+        screenMemo.set(ks, r);
+        return r;
+    };
     const snapUp = (list: number[], v: number) => list.find(q => q >= v - 1e-9) ?? list[list.length - 1];
 
     const descend = (start: SteelInput): { x: SteelInput; r: DesignResult } | null => {
         let cur = start;
         let curRes = evaluate(cur);
+        if (useScreen) learn(curRes);
         if (!curRes.ok || !practical(cur)) return null;
         history.push({ mass: curRes.mass, maxUtil: curRes.maxUtil });
         const tryMove = (trial: SteelInput) => {
             if (!practical(trial) || evaluations >= budget) return false;
+            const rs = screen(trial);
+            if (!rs.ok || rs.mass >= curRes.mass - 1e-6) return false;
             const r = evaluate(trial);
-            if (r.ok && r.mass < curRes.mass - 1e-6) {
+            if (useScreen) learn(r);
+            if (r.ok) {
                 cur = trial; curRes = r;
                 history.push({ mass: r.mass, maxUtil: r.maxUtil });
                 return true;

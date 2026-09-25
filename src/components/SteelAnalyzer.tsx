@@ -2,16 +2,16 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-    runDesign, portalGeometry,
+    runDesign, portalGeometry, craneReactions, isSymmetricPortal, isSymmetricMultiSpan,
     type SteelCode, type SteelInput, type DesignResult, type SteelOptimizeResult,
-    type PortalFrameInput, type ColumnInput, type BeamInput,
+    type PortalFrameInput, type MultiSpanFrameInput, type CraneInput, type ColumnInput, type BeamInput,
 } from "./steelFrameEngine";
 import type { MemberSection } from "../lib/steelSection";
 import type { ISStationResult } from "../lib/steelIS800";
 import type { AISCStationResult } from "../lib/steelAISC360";
 import { logger } from "../lib/logger";
 
-type Mode = 'frame' | 'column' | 'beam';
+type Mode = 'frame' | 'multispan' | 'column' | 'beam';
 
 interface SecForm { d0: number; d1: number; bf: number; tf: number; tw: number }
 
@@ -20,10 +20,19 @@ const f1 = (v: number) => (Number.isFinite(v) ? v.toFixed(1) : '∞');
 const f2 = (v: number) => (Number.isFinite(v) ? v.toFixed(2) : '∞');
 const f3 = (v: number) => (Number.isFinite(v) ? v.toFixed(3) : '∞');
 const parseList = (s: string) => s.split(/[,\s]+/).map(Number).filter(x => Number.isFinite(x) && x > 0);
+const parseSigned = (s: string) => s.split(/[,;\s]+/).filter(Boolean).map(Number).filter(x => Number.isFinite(x));
 
 const utilColor = (u: number) => (u > 1 ? '#ef4444' : u > 0.9 ? '#f97316' : u > 0.7 ? '#eab308' : '#10b981');
 
 // Code-dependent defaults: wind coefficients and roof live load
+// Crane defaults: IS 875-2 Cl. 6.3 Table 3 (EOT crane: vertical impact 25 %, surge 10 % of crab + lifted load);
+// ASCE 7-22 §4.9.3 / §4.9.4 (powered cab/remote-operated bridge crane: impact 25 %, lateral 20 % of capacity + hoist/trolley).
+// Serviceability limits are project values — IS 800 Table 6 / AISC Design Guide 7; verify.
+const CRANE_DEFAULTS: Record<SteelCode, { impact: number; surge: number; lateralLimit: number; spreadLimit: number }> = {
+    IS800: { impact: 0.25, surge: 0.10, lateralLimit: 400, spreadLimit: 10 },
+    AISC360: { impact: 0.25, surge: 0.20, lateralLimit: 240, spreadLimit: 25 },
+};
+
 const CODE_DEFAULTS: Record<SteelCode, { live: number; cpe: PortalFrameInput['cpe']; cpi: [number, number]; windServiceFactor: number }> = {
     // IS 875-3 Tables 4/5 (h/w ≤ ½, roof ≈ 5°), Cpi ±0.2 (low permeability); IS 875-2 roof LL 0.75 kN/m² (no access, θ ≤ 10°)
     IS800: { live: 0.75, cpe: { windwardWall: 0.7, leewardWall: -0.25, windwardRoof: -0.9, leewardRoof: -0.4 }, cpi: [0.2, -0.2], windServiceFactor: 1.0 },
@@ -91,6 +100,26 @@ export default function SteelAnalyzer() {
     const [hLim, setHLim] = useState(150);
     const [wsf, setWsf] = useState(1.0);
 
+    // ── Multi-span frame ──
+    const [msSpans, setMsSpans] = useState([{ span: 20, slopeL: 5.71, slopeR: 5.71 }, { span: 20, slopeL: 5.71, slopeR: 5.71 }]);
+    const [msHeights, setMsHeights] = useState([8, 8, 8]);
+    const [icol, setICol] = useState<SecForm>({ d0: 350, d1: 350, bf: 200, tf: 10, tw: 6 });
+    const [roofList, setRoofList] = useState('-0.9, -0.4');
+    const [roofListR, setRoofListR] = useState('-0.9, -0.4');
+    const setSpanCount = (nn: number) => {
+        const n = Math.min(6, Math.max(1, Math.round(nn)));
+        setMsSpans(prev => Array.from({ length: n }, (_, k) => prev[k] ?? prev[prev.length - 1]));
+        setMsHeights(prev => Array.from({ length: n + 1 }, (_, k) => prev[k] ?? prev[prev.length - 1]));
+    };
+
+    // ── Crane (portal and multi-span frames) ──
+    const [craneOn, setCraneOn] = useState(false);
+    const [crane, setCrane] = useState<CraneInput>({
+        span: 0, capacity: 100, crabWeight: 30, bridgeWeight: 120, hookApproach: 1.0, wheelBase: 3.5, eccentricity: 0.5,
+        bracketLevel: 5.5, railLevel: 6.1, girderWeight: 1.5, ...CRANE_DEFAULTS.IS800,
+    });
+    const setCr = (k: keyof CraneInput) => (v: number) => setCrane(c => ({ ...c, [k]: v }));
+
     // ── Column ──
     const [cH, setCH] = useState(6);
     const [cBase, setCBase] = useState<'pinned' | 'fixed'>('fixed');
@@ -130,7 +159,7 @@ export default function SteelAnalyzer() {
     const changeCode = useCallback((c: SteelCode) => {
         setCode(c);
         const d = CODE_DEFAULTS[c];
-        setLive(d.live); setCpe(d.cpe); setCpeR(d.cpe); setCpi(d.cpi); setWsf(d.windServiceFactor);
+        setLive(d.live); setCpe(d.cpe); setCpeR(d.cpe); setCrane(cr => ({ ...cr, ...CRANE_DEFAULTS[c] })); setCpi(d.cpi); setWsf(d.windServiceFactor);
     }, []);
 
     const toCol = (f: SecForm): MemberSection => ({ bf: f.bf, tf: f.tf, tw: f.tw, profile: { at: [0, 1], D: [f.d0, f.d1] } });
@@ -143,16 +172,33 @@ export default function SteelAnalyzer() {
     const frameGeo = useMemo(() => {
         try { return portalGeometry({ span, eaveHeight: eave, roofSlope: slope, eaveHeightR: eaveR, roofSlopeR: slopeR }); } catch { return null; }
     }, [span, eave, slope, eaveR, slopeR]);
-    const frameSym = !!frameGeo && Math.abs(eave - eaveR) < 1e-9 && Math.abs(slope - slopeR) < 1e-9 && cpeRSame;
-    const windBoth = windDirs === 'both' || (windDirs === 'auto' && !frameSym);
+    const isFrame = mode === 'frame' || mode === 'multispan';
+    const craneIn = useMemo((): CraneInput | null => (craneOn ? { ...crane, span: mode === 'frame' ? 0 : Math.min(crane.span, msSpans.length - 1) } : null),
+        [craneOn, crane, mode, msSpans.length]);
 
     const input: SteelInput = useMemo(() => {
+        if (mode === 'multispan') {
+            const cr = craneOn ? { ...crane, span: Math.min(crane.span, msSpans.length - 1) } : null;
+            const mi: MultiSpanFrameInput = {
+                code, fy, spans: msSpans, heights: msHeights, baySpacing: bay, base,
+                column: toCol(col), interiorColumn: toCol(icol), rafter: toRaf(raf, taper),
+                dead, live, windPressure: windP,
+                wallCpe: { windward: cpe.windwardWall, leeward: cpe.leewardWall },
+                roofCpe: parseSigned(roofList),
+                wallCpeRight: cpeRSame ? undefined : { windward: cpeR.windwardWall, leeward: cpeR.leewardWall },
+                roofCpeRight: cpeRSame ? undefined : parseSigned(roofListR),
+                windDirections: windDirs, cpi: [...cpi],
+                columnLy: colLy, rafterLy: rafLy, verticalLimit: vLim, lateralLimit: hLim, windServiceFactor: wsf, crane: cr,
+            };
+            return { mode: 'multispan', input: mi };
+        }
         if (mode === 'frame') {
             const fi: PortalFrameInput = {
                 code, fy, span, eaveHeight: eave, roofSlope: slope, eaveHeightR: eaveR, roofSlopeR: slopeR, baySpacing: bay, base,
                 column: toCol(col), rafter: toRaf(raf, taper),
                 dead, live, windPressure: windP, cpe, cpeRight: cpeRSame ? undefined : cpeR, windDirections: windDirs, cpi: [...cpi],
                 columnLy: colLy, rafterLy: rafLy, verticalLimit: vLim, lateralLimit: hLim, windServiceFactor: wsf,
+                crane: craneOn ? { ...crane, span: 0 } : null,
             };
             return { mode: 'frame', input: fi };
         }
@@ -168,7 +214,22 @@ export default function SteelAnalyzer() {
         };
         return { mode: 'beam', input: bi };
     }, [mode, code, fy, span, eave, slope, eaveR, slopeR, bay, base, col, raf, taper, dead, live, windP, cpe, cpeR, cpeRSame, windDirs, cpi, colLy, rafLy, vLim, hLim, wsf,
+        msSpans, msHeights, icol, roofList, roofListR, craneOn, crane,
         cH, cBase, cTop, cSec, cP, cM, cW, cLy, bSpan, bSup, bShape, bHaunch, bSec, bw, bP, bLy, bVLim]);
+
+    const frameSym = useMemo(() => {
+        try {
+            if (input.mode === 'frame') return isSymmetricPortal(input.input);
+            if (input.mode === 'multispan') return isSymmetricMultiSpan(input.input);
+        } catch { /* invalid geometry: reported by the design */ }
+        return false;
+    }, [input]);
+    const windBoth = windDirs === 'both' || (windDirs === 'auto' && !frameSym);
+    const craneRx = useMemo(() => {
+        if (!craneIn) return null;
+        const sp = mode === 'frame' ? span : msSpans[craneIn.span]?.span ?? 0;
+        try { return craneReactions(craneIn, sp, bay); } catch { return null; }
+    }, [craneIn, mode, span, msSpans, bay]);
 
     const { result, error } = useMemo((): { result: DesignResult | null; error: string | null } => {
         try {
@@ -183,6 +244,7 @@ export default function SteelAnalyzer() {
     useEffect(() => () => { workerRef.current?.terminate(); }, []);
     const applyBest = useCallback((best: SteelInput) => {
         if (best.mode === 'frame') { setCol(fromSec(best.input.column)); setRaf(fromSec(best.input.rafter)); }
+        else if (best.mode === 'multispan') { setCol(fromSec(best.input.column)); setRaf(fromSec(best.input.rafter)); setICol(fromSec(best.input.interiorColumn)); }
         else if (best.mode === 'column') setCSec(fromSec(best.input.member));
         else setBSec(fromSec(best.input.member));
     }, []);
@@ -230,6 +292,7 @@ export default function SteelAnalyzer() {
                         <label>Member / structure</label>
                         <select value={mode} onChange={e => setMode(e.target.value as Mode)} title="mode">
                             <option value="frame">Portal frame (pitched roof)</option>
+                            <option value="multispan">Multi-span frame (multi-gable)</option>
                             <option value="column">Column (tapered)</option>
                             <option value="beam">Beam (tapered)</option>
                         </select>
@@ -244,10 +307,42 @@ export default function SteelAnalyzer() {
                     <Num label="Yield strength fy (MPa)" value={fy} onChange={setFy} step={5} />
                 </div>
 
-                {mode === 'frame' && (
+                {isFrame && (
                     <>
                         <div className="panel mt-16px">
                             <h3 className="panel-title"><span className="panel-icon">📐</span>Geometry</h3>
+                            {mode === 'multispan' ? (<>
+                                <div className="norm-ref-row">
+                                    <Num label="Number of spans" value={msSpans.length} onChange={setSpanCount} step={1} />
+                                    <Num label="Frame spacing (m)" value={bay} onChange={setBay} step={0.5} />
+                                </div>
+                                <table className="data-table" style={{ fontSize: '0.8rem' }}>
+                                    <thead><tr><th>Span</th><th>Width (m)</th><th>Left slope (°)</th><th>Right slope (°)</th></tr></thead>
+                                    <tbody>
+                                        {msSpans.map((sp, k) => (
+                                            <tr key={k}>
+                                                <td>{k + 1}</td>
+                                                {(['span', 'slopeL', 'slopeR'] as const).map(fld => (
+                                                    <td key={fld}><input type="number" step={fld === 'span' ? 0.5 : 0.5} value={sp[fld]} title={`span ${k + 1} ${fld}`} style={{ width: 70 }}
+                                                        onChange={e => setMsSpans(p => p.map((q, j) => (j === k ? { ...q, [fld]: num(e.target.value, q[fld]) } : q)))} /></td>
+                                                ))}
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                                <div className="control-group">
+                                    <label>Column heights, left to right (m) — eaves and valleys</label>
+                                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                        {msHeights.map((h, k) => (
+                                            <input key={k} type="number" step={0.25} value={h} title={`column ${k + 1} height`} style={{ width: 64 }}
+                                                onChange={e => setMsHeights(p => p.map((q, j) => (j === k ? num(e.target.value, q) : q)))} />
+                                        ))}
+                                    </div>
+                                </div>
+                                <div className="info-note-inline">
+                                    Overall width {msSpans.reduce((a, q) => a + q.span, 0).toFixed(2)} m · {frameSym ? 'symmetric frame' : 'unsymmetric frame or loading'}
+                                </div>
+                            </>) : (<>
                             <div className="norm-ref-row">
                                 <Num label="Span (m)" value={span} onChange={setSpan} step={0.5} />
                                 <Num label="Bay spacing (m)" value={bay} onChange={setBay} step={0.5} />
@@ -263,9 +358,10 @@ export default function SteelAnalyzer() {
                             {frameGeo && (
                                 <div className="info-note-inline">
                                     Apex {frameGeo.xA.toFixed(2)} m from the left column, {frameGeo.yA.toFixed(2)} m high
-                                    {frameSym ? ' · symmetric frame' : ' · unsymmetric frame'}
+                                    {frameSym ? ' · symmetric frame' : ' · unsymmetric frame or loading'}
                                 </div>
                             )}
+                            </>)}
                             <div className="control-group">
                                 <label>Column bases</label>
                                 <select value={base} onChange={e => setBase(e.target.value as 'pinned' | 'fixed')} title="base">
@@ -274,7 +370,10 @@ export default function SteelAnalyzer() {
                                 </select>
                             </div>
                         </div>
-                        <SecInputs label="Column (tapered)" value={col} onChange={setCol} d0Label="Depth at base" d1Label="Depth at eave" />
+                        <SecInputs label={mode === 'multispan' ? 'Exterior columns (tapered)' : 'Column (tapered)'} value={col} onChange={setCol} d0Label="Depth at base" d1Label="Depth at eave" />
+                        {mode === 'multispan' && msSpans.length > 1 && (
+                            <SecInputs label="Interior columns" value={icol} onChange={setICol} d0Label="Depth at base" d1Label="Depth at top" />
+                        )}
                         <SecInputs label="Rafter (tapered haunch)" value={raf} onChange={setRaf} d0Label="Depth at eave" d1Label="Depth after taper"
                             extra={<Num label="Taper length (fraction of rafter)" value={taper} onChange={v => setTaper(Math.min(0.95, Math.max(0.05, v)))} step={0.05} />} />
                         <div className="panel mt-16px">
@@ -297,10 +396,17 @@ export default function SteelAnalyzer() {
                                 <Num label="Windward wall" value={cpe.windwardWall} onChange={v => setCpe({ ...cpe, windwardWall: v })} step={0.05} title={code === 'IS800' ? 'Cpe' : 'GCp'} />
                                 <Num label="Leeward wall" value={cpe.leewardWall} onChange={v => setCpe({ ...cpe, leewardWall: v })} step={0.05} />
                             </div>
+                            {mode === 'multispan' ? (
+                                <div className="control-group">
+                                    <label>Roof coefficients per slope from the windward end (last value repeats)</label>
+                                    <input type="text" value={roofList} onChange={e => setRoofList(e.target.value)} title="roof coefficients" />
+                                </div>
+                            ) : (
                             <div className="norm-ref-row">
                                 <Num label="Windward roof" value={cpe.windwardRoof} onChange={v => setCpe({ ...cpe, windwardRoof: v })} step={0.05} />
                                 <Num label="Leeward roof" value={cpe.leewardRoof} onChange={v => setCpe({ ...cpe, leewardRoof: v })} step={0.05} />
                             </div>
+                            )}
                             {(windBoth || windDirs !== 'left') && (
                                 <>
                                     <div style={{ fontSize: '0.85rem', fontWeight: 600, marginTop: 6 }}>Wind from the right (windward = right wall and right rafter)</div>
@@ -308,7 +414,19 @@ export default function SteelAnalyzer() {
                                         <input type="checkbox" checked={cpeRSame} onChange={e => { setCpeRSame(e.target.checked); if (!e.target.checked) setCpeR(cpe); }} />
                                         Same coefficients as wind from the left
                                     </label>
-                                    {!cpeRSame && (
+                                    {!cpeRSame && mode === 'multispan' && (
+                                        <>
+                                            <div className="norm-ref-row">
+                                                <Num label="Windward wall (right)" value={cpeR.windwardWall} onChange={v => setCpeR({ ...cpeR, windwardWall: v })} step={0.05} />
+                                                <Num label="Leeward wall (left)" value={cpeR.leewardWall} onChange={v => setCpeR({ ...cpeR, leewardWall: v })} step={0.05} />
+                                            </div>
+                                            <div className="control-group">
+                                                <label>Roof coefficients per slope from the right-hand end</label>
+                                                <input type="text" value={roofListR} onChange={e => setRoofListR(e.target.value)} title="roof coefficients, wind from the right" />
+                                            </div>
+                                        </>
+                                    )}
+                                    {!cpeRSame && mode === 'frame' && (
                                         <>
                                             <div className="norm-ref-row">
                                                 <Num label="Windward wall (right)" value={cpeR.windwardWall} onChange={v => setCpeR({ ...cpeR, windwardWall: v })} step={0.05} />
@@ -330,9 +448,64 @@ export default function SteelAnalyzer() {
                             <WindHelper code={code} onUse={setWindP} />
                             <div className="info-note-inline">
                                 Coefficient defaults: {code === 'IS800'
-                                    ? 'IS 875-3 Tables 4/5 for h/w ≤ ½ and a roof of about 5°; roof live load IS 875-2 (no access, θ ≤ 10°).'
-                                    : 'ASCE 7-22 Ch. 27 with G = 0.85 (GCp), enclosed building GCpi ±0.18; Lr after tributary-area reduction.'} Verify for your building.
+                                    ? `IS 875-3 Tables 4/5 for h/w ≤ ½ and a roof of about 5°; roof live load IS 875-2 (no access, θ ≤ 10°).${mode === 'multispan' ? ' Multi-span roofs: take the per-slope values from the IS 875-3 multi-span roof table.' : ''}`
+                                    : `ASCE 7-22 Ch. 27 with G = 0.85 (GCp), enclosed building GCpi ±0.18; Lr after tributary-area reduction.${mode === 'multispan' ? ' Multi-span roofs: enter the per-slope values for the building.' : ''}`} Verify for your building.
                             </div>
+                        </div>
+                        <div className="panel mt-16px">
+                            <h3 className="panel-title"><span className="panel-icon">🏗</span>Crane</h3>
+                            <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: '0.85rem' }}>
+                                <input type="checkbox" checked={craneOn} onChange={e => setCraneOn(e.target.checked)} />
+                                Overhead travelling crane on column brackets
+                            </label>
+                            {craneOn && (<>
+                                {mode === 'multispan' && (
+                                    <div className="control-group">
+                                        <label>Crane span</label>
+                                        <select value={Math.min(crane.span, msSpans.length - 1)} onChange={e => setCrane(c => ({ ...c, span: Number(e.target.value) }))} title="crane span">
+                                            {msSpans.map((_, k) => <option key={k} value={k}>Span {k + 1}</option>)}
+                                        </select>
+                                    </div>
+                                )}
+                                <div className="norm-ref-row">
+                                    <Num label="Capacity (kN)" value={crane.capacity} onChange={setCr('capacity')} step={10} />
+                                    <Num label="Crab + hoist (kN)" value={crane.crabWeight} onChange={setCr('crabWeight')} step={5} />
+                                </div>
+                                <div className="norm-ref-row">
+                                    <Num label="Bridge weight (kN)" value={crane.bridgeWeight} onChange={setCr('bridgeWeight')} step={10} />
+                                    <Num label="Min. hook approach (m)" value={crane.hookApproach} onChange={setCr('hookApproach')} step={0.1} />
+                                </div>
+                                <div className="norm-ref-row">
+                                    <Num label="Wheel base (m)" value={crane.wheelBase} onChange={setCr('wheelBase')} step={0.1} title="spacing of the two wheels of an end carriage" />
+                                    <Num label="Rail eccentricity (m)" value={crane.eccentricity} onChange={setCr('eccentricity')} step={0.05} title="runway girder centreline from the column centreline" />
+                                </div>
+                                <div className="norm-ref-row">
+                                    <Num label="Bracket level (m)" value={crane.bracketLevel} onChange={setCr('bracketLevel')} step={0.1} />
+                                    <Num label="Rail level (m)" value={crane.railLevel} onChange={setCr('railLevel')} step={0.1} />
+                                </div>
+                                <div className="norm-ref-row">
+                                    <Num label="Vertical impact (fraction)" value={crane.impact} onChange={setCr('impact')} step={0.05} />
+                                    <Num label="Lateral surge (fraction)" value={crane.surge} onChange={setCr('surge')} step={0.01} title="of (capacity + crab/hoist), shared by the two rails" />
+                                </div>
+                                <Num label="Runway girder + rail (kN/m)" value={crane.girderWeight} onChange={setCr('girderWeight')} step={0.1} />
+                                <div className="norm-ref-row">
+                                    <Num label="Rail-level sway: height /" value={crane.lateralLimit} onChange={setCr('lateralLimit')} step={10} />
+                                    <Num label="Rail spread limit (mm)" value={crane.spreadLimit} onChange={setCr('spreadLimit')} step={1} />
+                                </div>
+                                {craneRx && (
+                                    <div className="info-note-inline">
+                                        Crane span {craneRx.craneSpan.toFixed(2)} m · wheel loads {craneRx.Pmax.toFixed(1)} / {craneRx.Pmin.toFixed(1)} kN ·
+                                        influence k = {craneRx.k.toFixed(3)} → column reactions R<sub>max</sub> {craneRx.Rmax.toFixed(1)} kN, R<sub>min</sub> {craneRx.Rmin.toFixed(1)} kN
+                                        (×{(1 + crane.impact).toFixed(2)} impact), surge {craneRx.H.toFixed(2)} kN per column, girder dead {craneRx.Rg.toFixed(1)} kN.
+                                    </div>
+                                )}
+                                <div className="info-note-inline">
+                                    {code === 'IS800'
+                                        ? 'Defaults: IS 875-2 Cl. 6.3 (EOT crane — impact 25 %, surge 10 % of crab + lifted load). Crane and roof live load combined as leading/accompanying imposed loads per IS 800 Table 4.'
+                                        : 'Defaults: ASCE 7-22 §4.9.3 (powered bridge crane, cab or remote operated — impact 25 %) and §4.9.4 (lateral 20 % of capacity + hoist and trolley). Crane load combined as L (§2.3.1).'}
+                                    {' '}Longitudinal surge acts out of the frame plane and is resisted by the runway bracing (not in this analysis). Limits: IS 800 Table 6 / AISC Design Guide 7 — verify for the project.
+                                </div>
+                            </>)}
                         </div>
                         <div className="panel mt-16px">
                             <h3 className="panel-title"><span className="panel-icon">🔗</span>Bracing &amp; serviceability</h3>
@@ -463,11 +636,11 @@ export default function SteelAnalyzer() {
                     <>
                         <div className={`panel status-banner ${result.ok ? 'status-safe' : 'status-fail'}`}>
                             <h2 style={{ margin: 0 }}>
-                                {mode === 'frame' ? 'Portal frame' : mode === 'column' ? 'Column' : 'Beam'} — {result.ok ? 'ADEQUATE' : 'REVISE'}
+                                {mode === 'frame' ? 'Portal frame' : mode === 'multispan' ? `Multi-span frame (${msSpans.length} spans)` : mode === 'column' ? 'Column' : 'Beam'}{craneOn && isFrame ? ' with crane' : ''} — {result.ok ? 'ADEQUATE' : 'REVISE'}
                             </h2>
                             <p style={{ margin: '6px 0 0' }}>
                                 Max utilization <strong>{f3(result.maxUtil)}</strong> · steel {result.mass.toFixed(0)} kg
-                                {mode === 'frame' ? ` (${(result.mass / (span * bay)).toFixed(1)} kg/m² of plan per frame)` : ''} ·
+                                {isFrame ? ` (${(result.mass / ((mode === 'frame' ? span : msSpans.reduce((a, q) => a + q.span, 0)) * bay)).toFixed(1)} kg/m² of plan per frame)` : ''} ·
                                 {' '}{code === 'IS800' ? 'IS 800:2007 LSM' : 'AISC 360-22 LRFD'}
                             </p>
                             {result.warnings.map((w, i) => <p key={i} style={{ color: 'var(--negative)', margin: '4px 0 0' }}>{w}</p>)}
@@ -571,7 +744,19 @@ export default function SteelAnalyzer() {
                                     <li>Web-tapered members checked section by section (AISC Design Guide 25 stress approach): Fe = Pe/A(x); LTB stress from the smallest section of each unbraced segment with Cb (F1-1).</li>
                                     <li>Flexure F2–F5 by web / flange class; compression E3 with E7 effective widths; shear G2.1 without stiffeners; interaction H1-1; h/tw ≤ 260 (F13.2).</li>
                                 </>)}
-                                <li>Members modelled on their centre lines; self-weight added (78.5 kN/m³). Connections (knee, apex, base plates), purlins, girts and bracing are not designed here.</li>
+                                {isFrame && craneOn && (
+                                    <li>Crane: wheel loads from the crab at the minimum hook approach; column reactions for runway girders simply supported between frames (one wheel over the frame). Load cases CV1 / CV2 (maximum reaction on the left / right crane column, with impact) and CH (surge at rail level, ± in combinations; with wind it acts in the wind direction). Bracket loads applied at the bracket level with the rail eccentricity moment; runway girder weight in D.</li>
+                                )}
+                                {isFrame && craneOn && (
+                                    <li>{code === 'IS800'
+                                        ? 'Crane combinations (IS 800 Table 4, crane and roof live as imposed loads, each taken as leading in turn): 1.5D + 1.5C + 1.05L, 1.5D + 1.5L + 1.05C, 1.2D + 1.2C + 1.05L + 0.6W, 1.2D + 1.2C + 0.53L + 1.2W and the same with L leading.'
+                                        : 'Crane combinations (ASCE 7-22 §2.3.1, crane as L with factor 1.0 in combinations 3 and 4): 1.2D + 1.6C + 0.5Lr, 1.2D + 1.6Lr + 1.0C, 1.2D + 1.0W + 1.0C + 0.5Lr.'}
+                                        {' '}Crane serviceability under static crane loads with surge: rail-level sway and change of rail gauge.</li>
+                                )}
+                                {mode === 'multispan' && (
+                                    <li>Multi-span frame: exterior columns, interior columns and rafters designed as three groups; wind on the two end walls and on every roof slope; interior columns carry no wall wind. In-plane buckling from the elastic buckling analysis of the whole frame.</li>
+                                )}
+                                <li>Members modelled on their centre lines; self-weight added (78.5 kN/m³). Connections (knee, apex, base plates, crane brackets), runway girders, purlins, girts and bracing are not designed here.</li>
                                 <li>Verify coefficients, load values and deflection limits against the governing code editions and the project specification.</li>
                             </ul>
                         </div>
