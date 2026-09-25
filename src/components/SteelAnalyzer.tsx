@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-    runDesign,
+    runDesign, portalGeometry,
     type SteelCode, type SteelInput, type DesignResult, type SteelOptimizeResult,
     type PortalFrameInput, type ColumnInput, type BeamInput,
 } from "./steelFrameEngine";
@@ -70,6 +70,10 @@ export default function SteelAnalyzer() {
     const [span, setSpan] = useState(24);
     const [eave, setEave] = useState(7);
     const [slope, setSlope] = useState(5.71);
+    const [eaveR, setEaveR] = useState(7);
+    const [slopeR, setSlopeR] = useState(5.71);
+    const [windDirs, setWindDirs] = useState<'auto' | 'left' | 'both'>('auto');
+    const [cpeRSame, setCpeRSame] = useState(true);
     const [bay, setBay] = useState(7.5);
     const [base, setBase] = useState<'pinned' | 'fixed'>('pinned');
     const [col, setCol] = useState<SecForm>({ d0: 300, d1: 700, bf: 200, tf: 10, tw: 6 });
@@ -79,6 +83,7 @@ export default function SteelAnalyzer() {
     const [live, setLive] = useState(CODE_DEFAULTS.IS800.live);
     const [windP, setWindP] = useState(1.0);
     const [cpe, setCpe] = useState(CODE_DEFAULTS.IS800.cpe);
+    const [cpeR, setCpeR] = useState(CODE_DEFAULTS.IS800.cpe);
     const [cpi, setCpi] = useState<[number, number]>(CODE_DEFAULTS.IS800.cpi);
     const [colLy, setColLy] = useState(1.5);
     const [rafLy, setRafLy] = useState(1.5);
@@ -125,7 +130,7 @@ export default function SteelAnalyzer() {
     const changeCode = useCallback((c: SteelCode) => {
         setCode(c);
         const d = CODE_DEFAULTS[c];
-        setLive(d.live); setCpe(d.cpe); setCpi(d.cpi); setWsf(d.windServiceFactor);
+        setLive(d.live); setCpe(d.cpe); setCpeR(d.cpe); setCpi(d.cpi); setWsf(d.windServiceFactor);
     }, []);
 
     const toCol = (f: SecForm): MemberSection => ({ bf: f.bf, tf: f.tf, tw: f.tw, profile: { at: [0, 1], D: [f.d0, f.d1] } });
@@ -135,12 +140,18 @@ export default function SteelAnalyzer() {
         : { bf: f.bf, tf: f.tf, tw: f.tw, profile: { at: [0, h, 1 - h, 1], D: [f.d0, f.d1, f.d1, f.d0], vars: [0, 1, 1, 0] } };
     const fromSec = (s: MemberSection): SecForm => ({ d0: s.profile.D[0], d1: s.profile.D[1] ?? s.profile.D[0], bf: s.bf, tf: s.tf, tw: s.tw });
 
+    const frameGeo = useMemo(() => {
+        try { return portalGeometry({ span, eaveHeight: eave, roofSlope: slope, eaveHeightR: eaveR, roofSlopeR: slopeR }); } catch { return null; }
+    }, [span, eave, slope, eaveR, slopeR]);
+    const frameSym = !!frameGeo && Math.abs(eave - eaveR) < 1e-9 && Math.abs(slope - slopeR) < 1e-9 && cpeRSame;
+    const windBoth = windDirs === 'both' || (windDirs === 'auto' && !frameSym);
+
     const input: SteelInput = useMemo(() => {
         if (mode === 'frame') {
             const fi: PortalFrameInput = {
-                code, fy, span, eaveHeight: eave, roofSlope: slope, baySpacing: bay, base,
+                code, fy, span, eaveHeight: eave, roofSlope: slope, eaveHeightR: eaveR, roofSlopeR: slopeR, baySpacing: bay, base,
                 column: toCol(col), rafter: toRaf(raf, taper),
-                dead, live, windPressure: windP, cpe, cpi: [...cpi],
+                dead, live, windPressure: windP, cpe, cpeRight: cpeRSame ? undefined : cpeR, windDirections: windDirs, cpi: [...cpi],
                 columnLy: colLy, rafterLy: rafLy, verticalLimit: vLim, lateralLimit: hLim, windServiceFactor: wsf,
             };
             return { mode: 'frame', input: fi };
@@ -156,7 +167,7 @@ export default function SteelAnalyzer() {
             code, fy, span: bSpan, supports: bSup, member: toBeam(bSec, bShape, bHaunch), w: bw, P: bP, Ly: bLy, verticalLimit: bVLim,
         };
         return { mode: 'beam', input: bi };
-    }, [mode, code, fy, span, eave, slope, bay, base, col, raf, taper, dead, live, windP, cpe, cpi, colLy, rafLy, vLim, hLim, wsf,
+    }, [mode, code, fy, span, eave, slope, eaveR, slopeR, bay, base, col, raf, taper, dead, live, windP, cpe, cpeR, cpeRSame, windDirs, cpi, colLy, rafLy, vLim, hLim, wsf,
         cH, cBase, cTop, cSec, cP, cM, cW, cLy, bSpan, bSup, bShape, bHaunch, bSec, bw, bP, bLy, bVLim]);
 
     const { result, error } = useMemo((): { result: DesignResult | null; error: string | null } => {
@@ -239,12 +250,22 @@ export default function SteelAnalyzer() {
                             <h3 className="panel-title"><span className="panel-icon">📐</span>Geometry</h3>
                             <div className="norm-ref-row">
                                 <Num label="Span (m)" value={span} onChange={setSpan} step={0.5} />
-                                <Num label="Eave height (m)" value={eave} onChange={setEave} step={0.25} />
-                            </div>
-                            <div className="norm-ref-row">
-                                <Num label="Roof slope (°)" value={slope} onChange={setSlope} step={0.5} />
                                 <Num label="Bay spacing (m)" value={bay} onChange={setBay} step={0.5} />
                             </div>
+                            <div className="norm-ref-row">
+                                <Num label="Left eave height (m)" value={eave} onChange={setEave} step={0.25} />
+                                <Num label="Right eave height (m)" value={eaveR} onChange={setEaveR} step={0.25} />
+                            </div>
+                            <div className="norm-ref-row">
+                                <Num label="Left roof slope (°)" value={slope} onChange={setSlope} step={0.5} />
+                                <Num label="Right roof slope (°)" value={slopeR} onChange={setSlopeR} step={0.5} />
+                            </div>
+                            {frameGeo && (
+                                <div className="info-note-inline">
+                                    Apex {frameGeo.xA.toFixed(2)} m from the left column, {frameGeo.yA.toFixed(2)} m high
+                                    {frameSym ? ' · symmetric frame' : ' · unsymmetric frame'}
+                                </div>
+                            )}
                             <div className="control-group">
                                 <label>Column bases</label>
                                 <select value={base} onChange={e => setBase(e.target.value as 'pinned' | 'fixed')} title="base">
@@ -263,6 +284,15 @@ export default function SteelAnalyzer() {
                                 <Num label={code === 'IS800' ? 'Roof live (kN/m², plan)' : 'Roof live Lr (kN/m², plan)'} value={live} onChange={setLive} step={0.05} />
                             </div>
                             <Num label={code === 'IS800' ? 'Design wind pressure pd (kN/m²)' : 'Wind pressure q·Kd (kN/m²)'} value={windP} onChange={setWindP} step={0.05} />
+                            <div className="control-group">
+                                <label>Wind directions</label>
+                                <select value={windDirs} onChange={e => setWindDirs(e.target.value as 'auto' | 'left' | 'both')} title="wind directions">
+                                    <option value="auto">Auto — from the right as well when the frame is unsymmetric</option>
+                                    <option value="left">From the left only</option>
+                                    <option value="both">From the left and from the right</option>
+                                </select>
+                            </div>
+                            <div style={{ fontSize: '0.85rem', fontWeight: 600, marginTop: 6 }}>{windBoth ? 'Wind from the left (windward = left wall and left rafter)' : 'External coefficients'}</div>
                             <div className="norm-ref-row">
                                 <Num label="Windward wall" value={cpe.windwardWall} onChange={v => setCpe({ ...cpe, windwardWall: v })} step={0.05} title={code === 'IS800' ? 'Cpe' : 'GCp'} />
                                 <Num label="Leeward wall" value={cpe.leewardWall} onChange={v => setCpe({ ...cpe, leewardWall: v })} step={0.05} />
@@ -271,6 +301,28 @@ export default function SteelAnalyzer() {
                                 <Num label="Windward roof" value={cpe.windwardRoof} onChange={v => setCpe({ ...cpe, windwardRoof: v })} step={0.05} />
                                 <Num label="Leeward roof" value={cpe.leewardRoof} onChange={v => setCpe({ ...cpe, leewardRoof: v })} step={0.05} />
                             </div>
+                            {(windBoth || windDirs !== 'left') && (
+                                <>
+                                    <div style={{ fontSize: '0.85rem', fontWeight: 600, marginTop: 6 }}>Wind from the right (windward = right wall and right rafter)</div>
+                                    <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: '0.85rem' }}>
+                                        <input type="checkbox" checked={cpeRSame} onChange={e => { setCpeRSame(e.target.checked); if (!e.target.checked) setCpeR(cpe); }} />
+                                        Same coefficients as wind from the left
+                                    </label>
+                                    {!cpeRSame && (
+                                        <>
+                                            <div className="norm-ref-row">
+                                                <Num label="Windward wall (right)" value={cpeR.windwardWall} onChange={v => setCpeR({ ...cpeR, windwardWall: v })} step={0.05} />
+                                                <Num label="Leeward wall (left)" value={cpeR.leewardWall} onChange={v => setCpeR({ ...cpeR, leewardWall: v })} step={0.05} />
+                                            </div>
+                                            <div className="norm-ref-row">
+                                                <Num label="Windward roof (right)" value={cpeR.windwardRoof} onChange={v => setCpeR({ ...cpeR, windwardRoof: v })} step={0.05} />
+                                                <Num label="Leeward roof (left)" value={cpeR.leewardRoof} onChange={v => setCpeR({ ...cpeR, leewardRoof: v })} step={0.05} />
+                                            </div>
+                                        </>
+                                    )}
+                                    {!windBoth && <div className="info-note-inline">Frame and coefficients are symmetric: wind from the right is the mirror image of wind from the left and is not run separately.</div>}
+                                </>
+                            )}
                             <div className="norm-ref-row">
                                 <Num label={code === 'IS800' ? 'Cpi case 1' : 'GCpi case 1'} value={cpi[0]} onChange={v => setCpi([v, cpi[1]])} step={0.05} />
                                 <Num label={code === 'IS800' ? 'Cpi case 2' : 'GCpi case 2'} value={cpi[1]} onChange={v => setCpi([cpi[0], v])} step={0.05} />
@@ -508,14 +560,14 @@ export default function SteelAnalyzer() {
                             <h3 className="panel-title"><span className="panel-icon">ℹ</span>Design basis and limitations</h3>
                             <ul style={{ fontSize: '0.85rem', lineHeight: 1.5, margin: 0, paddingLeft: 18 }}>
                                 {code === 'IS800' ? (<>
-                                    <li>IS 800:2007 LSM, γm0 = 1.10. Combinations (Table 4): 1.5(D+L), 1.2(D+L+W), 1.5(D+W), 0.9D+1.5W, each wind case with both internal pressures.</li>
-                                    <li>Second-order elastic analysis (P-Δ, P-δ); notional horizontal loads 0.5 % of the factored gravity load in gravity combinations (Cl. 4.3.6).</li>
+                                    <li>IS 800:2007 LSM, γm0 = 1.10. Combinations (Table 4): 1.5(D+L), 1.2(D+L+W), 1.5(D+W), 0.9D+1.5W, each wind case with both internal pressures. Wind from the left (W1, W2); for unsymmetric frames also from the right (WL1, WL2, WR1, WR2).</li>
+                                    <li>Second-order elastic analysis (P-Δ, P-δ); notional horizontal loads 0.5 % of the factored gravity load in gravity combinations (Cl. 4.3.6), acting in the direction of the first-order sway.</li>
                                     <li>In-plane buckling from the frame elastic buckling analysis: fcc = γe·N/A at each section (curve b). Out-of-plane over the flange-brace spacing, smallest section of the segment (curve c).</li>
                                     <li>LTB Cl. 8.2.2 with Mcr of Cl. 8.2.2.1 and c1 = 1 (conservative), αLT = 0.49; interaction Cl. 9.3.2.2 with Cmz = 0.9 for sway frames.</li>
                                     <li>Slender webs (d/tw above the semi-compact limit): moment carried by the flanges only; webs limited to d/tw ≤ 200ε without stiffeners. Shear with web buckling Cl. 8.4.2.2(a).</li>
                                 </>) : (<>
-                                    <li>AISC 360-22 LRFD, direct analysis method: second-order analysis with 0.8EA and 0.8τbEI, notional loads 0.002ΣY in gravity combinations (and in all when Δ2nd/Δ1st &gt; 1.7); in-plane K = 1.</li>
-                                    <li>ASCE 7-22 §2.3.1 combinations: 1.4D, 1.2D+1.6Lr, 1.2D+1.6Lr+0.5W, 1.2D+1.0W+0.5Lr, 0.9D+1.0W, each wind case with both GCpi.</li>
+                                    <li>AISC 360-22 LRFD, direct analysis method: second-order analysis with 0.8EA and 0.8τbEI, notional loads 0.002ΣY in gravity combinations (and in all when Δ2nd/Δ1st &gt; 1.7), in the direction of the first-order sway; in-plane K = 1.</li>
+                                    <li>ASCE 7-22 §2.3.1 combinations: 1.4D, 1.2D+1.6Lr, 1.2D+1.6Lr+0.5W, 1.2D+1.0W+0.5Lr, 0.9D+1.0W, each wind case with both GCpi; wind from the right as well for unsymmetric frames (WL/WR).</li>
                                     <li>Web-tapered members checked section by section (AISC Design Guide 25 stress approach): Fe = Pe/A(x); LTB stress from the smallest section of each unbraced segment with Cb (F1-1).</li>
                                     <li>Flexure F2–F5 by web / flange class; compression E3 with E7 effective widths; shear G2.1 without stiffeners; interaction H1-1; h/tw ≤ 260 (F13.2).</li>
                                 </>)}

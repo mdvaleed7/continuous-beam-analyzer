@@ -8,7 +8,7 @@ import { chiIS, classifyIS, shearIS, mcrIS, IS800 } from '../lib/steelIS800';
 import { fcrE3, cbAISC, shearAISC, ltbStressAISC, classifyAISC, AISC } from '../lib/steelAISC360';
 import {
     runDesign, optimizeSteel, strengthCombos,
-    type BeamInput, type ColumnInput, type PortalFrameInput,
+    portalGeometry, type BeamInput, type ColumnInput, type PortalFrameInput,
 } from '../components/steelFrameEngine';
 
 const prism = (D: number, bf: number, tf: number, tw: number): MemberSection => ({ bf, tf, tw, profile: { at: [0, 1], D: [D, D] } });
@@ -159,6 +159,78 @@ describe('portal frame', () => {
             expect(r.combos.filter(c => c.kind === 'strength').length).toBe(strengthCombos(code, ['W1', 'W2'], true).length);
             expect(r.mass).toBeGreaterThan(0);
         }
+    });
+});
+
+describe('portal frame — unsymmetric frames and wind from the right', () => {
+    const base = (over: Partial<PortalFrameInput> = {}): PortalFrameInput => ({
+        code: 'IS800', fy: 345, span: 20, eaveHeight: 7, roofSlope: 6, baySpacing: 6, base: 'pinned',
+        column: { bf: 200, tf: 12, tw: 6, profile: { at: [0, 1], D: [300, 650] } },
+        rafter: { bf: 200, tf: 12, tw: 6, profile: { at: [0, 0.3, 1], D: [650, 400, 400] } },
+        dead: 0.25, live: 0.75, windPressure: 0.9,
+        cpe: { windwardWall: 0.7, leewardWall: -0.25, windwardRoof: -0.9, leewardRoof: -0.4 }, cpi: [0.2, -0.2],
+        columnLy: 2.5, rafterLy: 3, verticalLimit: 180, lateralLimit: 150, windServiceFactor: 1, nSub: 8, ...over,
+    });
+    const sls = (r: ReturnType<typeof runDesign>, name: string) => r.combos.find(c => c.name === name)!;
+    const sumRx = (c: ReturnType<typeof sls>) => c.reactions.reduce((a, x) => a + x.Rx, 0);
+    const sumRy = (c: ReturnType<typeof sls>) => c.reactions.reduce((a, x) => a + x.Ry, 0);
+
+    it('apex position from unequal slopes and eave heights', () => {
+        const g = portalGeometry({ span: 20, eaveHeight: 7, roofSlope: 10, eaveHeightR: 8, roofSlopeR: 5 });
+        const t = (d: number) => Math.tan(d * Math.PI / 180);
+        const x = (8 - 7 + 20 * t(5)) / (t(10) + t(5));
+        expect(g.xA).toBeCloseTo(x, 9);
+        expect(g.yA).toBeCloseTo(7 + x * t(10), 9);
+        expect(g.yA).toBeCloseTo(8 + (20 - x) * t(5), 9);
+        expect(() => portalGeometry({ span: 20, eaveHeight: 7, roofSlope: 2, eaveHeightR: 12, roofSlopeR: 2 })).toThrow();
+    });
+
+    it('symmetric frame: auto runs wind from the left only; "both" gives the mirror image', () => {
+        const auto = runDesign({ mode: 'frame', input: base() });
+        expect(auto.combos.some(c => c.name.includes('WR'))).toBe(false);
+        const r = runDesign({ mode: 'frame', input: base({ windDirections: 'both' }) });
+        const L = sls(r, 'SLS: 1WL1'), R = sls(r, 'SLS: 1WR1');
+        const byNode = (c: typeof L, n: number) => c.reactions.find(x => x.node === n)!;
+        // left support under wind from the right = mirror of the right support under wind from the left
+        expect(byNode(R, 0).Rx).toBeCloseTo(-byNode(L, 4).Rx, 6);
+        expect(byNode(R, 0).Ry).toBeCloseTo(byNode(L, 4).Ry, 6);
+        expect(byNode(R, 4).Rx).toBeCloseTo(-byNode(L, 0).Rx, 6);
+        // the mirror case adds nothing to the design of a symmetric frame
+        // (members are designed as groups: Column L+R, Rafter L+R)
+        for (const g of auto.groups) {
+            expect(r.groups.find(x => x.group === g.group)!.maxUtil).toBeCloseTo(g.maxUtil, 6);
+        }
+    });
+
+    it('unsymmetric frame: wind from the right is added automatically and satisfies equilibrium', () => {
+        const inp = base({ roofSlope: 10, roofSlopeR: 5, eaveHeightR: 8 });
+        const g = portalGeometry(inp);
+        const r = runDesign({ mode: 'frame', input: inp });
+        expect(r.combos.some(c => c.name === '1.5(D+WR2)')).toBe(true);
+        expect(r.deflections.map(d => d.name)).toEqual(expect.arrayContaining(['Left eave drift (H/150)', 'Right eave drift (H/150)']));
+        // Horizontal resultant of wind from the right (cpi = +0.2), by surface:
+        // right wall pushed −x, left wall sucked −x, roof suction on the projected rises
+        const p = 0.9 * 6, cpi = 0.2, c = inp.cpe;
+        const riseL = g.yA - g.HL, riseR = g.yA - g.HR;
+        const Fx = -p * (c.windwardWall - cpi) * g.HR + p * (c.leewardWall - cpi) * g.HL
+            - p * (c.windwardRoof - cpi) * riseR + p * (c.leewardRoof - cpi) * riseL;
+        expect(sumRx(sls(r, 'SLS: 1WR1'))).toBeCloseTo(-Fx, 4);
+        expect(Fx).toBeLessThan(0);                        // net push toward −x
+    });
+
+    it('notional loads follow the first-order sway of an unsymmetric frame', () => {
+        const ratio = (inp: PortalFrameInput) => {
+            const c = runDesign({ mode: 'frame', input: inp }).combos.find(x => x.name === '1.5(D+L)')!;
+            expect(c.notional).toBe(true);
+            return sumRx(c) / sumRy(c);
+        };
+        // symmetric: +x notional (reaction −0.005·ΣV)
+        expect(ratio(base())).toBeCloseTo(-0.005, 6);
+        // mirrored unsymmetric frames sway in opposite directions → opposite notional loads
+        const a = ratio(base({ roofSlope: 12, roofSlopeR: 4 }));
+        const b = ratio(base({ roofSlope: 4, roofSlopeR: 12 }));
+        expect(Math.abs(a)).toBeCloseTo(0.005, 6);
+        expect(b).toBeCloseTo(-a, 6);
     });
 });
 

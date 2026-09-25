@@ -562,15 +562,22 @@ export function designStructure(model: StructureModel, opts: { detail?: boolean 
         let stiff: Stiff = fe.elements.map(() => (strength && code === 'AISC360' ? { a: 0.8, i: 0.8 } : { a: 1, i: 1 }));
         const loads = combineLoads(model, fe, combo);
         const notionalRatio = code === 'IS800' ? 0.005 : 0.002;
+        // First-order solution without notional loads; its sway at the notional
+        // nodes sets their direction (IS 800 Cl. 4.3.6 / AISC C2.2b: in the
+        // direction that adds to the sway). Symmetric frame under gravity
+        // (no sway): +x.
+        const base = solve(fe, E, stiff, loads, false);
+        const sway = model.notionalNodes.reduce((a, mn) => a + base.u[3 * fe.mainNode[mn]], 0);
+        const notionalDir = sway < -1e-9 ? -1 : 1;
         const addNotional = (L: FactoredLoads) => {
             const F = new Float64Array(L.F);
             const nodes = model.notionalNodes;
-            for (const mn of nodes) F[3 * fe.mainNode[mn]] += notionalRatio * L.totalGravity / nodes.length;
+            for (const mn of nodes) F[3 * fe.mainNode[mn]] += notionalDir * notionalRatio * L.totalGravity / nodes.length;
             return { ...L, F };
         };
         let useNotional = strength && combo.gravityOnly && model.notionalNodes.length > 0;
         let sol = solve(fe, E, stiff, useNotional ? addNotional(loads) : loads, strength);
-        const first = solve(fe, E, stiff, useNotional ? addNotional(loads) : loads, false);
+        const first = useNotional ? solve(fe, E, stiff, addNotional(loads), false) : base;
         const maxUx = (u: Float64Array) => Math.max(...Array.from({ length: fe.nodeXY.length }, (_, n) => Math.abs(u[3 * n])));
         let ampRatio = maxUx(first.u) > 1e-12 ? maxUx(sol.u) / maxUx(first.u) : 1;
         if (strength && code === 'AISC360' && !useNotional && ampRatio > 1.7 && model.notionalNodes.length > 0) {
@@ -753,12 +760,16 @@ export function strengthCombos(code: SteelCode, windCases: string[], hasLive = t
 // ═══════════════════════════════════════════════════════════════
 //  Portal frame
 // ═══════════════════════════════════════════════════════════════
+export interface WindCoefficients { windwardWall: number; leewardWall: number; windwardRoof: number; leewardRoof: number }
+
 export interface PortalFrameInput {
     code: SteelCode;
     fy: number;                 // MPa
     span: number;               // m, column centre lines
-    eaveHeight: number;         // m
-    roofSlope: number;          // degrees
+    eaveHeight: number;         // m — left eave
+    roofSlope: number;          // degrees — left rafter
+    eaveHeightR?: number;       // m — right eave (default: eaveHeight)
+    roofSlopeR?: number;        // degrees — right rafter (default: roofSlope)
     baySpacing: number;         // m
     base: 'pinned' | 'fixed';
     column: MemberSection;      // profile: base (0) → eave (1)
@@ -766,7 +777,10 @@ export interface PortalFrameInput {
     dead: number;               // kN/m² on the roof slope (sheeting, purlins, services, collateral)
     live: number;               // kN/m² on plan (roof live load)
     windPressure: number;       // kN/m² — IS 875-3: pd; ASCE 7-22: qh·Kd
-    cpe: { windwardWall: number; leewardWall: number; windwardRoof: number; leewardRoof: number };  // Cpe or GCp
+    cpe: WindCoefficients;      // Cpe or GCp, wind from the left (windward = left wall / left rafter)
+    cpeRight?: WindCoefficients; // wind from the right (windward = right wall / right rafter); default: cpe
+    // 'auto': wind from the right as well whenever the frame or its coefficients are unsymmetric
+    windDirections?: 'auto' | 'left' | 'both';
     cpi: number[];              // internal pressure coefficients (e.g. +0.2, −0.2)
     columnLy: number;           // m — flange-brace spacing on the columns
     rafterLy: number;           // m — flange-brace spacing on the rafters
@@ -776,11 +790,30 @@ export interface PortalFrameInput {
     nSub?: number;
 }
 
+/** Apex position of a (possibly unsymmetric) duo-pitch frame. */
+export function portalGeometry(inp: Pick<PortalFrameInput, 'span' | 'eaveHeight' | 'roofSlope' | 'eaveHeightR' | 'roofSlopeR'>) {
+    const S = inp.span, HL = inp.eaveHeight, HR = inp.eaveHeightR ?? inp.eaveHeight;
+    const thL = inp.roofSlope * Math.PI / 180, thR = (inp.roofSlopeR ?? inp.roofSlope) * Math.PI / 180;
+    if (thL < 0 || thR < 0) throw new Error('Roof slopes cannot be negative');
+    const t = Math.tan(thL) + Math.tan(thR);
+    if (t < 1e-9 && Math.abs(HL - HR) > 1e-9) throw new Error('Flat roof with unequal eave heights — give the rafters a slope');
+    // HL + x·tanθL = HR + (S − x)·tanθR
+    const xA = t < 1e-9 ? S / 2 : (HR - HL + S * Math.tan(thR)) / t;
+    if (!(xA > 0.05 * S && xA < 0.95 * S)) throw new Error('Apex falls outside the span — check the eave heights and roof slopes (mono-pitch roofs are not covered)');
+    return { S, HL, HR, thL, thR, xA, yA: HL + xA * Math.tan(thL) };
+}
+
+export function isSymmetricPortal(inp: PortalFrameInput): boolean {
+    const g = portalGeometry(inp);
+    const same = (a: WindCoefficients, b: WindCoefficients) =>
+        a.windwardWall === b.windwardWall && a.leewardWall === b.leewardWall && a.windwardRoof === b.windwardRoof && a.leewardRoof === b.leewardRoof;
+    return Math.abs(g.HL - g.HR) < 1e-9 && Math.abs(g.thL - g.thR) < 1e-12 && (!inp.cpeRight || same(inp.cpe, inp.cpeRight));
+}
+
 export function portalFrameModel(inp: PortalFrameInput): StructureModel {
-    const th = inp.roofSlope * Math.PI / 180;
-    const S = inp.span, H = inp.eaveHeight, B = inp.baySpacing;
-    const rise = S / 2 * Math.tan(th);
-    const nodes = [{ x: 0, y: 0 }, { x: 0, y: H }, { x: S / 2, y: H + rise }, { x: S, y: H }, { x: S, y: 0 }];
+    const { S, HL, HR, thL, thR, xA, yA } = portalGeometry(inp);
+    const B = inp.baySpacing;
+    const nodes = [{ x: 0, y: 0 }, { x: 0, y: HL }, { x: xA, y: yA }, { x: S, y: HR }, { x: S, y: 0 }];
     // chain order keeps the band narrow: base L → eave L → apex → eave R → base R
     const members: MemberDef[] = [
         { name: 'Column L', group: 'Column', i: 0, j: 1, section: inp.column, reverse: false, Ly: inp.columnLy, sway: true },
@@ -790,52 +823,68 @@ export function portalFrameModel(inp: PortalFrameInput): StructureModel {
     ];
     const rest = inp.base === 'fixed';
     const supports = [{ node: 0, ux: true, uy: true, rz: rest }, { node: 4, ux: true, uy: true, rz: rest }];
-    const c = Math.cos(th);
-    // Dead on slope; live on plan (per member length: × cos θ)
+    // Dead on slope; live on plan (per member length: × cos θ of each rafter)
     const D: LoadCaseDef = { memberLoads: [1, 2].map(m => ({ member: m, wx: 0, wy: -inp.dead * B })), nodalLoads: [] };
-    const L: LoadCaseDef = { memberLoads: [1, 2].map(m => ({ member: m, wx: 0, wy: -inp.live * B * c })), nodalLoads: [] };
-    // Wind from the left. Net pressure p·(Cpe − Cpi) acts toward the surface
-    // when positive: force = −p_net·n_out per unit length.
-    const windCase = (cpi: number): LoadCaseDef => {
-        const p = inp.windPressure * B;
-        const pn = (cpe: number) => p * (cpe - cpi);
-        const nL = { x: -Math.sin(th), y: Math.cos(th) };    // outward normal, windward roof
-        const nR = { x: Math.sin(th), y: Math.cos(th) };     // leeward roof
+    const L: LoadCaseDef = {
+        memberLoads: [{ member: 1, wx: 0, wy: -inp.live * B * Math.cos(thL) }, { member: 2, wx: 0, wy: -inp.live * B * Math.cos(thR) }],
+        nodalLoads: [],
+    };
+    // Net pressure p·(Cpe − Cpi) acts toward a surface when positive:
+    // force per unit length = −p_net·n_out (outward normal n_out).
+    const nOut = [
+        { x: -1, y: 0 },                                // Column L
+        { x: -Math.sin(thL), y: Math.cos(thL) },        // Rafter L
+        { x: Math.sin(thR), y: Math.cos(thR) },         // Rafter R
+        { x: 1, y: 0 },                                 // Column R
+    ];
+    const windCase = (cpi: number, fromLeft: boolean): LoadCaseDef => {
+        const c = fromLeft ? inp.cpe : (inp.cpeRight ?? inp.cpe);
+        // surface coefficients in member order: Column L, Rafter L, Rafter R, Column R
+        const cp = fromLeft
+            ? [c.windwardWall, c.windwardRoof, c.leewardRoof, c.leewardWall]
+            : [c.leewardWall, c.leewardRoof, c.windwardRoof, c.windwardWall];
         return {
-            memberLoads: [
-                { member: 0, wx: pn(inp.cpe.windwardWall), wy: 0 },                 // outward normal −x
-                { member: 1, wx: -pn(inp.cpe.windwardRoof) * nL.x, wy: -pn(inp.cpe.windwardRoof) * nL.y },
-                { member: 2, wx: -pn(inp.cpe.leewardRoof) * nR.x, wy: -pn(inp.cpe.leewardRoof) * nR.y },
-                { member: 3, wx: -pn(inp.cpe.leewardWall), wy: 0 },                 // outward normal +x
-            ],
+            memberLoads: cp.map((cpe, m) => {
+                const pn = inp.windPressure * B * (cpe - cpi);
+                return { member: m, wx: -pn * nOut[m].x, wy: -pn * nOut[m].y };
+            }),
             nodalLoads: [],
         };
     };
+    const dirs = inp.windDirections ?? 'auto';
+    const both = dirs === 'both' || (dirs === 'auto' && !isSymmetricPortal(inp));
     const loadCases: Record<string, LoadCaseDef> = { D, L };
     const windNames: string[] = [];
-    inp.cpi.forEach((cpi, k) => {
-        const name = `W${k + 1}`;
-        loadCases[name] = windCase(cpi);
-        windNames.push(name);
-    });
+    for (const fromLeft of both ? [true, false] : [true]) {
+        inp.cpi.forEach((cpi, k) => {
+            const name = both ? `W${fromLeft ? 'L' : 'R'}${k + 1}` : `W${k + 1}`;
+            loadCases[name] = windCase(cpi, fromLeft);
+            windNames.push(name);
+        });
+    }
     const combos = strengthCombos(inp.code, windNames, inp.live > 0);
     combos.push({ name: 'SLS: L', factors: { L: 1 }, kind: 'service', gravityOnly: true });
-    windNames.forEach(w => combos.push({ name: `SLS: ${inp.windServiceFactor}${w}`, factors: { [w]: inp.windServiceFactor }, kind: 'service', gravityOnly: false }));
+    const slsWind = windNames.map(w => `SLS: ${inp.windServiceFactor}${w}`);
+    windNames.forEach((w, k) => combos.push({ name: slsWind[k], factors: { [w]: inp.windServiceFactor }, kind: 'service', gravityOnly: false }));
+    const drift = (name: string, H: number, eaves: number[]): DeflectionCheckDef => ({
+        name: `${name} (H/${inp.lateralLimit})`, combos: slsWind, limit: H * 1000 / inp.lateralLimit,
+        evaluate: (u, fe) => Math.max(...eaves.map(e => Math.abs(u[3 * fe.mainNode[e]]))) * 1000,
+    });
     const deflections: DeflectionCheckDef[] = [
         {
             name: `Rafter vertical (span/${inp.verticalLimit})`, combos: ['SLS: L'], limit: S * 1000 / inp.verticalLimit,
             evaluate: (u, fe) => {
-                // largest vertical movement of the rafter nodes relative to the eaves
+                // largest vertical movement of the rafter nodes relative to the chord between the eaves
                 const eaveL = fe.mainNode[1], eaveR = fe.mainNode[3];
-                return Math.max(...[...fe.memberNodes[1], ...fe.memberNodes[2]].map(n =>
-                    Math.abs(u[3 * n + 1] - 0.5 * (u[3 * eaveL + 1] + u[3 * eaveR + 1])))) * 1000;
+                return Math.max(...[...fe.memberNodes[1], ...fe.memberNodes[2]].map(n => {
+                    const r = fe.nodeXY[n].x / S;
+                    return Math.abs(u[3 * n + 1] - ((1 - r) * u[3 * eaveL + 1] + r * u[3 * eaveR + 1]));
+                })) * 1000;
             },
         },
-        {
-            name: `Eave drift (H/${inp.lateralLimit})`, combos: windNames.map(w => `SLS: ${inp.windServiceFactor}${w}`),
-            limit: H * 1000 / inp.lateralLimit,
-            evaluate: (u, fe) => Math.max(Math.abs(u[3 * fe.mainNode[1]]), Math.abs(u[3 * fe.mainNode[3]])) * 1000,
-        },
+        ...(Math.abs(HL - HR) < 1e-9
+            ? [drift('Eave drift', HL, [1, 3])]
+            : [drift('Left eave drift', HL, [1]), drift('Right eave drift', HR, [3])]),
     ];
     return {
         code: inp.code, fy: inp.fy, nodes, members, supports, loadCases, combos,
