@@ -119,10 +119,11 @@ export async function generateWallReport(config: any, result: any, canvas: HTMLC
         html += `
         <div class="section-box">
             <h3 class="section-header">
-                Zone ${i + 1} (${z.topDepth.toFixed(2)} m to ${z.bottomDepth.toFixed(2)} m) &mdash; Thickness: ${z.thickness} mm
+                Zone ${i + 1} (${z.topDepth.toFixed(2)} m to ${z.bottomDepth.toFixed(2)} m) &mdash; Thickness: ${z.thicknessTop !== z.thicknessBot ? `${z.thicknessTop} mm (top) → ${z.thicknessBot} mm (bottom)` : `${z.thickness} mm`}
             </h3>
 
             <div class="section-body">
+                ${z.thicknessTop !== z.thicknessBot ? `<p style="margin-top: 0; font-size: 12px; color: #64748b;">Tapered zone: every section is designed at its own thickness. Governing sections — earth face at ${Number(z.x_hogging).toFixed(2)} m, inner face at ${Number(z.x_sagging).toFixed(2)} m below the zone top.</p>` : ''}
                 <div class="two-col">
                     <div class="col col-left">
                         <h4 style="margin-top: 0;">A. Flexure (Earth Face / Hogging)</h4>
@@ -167,7 +168,7 @@ export async function generateWallReport(config: any, result: any, canvas: HTMLC
                             ${kx(`\\tau_c = ${z.shear.tau_c} \\text{ N/mm}^2 \\quad (p_t = ${z.shear.pt}\\%, \\text{ Table 19})`)}
                         </div>
                         <div class="col">
-                            ${kx(`k = ${Number(z.shear_k).toFixed(2)} \\;(D = ${z.thickness}\\text{ mm}), \\quad k\\,\\tau_c = ${(z.shear_k * z.shear.tau_c).toFixed(3)} \\text{ N/mm}^2`)}
+                            ${kx(`k = ${Number(z.shear_k).toFixed(2)} \\;(D = ${((z.shearAt?.d ?? 0) + material.cover + (z.shearAt?.face === 's' ? z.mainBars_sagging.dia : z.mainBars_hogging.dia) / 2).toFixed(0)}\\text{ mm at the section}), \\quad k\\,\\tau_c = ${(z.shear_k * z.shear.tau_c).toFixed(3)} \\text{ N/mm}^2`)}
                             <p style="margin: 10px 0; font-weight: bold; color: ${z.shearOk ? '#10b981' : '#ef4444'};">
                                 Result: ${kxInline(`\\tau_v ${z.shearOk ? '\\le' : '>'} k\\,\\tau_c`)} &rarr; ${z.shearOk ? 'OK — no shear links required' : 'FAIL — increase thickness'}
                             </p>
@@ -200,7 +201,7 @@ export async function generateWallReport(config: any, result: any, canvas: HTMLC
                         <div class="col col-left">
                             ${kx(`P_u = ${z.pm.Pu} \\text{ kN/m} \\;(\\text{load from above + self-weight})`)}
                             ${kx(`H_e = 0.75H = ${z.pm.He} \\text{ m}, \\quad H_e/t = ${z.pm.slenderness} ${z.pm.slendernessOk ? '\\le' : '>'} 30`)}
-                            ${kx(`e_a = \\frac{H_e^2}{2500\\,t} = ${z.pm.ea} \\text{ mm}, \\quad e_{min} = 0.05t = ${(0.05 * z.thickness).toFixed(1)} \\text{ mm}`)}
+                            ${kx(`e_a = \\frac{H_e^2}{2500\\,t} = ${z.pm.ea} \\text{ mm}, \\quad e_{min} = 0.05t`)}
                         </div>
                         <div class="col">
                             ${kx(`M_{u} = \\max(M, P_u e_{min}) + P_u e_a`)}
@@ -213,7 +214,7 @@ export async function generateWallReport(config: any, result: any, canvas: HTMLC
 
                 <div style="border-top: 1px solid #e2e8f0; padding-top: 15px; margin-top: 15px;">
                     <h4 style="margin-top: 0;">F. Horizontal Reinforcement — IS 456 Cl. 32.5(c)</h4>
-                    ${kx(`A_{h} = ${material.fy >= 415 ? '0.0020' : '0.0025'} \\times ${b} \\times ${z.thickness} = ${((material.fy >= 415 ? 0.0020 : 0.0025) * b * z.thickness).toFixed(0)} \\text{ mm}^2\\text{/m} \\;(\\text{half per face})`)}
+                    ${kx(`A_{h} = ${material.fy >= 415 ? '0.0020' : '0.0025'} \\times ${b} \\times ${Math.max(z.thicknessTop, z.thicknessBot)} = ${((material.fy >= 415 ? 0.0020 : 0.0025) * b * Math.max(z.thicknessTop, z.thicknessBot)).toFixed(0)} \\text{ mm}^2\\text{/m} \\;(\\text{half per face})`)}
                     <div class="provided-box">
                         <strong>Provided (each face):</strong> ${z.distBars.label} ${kxInline(`(${z.distBars.Ast_provided} \\text{ mm}^2\\text{/m})`)}, spacing ≤ min(3t, 450 mm)
                     </div>

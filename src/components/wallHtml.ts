@@ -58,7 +58,7 @@ export function renderWallDesignTable(container: HTMLElement | null, wallResult:
         if (!zd.shearOk) fails.push('Shear');
         if (!zd.crack.hogging.ok || !zd.crack.sagging.ok) fails.push('Crack');
         if (!zd.pm.ok) fails.push(zd.pm.slendernessOk ? 'P–M' : 'He/t > 30');
-        if (zd.thickness < 150) fails.push('t < 150');
+        if (Math.min(zd.thicknessTop, zd.thicknessBot) < 150) fails.push('t < 150');
         const statusClass = zd.ok ? 'color:var(--positive)' : 'color:var(--negative)';
         const statusText = zd.ok ? 'OK' : fails.join(', ') || 'FAIL';
         const kTauC = zd.shear_k * zd.shear.tau_c;
@@ -79,7 +79,7 @@ export function renderWallDesignTable(container: HTMLElement | null, wallResult:
 
         html += `<tr>
             <td><strong>${zd.zone}</strong></td>
-            <td>${zd.thickness}</td>
+            <td>${zd.thicknessTop !== zd.thicknessBot ? `${zd.thicknessTop}→${zd.thicknessBot}` : zd.thickness}</td>
             <td>${zd.d_hogging}</td>
             <td>${zd.d_sagging}</td>
             <td>${zd.V_governing.toFixed(1)}</td>
