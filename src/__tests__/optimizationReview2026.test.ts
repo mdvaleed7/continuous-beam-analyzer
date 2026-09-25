@@ -25,7 +25,7 @@ import { analyzeFlatSlab, ddmCoefficients } from '../components/flatSlabEngine';
 import { analyzeFooting, noTensionBearing, type FootingConfig } from '../components/footingEngine';
 import { analyzeRetainingWall } from '../components/retainingWallEngine';
 import { analyzeWall, optimizeWall } from '../components/wallEngine';
-import { analyzeSlab, optimizeSlab, optimizeSlabExtended } from '../components/slabEngine';
+import { analyzeSlab, optimizeSlab, optimizeSlabExtended, slabSteelKg } from '../components/slabEngine';
 import { optimizeCantileverSlab } from '../components/cantileverSlabEngine';
 import { optimizeWaffleSlab } from '../components/waffleSlabEngine';
 
@@ -416,7 +416,7 @@ describe('Slab flexure with the provided bars', () => {
 describe('Slab optimizers', () => {
     const cost = { steelCost_per_kg: 90, concreteCost_per_m3: 6500, formworkCost_per_m2: 350, wastage_factor: 1.07 };
 
-    test('extended optimizer designs with the swept bars — distinct designs, provided steel over the panel', () => {
+    test('extended optimizer designs with the swept bars — distinct designs, provided steel', () => {
         const r = optimizeSlabExtended({ ...slab, boundaryCase: 1, costParams: cost },
             { thicknesses: [120, 140], barDias: [8, 10], barSpacings: [150, 200, 250] });
         expect(r.feasibleCount).toBeGreaterThan(1);
@@ -425,10 +425,8 @@ describe('Slab optimizers', () => {
             expect(d.result.bars_x_bot.dia).toBe(d.barDia);
             expect(d.result.bars_x_bot.spacing).toBe(d.barSpacing);
             keys.add(`${d.thickness}/${d.barDia}/${d.barSpacing}`);
-            const res = d.result;
-            const barKg = (res.bars_x_bot.Ast_provided + res.bars_x_top.Ast_provided
-                + res.bars_y_bot.Ast_provided + res.bars_y_top.Ast_provided) * 4 * 5 * 7850 / 1e6;
-            expect(d.steelWeight_net).toBeGreaterThanOrEqual(barKg - 1e-9);   // + corner torsion steel
+            // bars (top bars curtailed per Annex D) + corner torsion steel
+            expect(d.steelWeight_net).toBeGreaterThanOrEqual(slabSteelKg(d.result).total - 1e-9);
             // wastage applied once (inside computeCost)
             expect(d.costTotal_INR).toBeCloseTo(computeCost(d.concreteVol, d.steelWeight_net, 20, cost), 6);
             expect(d.steelWeight_gross).toBeCloseTo(d.steelWeight_net * 1.07, 6);
@@ -546,5 +544,54 @@ describe('Tapered basement wall — local thickness design', () => {
         // Inner face: M ≈ 21.9 kN·m → Ast,req ≈ 200 mm²/m → 8 @ 250 (201), below 0.15 %·b·d = 384
         expect(zd.mainBars_sagging.label).toBe('8mm @ 250 c/c');
         expect(zd.mainBars_sagging.Ast_provided).toBeLessThan(0.0015 * 1000 * zd.d_sagging);
+    });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Slab steel quantity — top bars curtailed per IS 456 Annex D
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('Slab steel quantity (Annex D-1.6 / D-1.7)', () => {
+    const kg = (Ast: number, w: number, l: number) => Ast * w * l * 7850 / 1e6;
+
+    test('interior panel 4 × 5 m: top bars 0.225·l per continuous edge, not the whole panel', () => {
+        const r = analyzeSlab({ ...slab, slabType: 'two-way', boundaryCase: 1 });
+        const q = slabSteelKg(r);
+        const bottom = kg(r.bars_x_bot.Ast_provided, 5, 4) + kg(r.bars_y_bot.Ast_provided, 4, 5);
+        const top = 2 * kg(r.bars_x_top.Ast_provided, 5, 0.225 * 4) + 2 * kg(r.bars_y_top.Ast_provided, 4, 0.225 * 5)
+            + 2 * kg(r.flex_y_top.Ast_min!, 0.3 * 4, 5) + 2 * kg(r.flex_x_top.Ast_min!, 0.3 * 5, 4);
+        expect(q.bottom).toBeCloseTo(bottom, 6);
+        expect(q.top).toBeCloseTo(top, 6);
+        const fullPanel = kg(r.bars_x_top.Ast_provided + r.bars_y_top.Ast_provided, 4, 5);
+        expect(q.top).toBeLessThan(fullPanel);
+    });
+
+    test('simply supported panel (case 9): only 50 % of the mid-span steel over 0.1·l at each edge', () => {
+        const r = analyzeSlab({ ...slab, slabType: 'two-way', boundaryCase: 9 });
+        const q = slabSteelKg(r);
+        const top = 2 * kg(0.5 * r.bars_x_bot.Ast_provided, 5, 0.1 * 4) + 2 * kg(0.5 * r.bars_y_bot.Ast_provided, 4, 0.1 * 5);
+        expect(q.top).toBeCloseTo(top, 6);
+    });
+
+    test('corner panel (case 4): one continuous and one discontinuous edge each way', () => {
+        const r = analyzeSlab({ ...slab, slabType: 'two-way', boundaryCase: 4 });
+        const q = slabSteelKg(r);
+        const top = kg(r.bars_x_top.Ast_provided, 5, 0.225 * 4) + kg(0.5 * r.bars_x_bot.Ast_provided, 5, 0.1 * 4)
+            + kg(r.bars_y_top.Ast_provided, 4, 0.225 * 5) + kg(0.5 * r.bars_y_bot.Ast_provided, 4, 0.1 * 5)
+            + kg(r.flex_y_top.Ast_min!, 0.3 * 4, 5) + kg(r.flex_x_top.Ast_min!, 0.3 * 5, 4);
+        expect(q.top).toBeCloseTo(top, 6);
+    });
+
+    test('one-way continuous slab: top bars at both supports with their distribution bars', () => {
+        const r = analyzeSlab({ ...slab, Ly: 10, slabType: 'one-way', supportCondition: 'continuous' });
+        const q = slabSteelKg(r);
+        const top = 2 * kg(r.bars_x_top.Ast_provided, 10, 0.225 * 4) + 2 * kg(r.bars_y_top.Ast_provided, 0.3 * 4, 10);
+        expect(q.top).toBeCloseTo(top, 6);
+    });
+
+    test('optimizer cost uses the curtailed quantity', () => {
+        const r = optimizeSlab({ ...slab, boundaryCase: 1 }, [130]);
+        const o = r.optimum!;
+        expect(o.steelWeight_net).toBeCloseTo(slabSteelKg(o.result).total + 0, 6);   // case 1: no torsion steel
     });
 });
