@@ -5,6 +5,7 @@ import BeamAnalyzer from "../components/BeamAnalyzer";
 import WallAnalyzer from "../components/WallAnalyzer";
 import SlabAnalyzer from "../components/SlabAnalyzer";
 import FootingAnalyzer from "../components/FootingAnalyzer";
+import SteelAnalyzer from "../components/SteelAnalyzer";
 import { ToastProvider } from "../components/ToastProvider";
 
 // ─── Dark mode via useSyncExternalStore ───────────────────────────────
@@ -54,7 +55,7 @@ export default function Home() {
         return () => window.removeEventListener('scroll', handleScroll);
     }, []);
 
-    // Global keyboard shortcuts (1-4 = modes, D = dark toggle).
+    // Global keyboard shortcuts (1-5 = modes, D = dark toggle).
     // Ignored when the user is typing in a form field or using modifiers.
     useEffect(() => {
         const handleKey = (e: KeyboardEvent) => {
@@ -67,6 +68,7 @@ export default function Home() {
                 case '2': setMode('wall'); break;
                 case '3': setMode('slab'); break;
                 case '4': setMode('footing'); break;
+                case '5': setMode('steel'); break;
                 case 'd': case 'D': toggleDarkMode(); break;
             }
         };
@@ -111,6 +113,14 @@ export default function Home() {
                     <span>Footing Design</span>
                 </button>
                 <button
+                    className={`mode-tab ${mode === 'steel' ? 'active' : ''}`}
+                    onClick={() => setMode('steel')}
+                    title="Steel Design (press 5)"
+                >
+                    <span className="mode-tab-icon">🏭</span>
+                    <span>Steel Design</span>
+                </button>
+                <button
                     className="mode-tab dark-toggle"
                     onClick={toggleDarkMode}
                     title={darkMode ? 'Switch to Light Mode (press D)' : 'Switch to Dark Mode (press D)'}
@@ -123,6 +133,7 @@ export default function Home() {
                 {mode === 'wall' && <WallAnalyzer />}
                 {mode === 'slab' && <SlabAnalyzer />}
                 {mode === 'footing' && <FootingAnalyzer />}
+                {mode === 'steel' && <SteelAnalyzer />}
             </div>
             {showScrollTop && (
                 <button className="scroll-top-btn" onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })} title="Scroll to top">
@@ -133,11 +144,11 @@ export default function Home() {
                 <div className="footer-inner">
                     <span className="footer-brand">Continuous Beam Analyzer</span>
                     <span className="footer-sep">·</span>
-                    <span>IS 456:2000 Structural Design Tool</span>
+                    <span>IS 456 · IS 800 · AISC 360 Structural Design Tool</span>
                     <span className="footer-sep">·</span>
                     <span>For preliminary design only — verify independently</span>
                     <span className="footer-sep">·</span>
-                    <span className="kbd-hint">Keys: 1-4 modes, D theme</span>
+                    <span className="kbd-hint">Keys: 1-5 modes, D theme</span>
                 </div>
             </footer>
         </div>

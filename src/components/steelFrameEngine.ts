@@ -1,0 +1,1143 @@
+/**
+ * steelFrameEngine.ts — analysis and design of web-tapered steel members:
+ * a single column, a single beam, and a 2D pitched-roof portal frame
+ * (two columns + two rafters), to IS 800:2007 or AISC 360-22.
+ *
+ * ANALYSIS
+ *  • 2D frame finite elements; each tapered member is split into prismatic
+ *    sub-elements with the section at the sub-element mid-length.
+ *  • Second-order (P-Δ and P-δ) analysis with the consistent geometric
+ *    stiffness, iterated to convergence; loss of stability is detected from
+ *    the LDLᵀ pivots.
+ *  • Elastic buckling load factor γe of the frame: smallest λ with
+ *    det(K + λ·KG) = 0, found by bisection on the Sturm count (number of
+ *    negative pivots of K + λ·KG).
+ *
+ * DESIGN BASIS (stated so it can be checked)
+ *  IS 800:2007
+ *   – Second-order elastic analysis, nominal stiffness; notional horizontal
+ *     loads 0.5 % of the factored gravity load in gravity-only combinations
+ *     (Cl. 4.3.6).
+ *   – In-plane member buckling from the elastic buckling analysis of the
+ *     frame: fcc(x) = γe·N(x)/A(x)  (effective length implied by the
+ *     buckling analysis).
+ *   – Out-of-plane buckling and LTB over the unbraced length Ly (flange
+ *     braces), properties of the smallest section of the segment.
+ *   – Load combinations, Table 4: 1.5(D+L), 1.2(D+L+W), 1.5(D+W), 0.9D+1.5W.
+ *  AISC 360-22 (direct analysis method, Chapter C)
+ *   – Second-order analysis with 0.8·τb·EI and 0.8·EA; notional loads
+ *     0.002·Yi in gravity-only combinations (and in all combinations when
+ *     Δ2nd/Δ1st > 1.7).
+ *   – In-plane: K = 1 — elastic buckling load of the member between its
+ *     ends (pinned-pinned, tapered), Fe(x) = Pe/A(x) (Design Guide 25).
+ *   – ASCE 7-22 LRFD combinations 2.3.1: 1.4D, 1.2D+1.6Lr, 1.2D+1.6Lr+0.5W,
+ *     1.2D+1.0W+0.5Lr, 0.9D+1.0W.
+ *  Both codes: each wind case with positive and negative internal pressure;
+ *  the frame and its member groups are symmetric, so wind from the left
+ *  covers wind from the right. Joints are modelled at the member centre
+ *  lines (no rigid knee zones). Connections, purlins, girts and bracing are
+ *  not designed here.
+ */
+import { memberSectionAt, memberMass, type MemberSection, type SectionProps } from '../lib/steelSection';
+import { checkStationIS, ltbIS, IS800, type ISStationResult } from '../lib/steelIS800';
+import { checkStationAISC, ltbStressAISC, cbAISC, AISC, type AISCStationResult } from '../lib/steelAISC360';
+
+export type SteelCode = 'IS800' | 'AISC360';
+
+const STEEL_UNIT_WEIGHT = 78.5;   // kN/m³ (self-weight)
+
+// ═══════════════════════════════════════════════════════════════
+//  Banded symmetric LDLᵀ (no pivoting) — used for solving and for
+//  the Sturm count in the buckling analysis
+// ═══════════════════════════════════════════════════════════════
+class BandMatrix {
+    readonly a: Float64Array;
+    constructor(readonly n: number, readonly hb: number) {
+        this.a = new Float64Array(n * (hb + 1));
+    }
+    /** add to (i, j), i ≥ j within the band */
+    add(i: number, j: number, v: number) {
+        if (i < j) [i, j] = [j, i];
+        const k = i - j;
+        if (k > this.hb) throw new Error('band exceeded');
+        this.a[i * (this.hb + 1) + k] += v;
+    }
+    get(i: number, j: number) {
+        if (i < j) [i, j] = [j, i];
+        const k = i - j;
+        return k > this.hb ? 0 : this.a[i * (this.hb + 1) + k];
+    }
+}
+
+interface LDL { L: Float64Array; D: Float64Array; neg: number; n: number; hb: number; singular: boolean }
+
+function ldl(M: BandMatrix): LDL {
+    const { n, hb } = M;
+    const w = hb + 1;
+    const L = new Float64Array(M.a);             // lower band, overwritten
+    const D = new Float64Array(n);
+    let neg = 0, singular = false;
+    for (let i = 0; i < n; i++) {
+        const j0 = Math.max(0, i - hb);
+        for (let j = j0; j <= i; j++) {
+            let sum = L[i * w + (i - j)];
+            const k0 = Math.max(j0, j - hb);
+            for (let k = k0; k < j; k++) sum -= L[i * w + (i - k)] * D[k] * L[j * w + (j - k)];
+            if (j < i) L[i * w + (i - j)] = D[j] !== 0 ? sum / D[j] : 0;
+            else {
+                D[i] = sum;
+                if (Math.abs(sum) < 1e-14) singular = true;
+                if (sum < 0) neg++;
+            }
+        }
+    }
+    return { L, D, neg, n, hb, singular };
+}
+
+function ldlSolve(f: LDL, b: Float64Array): Float64Array {
+    const { L, D, n, hb } = f;
+    const w = hb + 1;
+    const x = new Float64Array(b);
+    for (let i = 0; i < n; i++) {
+        for (let k = Math.max(0, i - hb); k < i; k++) x[i] -= L[i * w + (i - k)] * x[k];
+    }
+    for (let i = 0; i < n; i++) x[i] /= D[i];
+    for (let i = n - 1; i >= 0; i--) {
+        for (let r = i + 1; r <= Math.min(n - 1, i + hb); r++) x[i] -= L[r * w + (r - i)] * x[r];
+    }
+    return x;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Model definition
+// ═══════════════════════════════════════════════════════════════
+export interface MemberDef {
+    name: string;
+    group: string;               // design group (members of a group share the section)
+    i: number; j: number;        // main node indices
+    section: MemberSection;
+    reverse: boolean;            // section profile runs from j to i
+    Ly: number;                  // unbraced length out-of-plane / LTB (m)
+    sway: boolean;               // IS 800: Cmz = 0.9 (sway) or from ψ (non-sway)
+}
+
+export interface MemberLoad { member: number; wx: number; wy: number }   // kN/m of member length, global
+export interface NodalLoad { node: number; fx: number; fy: number; mz: number }   // kN, kN·m
+
+export interface LoadCaseDef { memberLoads: MemberLoad[]; nodalLoads: NodalLoad[] }
+
+export interface ComboDef {
+    name: string;
+    factors: Record<string, number>;      // load case → factor
+    kind: 'strength' | 'service';
+    gravityOnly: boolean;                  // notional loads apply
+}
+
+export interface SupportDef { node: number; ux: boolean; uy: boolean; rz: boolean }
+
+export interface DeflectionCheckDef {
+    name: string;
+    combos: string[];
+    // value (mm) from the displacement vector u (m, rad); limit in mm
+    evaluate: (u: Float64Array, fe: FEModel) => number;
+    limit: number;
+}
+
+export interface StructureModel {
+    code: SteelCode;
+    fy: number;
+    nodes: { x: number; y: number }[];
+    members: MemberDef[];
+    supports: SupportDef[];
+    loadCases: Record<string, LoadCaseDef>;     // 'D' gets self-weight added
+    combos: ComboDef[];
+    notionalNodes: number[];                    // main nodes receiving notional loads
+    deflections: DeflectionCheckDef[];
+    nSub: number;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Finite-element mesh
+// ═══════════════════════════════════════════════════════════════
+interface Element {
+    member: number; k: number;          // sub-element k of member
+    n1: number; n2: number;             // FE nodes
+    L: number; c: number; s: number;    // m, direction cosines
+    sMid: number;                       // member fraction (geometric) at mid
+    A: number; I: number;               // mm², mm⁴ at mid (for stiffness)
+}
+
+export interface FEModel {
+    nodeXY: { x: number; y: number }[];
+    mainNode: number[];                 // main node → FE node
+    memberNodes: number[][];            // FE nodes along each member (i → j)
+    elements: Element[];
+    ndof: number;
+    hb: number;
+    fixed: boolean[];
+}
+
+function buildFE(model: StructureModel): FEModel {
+    const nodeXY: { x: number; y: number }[] = [];
+    const mainNode = new Array(model.nodes.length).fill(-1);
+    const memberNodes: number[][] = [];
+    const elements: Element[] = [];
+    const nodeOf = (m: number) => {
+        if (mainNode[m] < 0) { mainNode[m] = nodeXY.length; nodeXY.push({ ...model.nodes[m] }); }
+        return mainNode[m];
+    };
+    model.members.forEach((mem, mi) => {
+        const A = model.nodes[mem.i], B = model.nodes[mem.j];
+        const list = [nodeOf(mem.i)];
+        for (let k = 1; k < model.nSub; k++) {
+            const r = k / model.nSub;
+            nodeXY.push({ x: A.x + (B.x - A.x) * r, y: A.y + (B.y - A.y) * r });
+            list.push(nodeXY.length - 1);
+        }
+        list.push(nodeOf(mem.j));
+        memberNodes.push(list);
+        const L = Math.hypot(B.x - A.x, B.y - A.y) / model.nSub;
+        const c = (B.x - A.x) / (L * model.nSub), s = (B.y - A.y) / (L * model.nSub);
+        for (let k = 0; k < model.nSub; k++) {
+            const sMid = (k + 0.5) / model.nSub;
+            const p = memberSectionAt(mem.section, mem.reverse ? 1 - sMid : sMid);
+            elements.push({ member: mi, k, n1: list[k], n2: list[k + 1], L, c, s, sMid, A: p.A, I: p.Iz });
+        }
+    });
+    const ndof = nodeXY.length * 3;
+    let hb = 0;
+    for (const e of elements) hb = Math.max(hb, Math.abs(e.n1 - e.n2) * 3 + 2);
+    const fixed = new Array(ndof).fill(false);
+    for (const sp of model.supports) {
+        const n = mainNode[sp.node];
+        if (sp.ux) fixed[3 * n] = true;
+        if (sp.uy) fixed[3 * n + 1] = true;
+        if (sp.rz) fixed[3 * n + 2] = true;
+    }
+    return { nodeXY, mainNode, memberNodes, elements, ndof, hb, fixed };
+}
+
+// local stiffness (kN, m) — E in MPa, A mm², I mm⁴
+function kLocal(e: Element, E: number, fA: number, fI: number): number[][] {
+    const EA = E * e.A * 1e-3 * fA, EI = E * e.I * 1e-9 * fI, L = e.L;
+    const a = EA / L, b = 12 * EI / L ** 3, c = 6 * EI / L ** 2, d = 4 * EI / L, f = 2 * EI / L;
+    return [
+        [a, 0, 0, -a, 0, 0],
+        [0, b, c, 0, -b, c],
+        [0, c, d, 0, -c, f],
+        [-a, 0, 0, a, 0, 0],
+        [0, -b, -c, 0, b, -c],
+        [0, c, f, 0, -c, d],
+    ];
+}
+
+// consistent geometric stiffness, N tension positive (kN)
+function kgLocal(L: number, N: number): number[][] {
+    const q = N / L;
+    return [
+        [0, 0, 0, 0, 0, 0],
+        [0, q * 6 / 5, q * L / 10, 0, -q * 6 / 5, q * L / 10],
+        [0, q * L / 10, q * 2 * L * L / 15, 0, -q * L / 10, -q * L * L / 30],
+        [0, 0, 0, 0, 0, 0],
+        [0, -q * 6 / 5, -q * L / 10, 0, q * 6 / 5, -q * L / 10],
+        [0, q * L / 10, -q * L * L / 30, 0, -q * L / 10, q * 2 * L * L / 15],
+    ];
+}
+
+const toGlobal = (e: Element, kl: number[][]): number[][] => {
+    const { c, s } = e;
+    const T = [
+        [c, s, 0, 0, 0, 0], [-s, c, 0, 0, 0, 0], [0, 0, 1, 0, 0, 0],
+        [0, 0, 0, c, s, 0], [0, 0, 0, -s, c, 0], [0, 0, 0, 0, 0, 1],
+    ];
+    const kg: number[][] = Array.from({ length: 6 }, () => new Array(6).fill(0));
+    for (let i = 0; i < 6; i++) for (let j = 0; j < 6; j++) {
+        let v = 0;
+        for (let p = 0; p < 6; p++) {
+            if (T[p][i] === 0) continue;
+            for (let q = 0; q < 6; q++) if (T[q][j] !== 0) v += T[p][i] * kl[p][q] * T[q][j];
+        }
+        kg[i][j] = v;
+    }
+    return kg;
+};
+
+const dofs = (e: Element) => [3 * e.n1, 3 * e.n1 + 1, 3 * e.n1 + 2, 3 * e.n2, 3 * e.n2 + 1, 3 * e.n2 + 2];
+
+type Stiff = { a: number; i: number }[];
+
+// Element matrices in global axes, computed once per mesh: axial part (per
+// unit EA factor), bending part (per unit EI factor) and geometric stiffness
+// per unit axial force. Assembly is then a scaled sum.
+interface ElementMats { KA: number[][]; KB: number[][]; G: number[][] }
+const matCache = new WeakMap<FEModel, { E: number; mats: ElementMats[] }>();
+
+function elementMats(fe: FEModel, E: number): ElementMats[] {
+    const hit = matCache.get(fe);
+    if (hit && hit.E === E) return hit.mats;
+    const mats = fe.elements.map(e => {
+        const full = kLocal(e, E, 1, 1);
+        const axialOnly = kLocal(e, E, 1, 0);
+        const bend = full.map((row, i) => row.map((v, j) => v - axialOnly[i][j]));
+        return { KA: toGlobal(e, axialOnly), KB: toGlobal(e, bend), G: toGlobal(e, kgLocal(e.L, 1)) };
+    });
+    matCache.set(fe, { E, mats });
+    return mats;
+}
+
+function assemble(fe: FEModel, E: number, stiff: Stiff, axial: number[] | null, lambda = 1): BandMatrix {
+    const K = new BandMatrix(fe.ndof, fe.hb);
+    const mats = elementMats(fe, E);
+    fe.elements.forEach((e, idx) => {
+        const { KA, KB, G } = mats[idx];
+        const fa = stiff[idx].a, fi = stiff[idx].i, g = axial ? lambda * axial[idx] : 0;
+        const d = dofs(e);
+        for (let i = 0; i < 6; i++) {
+            const I = d[i];
+            if (fe.fixed[I]) continue;
+            for (let j = 0; j <= i; j++) {
+                const J = d[j];
+                if (fe.fixed[J]) continue;
+                K.add(I, J, fa * KA[i][j] + fi * KB[i][j] + g * G[i][j]);
+            }
+        }
+    });
+    for (let i = 0; i < fe.ndof; i++) if (fe.fixed[i]) K.add(i, i, 1);
+    return K;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Loads
+// ═══════════════════════════════════════════════════════════════
+interface ElementLoad { wx: number; wy: number }   // global kN/m on each element
+
+interface FactoredLoads { F: Float64Array; elemLoads: ElementLoad[]; totalGravity: number }
+
+function combineLoads(model: StructureModel, fe: FEModel, combo: ComboDef): FactoredLoads {
+    const F = new Float64Array(fe.ndof);
+    const elemLoads: ElementLoad[] = fe.elements.map(() => ({ wx: 0, wy: 0 }));
+    let totalGravity = 0;
+    for (const [lc, factor] of Object.entries(combo.factors)) {
+        const def = model.loadCases[lc];
+        if (!def || !factor) continue;
+        for (const ml of def.memberLoads) {
+            fe.elements.forEach((e, idx) => {
+                if (e.member !== ml.member) return;
+                elemLoads[idx].wx += factor * ml.wx;
+                elemLoads[idx].wy += factor * ml.wy;
+            });
+        }
+        if (lc === 'D') {
+            fe.elements.forEach((e, idx) => { elemLoads[idx].wy -= factor * e.A * 1e-6 * STEEL_UNIT_WEIGHT; });
+        }
+        for (const nl of def.nodalLoads) {
+            const n = fe.mainNode[nl.node];
+            F[3 * n] += factor * nl.fx;
+            F[3 * n + 1] += factor * nl.fy;
+            F[3 * n + 2] += factor * nl.mz;
+            totalGravity += -factor * nl.fy;
+        }
+    }
+    fe.elements.forEach((e, idx) => {
+        const { wx, wy } = elemLoads[idx];
+        totalGravity += -wy * e.L;
+        const f = equivalentNodal(e, wx, wy);
+        const d = dofs(e);
+        for (let i = 0; i < 6; i++) F[d[i]] += f[i];
+    });
+    for (let i = 0; i < fe.ndof; i++) if (fe.fixed[i]) F[i] = 0;
+    return { F, elemLoads, totalGravity };
+}
+
+/** Consistent nodal loads (global) of a uniform load wx, wy (kN/m). */
+function equivalentNodal(e: Element, wx: number, wy: number): number[] {
+    const { c, s, L } = e;
+    const qa = wx * c + wy * s, qt = -wx * s + wy * c;           // local
+    const fl = [qa * L / 2, qt * L / 2, qt * L * L / 12, qa * L / 2, qt * L / 2, -qt * L * L / 12];
+    return [
+        c * fl[0] - s * fl[1], s * fl[0] + c * fl[1], fl[2],
+        c * fl[3] - s * fl[4], s * fl[3] + c * fl[4], fl[5],
+    ];
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Solution
+// ═══════════════════════════════════════════════════════════════
+export interface ElementForces { N1: number; V1: number; M1: number; N2: number; V2: number; M2: number }  // kN, kN·m, tension +
+
+interface Solution {
+    u: Float64Array;
+    forces: ElementForces[];
+    axial: number[];             // mean axial force per element (kN, tension +)
+    stable: boolean;
+    iterations: number;
+}
+
+function elementForces(fe: FEModel, E: number, stiff: Stiff, u: Float64Array, loads: ElementLoad[], axial: number[] | null): { forces: ElementForces[]; axial: number[] } {
+    const forces: ElementForces[] = [];
+    const ax: number[] = [];
+    fe.elements.forEach((e, idx) => {
+        const d = dofs(e);
+        const { c, s } = e;
+        const ug = d.map(i => u[i]);
+        const ul = [c * ug[0] + s * ug[1], -s * ug[0] + c * ug[1], ug[2], c * ug[3] + s * ug[4], -s * ug[3] + c * ug[4], ug[5]];
+        const kl = kLocal(e, E, stiff[idx].a, stiff[idx].i);
+        if (axial) {
+            const g = kgLocal(e.L, axial[idx]);
+            for (let i = 0; i < 6; i++) for (let j = 0; j < 6; j++) kl[i][j] += g[i][j];
+        }
+        const { wx, wy } = loads[idx];
+        const qa = wx * c + wy * s, qt = -wx * s + wy * c, L = e.L;
+        const feq = [qa * L / 2, qt * L / 2, qt * L * L / 12, qa * L / 2, qt * L / 2, -qt * L * L / 12];
+        const f = kl.map((row, i) => row.reduce((acc, v, j) => acc + v * ul[j], 0) - feq[i]);
+        // internal actions: N tension +, V, M (sagging about local z with the i→j axis)
+        forces.push({ N1: -f[0], V1: f[1], M1: -f[2], N2: f[3], V2: -f[4], M2: f[5] });
+        ax.push(0.5 * (-f[0] + f[3]));
+    });
+    return { forces, axial: ax };
+}
+
+function solve(fe: FEModel, E: number, stiff: Stiff, loads: FactoredLoads, secondOrder: boolean): Solution {
+    let axial: number[] | null = null;
+    let u: Float64Array = new Float64Array(fe.ndof);
+    let res = { forces: [] as ElementForces[], axial: [] as number[] };
+    const maxIt = secondOrder ? 30 : 1;
+    let it = 0;
+    for (; it < maxIt; it++) {
+        const K = assemble(fe, E, stiff, axial);
+        const f = ldl(K);
+        if (f.neg > 0 || f.singular) return { u, forces: res.forces, axial: res.axial, stable: false, iterations: it };
+        u = ldlSolve(f, loads.F);
+        const prev = axial;
+        res = elementForces(fe, E, stiff, u, loads.elemLoads, axial);
+        axial = res.axial;
+        if (!secondOrder) break;
+        if (prev) {
+            const scale = Math.max(1, ...axial.map(Math.abs));
+            const change = Math.max(...axial.map((v, i) => Math.abs(v - prev[i])));
+            if (change < 1e-5 * scale) break;
+        }
+    }
+    return { u, forces: res.forces, axial: res.axial, stable: true, iterations: it + 1 };
+}
+
+/** Smallest λ > 0 with K + λ·KG(axial) singular (Sturm count bisection). */
+function bucklingFactor(fe: FEModel, E: number, stiff: Stiff, axial: number[]): number {
+    if (!axial.some(a => a < -1e-9)) return Infinity;
+    const count = (lam: number) => ldl(assemble(fe, E, stiff, axial, lam)).neg;
+    let lo = 0, hi = 1;
+    while (count(hi) === 0) { hi *= 2; if (hi > 1e6) return Infinity; }
+    for (let k = 0; k < 40 && (hi - lo) > 1e-3 * hi; k++) {           // 0.1 % on the load factor
+        const mid = 0.5 * (lo + hi);
+        if (count(mid) > 0) hi = mid; else lo = mid;
+    }
+    return 0.5 * (lo + hi);
+}
+
+const nominal = (fe: FEModel): Stiff => fe.elements.map(() => ({ a: 1, i: 1 }));
+
+/** Elastic buckling load (kN) of a tapered member pinned at both ends (K = 1). */
+function memberPinnedBuckling(mem: MemberDef, L: number, E: number, nSub = 16): number {
+    const model: StructureModel = {
+        code: 'AISC360', fy: 0, nodes: [{ x: 0, y: 0 }, { x: L, y: 0 }],
+        members: [{ ...mem, i: 0, j: 1 }],
+        supports: [{ node: 0, ux: true, uy: true, rz: false }, { node: 1, ux: false, uy: true, rz: false }],
+        loadCases: {}, combos: [], notionalNodes: [], deflections: [], nSub,
+    };
+    const fe = buildFE(model);
+    return bucklingFactor(fe, E, nominal(fe), fe.elements.map(() => -1));
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Design
+// ═══════════════════════════════════════════════════════════════
+export interface StationResult {
+    s: number;                  // geometric fraction along the member (i → j)
+    x: number; y: number;       // global position (m)
+    D: number;                  // depth (mm)
+    N: number; V: number; M: number;   // kN, kN, kN·m (governing combination)
+    util: number;
+    combo: string;
+    governing: string;
+}
+
+export interface MemberResult {
+    name: string;
+    group: string;
+    length: number;
+    mass: number;
+    stations: StationResult[];          // envelope over the strength combinations
+    maxUtil: number;
+    governing: { combo: string; s: number; check: string; detail: ISStationResult | AISCStationResult | null; section: SectionProps | null };
+    segments: { from: number; to: number; minDepth: number; Cb?: number; CmLT?: number; chiLT?: number; FnLTB?: number }[];
+    PeIn?: number;                      // AISC: pinned-pinned member buckling load (kN)
+}
+
+export interface ComboResult {
+    name: string;
+    kind: 'strength' | 'service';
+    stable: boolean;
+    gammaE: number;                     // elastic buckling load factor (first-order axial forces)
+    ampRatio: number;                   // Δ2nd / Δ1st (max horizontal node displacement)
+    notional: boolean;
+    reactions: { node: number; Rx: number; Ry: number; Mz: number }[];
+    members: { name: string; s: number[]; N: number[]; V: number[]; M: number[] }[];
+    maxDisp: { ux: number; uy: number };
+}
+
+export interface DeflectionResult { name: string; combo: string; value: number; limit: number; ratio: number }
+
+export interface DesignResult {
+    code: SteelCode;
+    ok: boolean;
+    maxUtil: number;
+    mass: number;                        // kg
+    members: MemberResult[];
+    groups: { group: string; maxUtil: number; member: string; mass: number }[];
+    combos: ComboResult[];
+    deflections: DeflectionResult[];
+    warnings: string[];
+    geometry: { nodes: { x: number; y: number }[]; members: { name: string; i: number; j: number }[] };
+}
+
+const interp = (xs: number[], ys: number[], x: number) => {
+    for (let k = 0; k < xs.length - 1; k++) {
+        if (x <= xs[k + 1] + 1e-12) {
+            const r = (x - xs[k]) / Math.max(1e-12, xs[k + 1] - xs[k]);
+            return ys[k] + (ys[k + 1] - ys[k]) * r;
+        }
+    }
+    return ys[ys.length - 1];
+};
+
+export function designStructure(model: StructureModel, opts: { detail?: boolean } = {}): DesignResult {
+    const { code, fy } = model;
+    const E = code === 'IS800' ? IS800.E : AISC.E;
+    const fe = buildFE(model);
+    const warnings: string[] = [];
+    const memberLen = model.members.map(m => Math.hypot(model.nodes[m.j].x - model.nodes[m.i].x, model.nodes[m.j].y - model.nodes[m.i].y));
+    const secAt = (mi: number, s: number) => memberSectionAt(model.members[mi].section, model.members[mi].reverse ? 1 - s : s);
+
+    // AISC: pinned-pinned elastic buckling of each member (K = 1)
+    const peCache = new Map<string, number>();
+    const PeIn = model.members.map((m, mi) => {
+        if (code !== 'AISC360') return Infinity;
+        const k = JSON.stringify([m.section, m.reverse ? 1 : 0, memberLen[mi].toFixed(6)]);
+        const kr = JSON.stringify([m.section, m.reverse ? 0 : 1, memberLen[mi].toFixed(6)]);   // mirror has the same Pe
+        const hit = peCache.get(k) ?? peCache.get(kr);
+        if (hit !== undefined) return hit;
+        const v = memberPinnedBuckling(m, memberLen[mi], E);
+        peCache.set(k, v);
+        return v;
+    });
+
+    // Unbraced segments (out-of-plane / LTB) and their critical sections
+    const segDefs = model.members.map((m, mi) => {
+        const n = Math.max(1, Math.ceil(memberLen[mi] / Math.max(0.1, m.Ly) - 1e-9));
+        return Array.from({ length: n }, (_, k) => {
+            const from = k / n, to = (k + 1) / n;
+            let pMin = secAt(mi, from);
+            for (let q = 1; q <= 8; q++) {
+                const p = secAt(mi, from + (to - from) * q / 8);
+                if (p.D < pMin.D) pMin = p;
+            }
+            return { from, to, pMin, Lseg: memberLen[mi] / n };
+        });
+    });
+
+    const stationS = Array.from({ length: model.nSub + 1 }, (_, k) => k / model.nSub);
+    const env: StationResult[][] = model.members.map((m, mi) => stationS.map(s => {
+        const n = fe.memberNodes[mi][Math.round(s * model.nSub)];
+        return { s, x: fe.nodeXY[n].x, y: fe.nodeXY[n].y, D: secAt(mi, s).D, N: 0, V: 0, M: 0, util: 0, combo: '', governing: '' };
+    }));
+    const gov = model.members.map(() => ({ util: -1, combo: '', s: 0, check: '', detail: null as ISStationResult | AISCStationResult | null, section: null as SectionProps | null }));
+    // per member: segment data of each strength combination (reported for the governing one)
+    const segByCombo: Record<string, MemberResult['segments']>[] = model.members.map(() => ({}));
+    const combos: ComboResult[] = [];
+    const deflections: DeflectionResult[] = [];
+
+    for (const combo of model.combos) {
+        const strength = combo.kind === 'strength';
+        // AISC direct analysis (strength): 0.8·EA and 0.8·τb·EI; otherwise nominal
+        let stiff: Stiff = fe.elements.map(() => (strength && code === 'AISC360' ? { a: 0.8, i: 0.8 } : { a: 1, i: 1 }));
+        const loads = combineLoads(model, fe, combo);
+        const notionalRatio = code === 'IS800' ? 0.005 : 0.002;
+        const addNotional = (L: FactoredLoads) => {
+            const F = new Float64Array(L.F);
+            const nodes = model.notionalNodes;
+            for (const mn of nodes) F[3 * fe.mainNode[mn]] += notionalRatio * L.totalGravity / nodes.length;
+            return { ...L, F };
+        };
+        let useNotional = strength && combo.gravityOnly && model.notionalNodes.length > 0;
+        let sol = solve(fe, E, stiff, useNotional ? addNotional(loads) : loads, strength);
+        const first = solve(fe, E, stiff, useNotional ? addNotional(loads) : loads, false);
+        const maxUx = (u: Float64Array) => Math.max(...Array.from({ length: fe.nodeXY.length }, (_, n) => Math.abs(u[3 * n])));
+        let ampRatio = maxUx(first.u) > 1e-12 ? maxUx(sol.u) / maxUx(first.u) : 1;
+        if (strength && code === 'AISC360' && !useNotional && ampRatio > 1.7 && model.notionalNodes.length > 0) {
+            useNotional = true;                                         // C2.2b(4)
+            sol = solve(fe, E, stiff, addNotional(loads), true);
+        }
+        if (strength && code === 'AISC360' && sol.stable) {
+            // τb (C2.3): αPr/Pns > 0.5 → τb = 4(αPr/Pns)(1 − αPr/Pns)
+            let changed = false;
+            stiff = fe.elements.map((e, idx) => {
+                const r = Math.max(0, -sol.axial[idx]) * 1e3 / (fy * e.A);
+                const tb = r > 0.5 ? 4 * r * (1 - r) : 1;
+                if (tb < 1) changed = true;
+                return { a: 0.8, i: 0.8 * Math.max(0.05, tb) };
+            });
+            if (changed) sol = solve(fe, E, stiff, useNotional ? addNotional(loads) : loads, true);
+        }
+        const gammaE = strength ? bucklingFactor(fe, E, nominal(fe), first.axial) : Infinity;
+        if (strength && sol.stable && first.u.some(v => v !== 0)) {
+            ampRatio = maxUx(first.u) > 1e-12 ? maxUx(sol.u) / maxUx(first.u) : 1;
+        }
+
+        // Member actions at stations
+        const memActs = model.members.map((m, mi) => {
+            const els = fe.elements.map((e, idx) => ({ e, idx })).filter(o => o.e.member === mi);
+            const N: number[] = [], V: number[] = [], M: number[] = [];
+            stationS.forEach((s, k) => {
+                const f = k === 0 ? sol.forces[els[0].idx] : sol.forces[els[k - 1].idx];
+                if (!f) { N.push(0); V.push(0); M.push(0); return; }
+                if (k === 0) { N.push(f.N1); V.push(f.V1); M.push(f.M1); } else { N.push(f.N2); V.push(f.V2); M.push(f.M2); }
+            });
+            return { name: m.name, s: stationS, N, V, M };
+        });
+
+        const reactions = model.supports.map(sp => {
+            // reaction = Σ element end forces at the node − applied nodal load
+            const n = fe.mainNode[sp.node];
+            let Rx = 0, Ry = 0, Mz = 0;
+            fe.elements.forEach((e, idx) => {
+                const f = sol.forces[idx];
+                if (!f) return;
+                const { c, s } = e;
+                if (e.n1 === n) {
+                    const fx = -f.N1, fy = f.V1;
+                    Rx += c * fx - s * fy; Ry += s * fx + c * fy; Mz += -f.M1;
+                } else if (e.n2 === n) {
+                    const fx = f.N2, fy = -f.V2;
+                    Rx += c * fx - s * fy; Ry += s * fx + c * fy; Mz += f.M2;
+                }
+            });
+            return { node: sp.node, Rx, Ry, Mz };
+        });
+
+        combos.push({
+            name: combo.name, kind: combo.kind, stable: sol.stable, gammaE, ampRatio, notional: useNotional, reactions,
+            members: memActs,
+            maxDisp: {
+                ux: Math.max(...Array.from({ length: fe.nodeXY.length }, (_, n) => Math.abs(sol.u[3 * n]))) * 1000,
+                uy: Math.max(...Array.from({ length: fe.nodeXY.length }, (_, n) => Math.abs(sol.u[3 * n + 1]))) * 1000,
+            },
+        });
+
+        if (!strength) {
+            for (const dc of model.deflections) {
+                if (!dc.combos.includes(combo.name)) continue;
+                const value = dc.evaluate(sol.u, fe);
+                deflections.push({ name: dc.name, combo: combo.name, value, limit: dc.limit, ratio: value / dc.limit });
+            }
+            continue;
+        }
+        if (!sol.stable) {
+            warnings.push(`${combo.name}: frame unstable under the factored loads (second-order analysis)`);
+            model.members.forEach((m, mi) => { if (gov[mi].util < 99) { gov[mi] = { ...gov[mi], util: 99, combo: combo.name, check: 'instability' }; } });
+            continue;
+        }
+
+        // Station design
+        model.members.forEach((m, mi) => {
+            const act = memActs[mi];
+            const segs = segDefs[mi];
+            segs.forEach((sg) => {
+                const Mabs = (s: number) => Math.abs(interp(act.s, act.M, s)) * 1e6;   // N·mm
+                const q = (r: number) => Mabs(sg.from + (sg.to - sg.from) * r);
+                const Mmax = Math.max(...Array.from({ length: 9 }, (_, t) => q(t / 8)));
+                // equivalent moment factors of the segment
+                const Mi = interp(act.s, act.M, sg.from), Mj = interp(act.s, act.M, sg.to);
+                const big = Math.abs(Mi) >= Math.abs(Mj) ? Mi : Mj, small = big === Mi ? Mj : Mi;
+                const psi = Math.abs(big) > 1e-9 ? small / big : 1;
+                const interiorPeak = Mmax > 1.001 * Math.max(Math.abs(Mi), Math.abs(Mj)) * 1e6;
+                const CmLT = interiorPeak ? 1.0 : Math.max(0.4, 0.6 + 0.4 * psi);
+                const Cb = cbAISC(Mmax, q(0.25), q(0.5), q(0.75));
+                let chiLT = 1, lambdaLT = 0, FnLTB = fy;
+                if (code === 'IS800') {
+                    const l = ltbIS(sg.pMin, fy, sg.Lseg * 1000);
+                    chiLT = l.chiLT; lambdaLT = l.lambdaLT;
+                } else {
+                    FnLTB = ltbStressAISC(sg.pMin, fy, sg.Lseg * 1000, Cb).Fn;
+                }
+                (segByCombo[mi][combo.name] ??= []).push(code === 'IS800'
+                    ? { from: sg.from, to: sg.to, minDepth: sg.pMin.D, chiLT, CmLT }
+                    : { from: sg.from, to: sg.to, minDepth: sg.pMin.D, Cb, FnLTB });
+                const PeY = Math.PI ** 2 * E * sg.pMin.Iy / (sg.Lseg * 1000) ** 2;     // N
+                act.s.forEach((s, k) => {
+                    if (s < sg.from - 1e-9 || s > sg.to + 1e-9) return;
+                    const p = secAt(mi, s);
+                    const N = act.N[k] * 1e3, V = Math.abs(act.V[k]) * 1e3, M = Math.abs(act.M[k]) * 1e6;
+                    let util: number, gname: string, detail: ISStationResult | AISCStationResult;
+                    if (code === 'IS800') {
+                        const fccZ = N < 0 && Number.isFinite(gammaE) ? gammaE * (-N) / p.A : Infinity;
+                        const r = checkStationIS(p, fy, {
+                            N, M, V, fccZ, fccY: PeY / p.A, chiLT, lambdaLT, CmLT,
+                            Cmz: m.sway ? 0.9 : Math.max(0.4, 0.6 + 0.4 * psi),
+                        });
+                        util = r.max; gname = r.governing; detail = r;
+                    } else {
+                        const r = checkStationAISC(p, fy, { N, M, V, FeIn: PeIn[mi] * 1e3 / p.A, FeOut: PeY / p.A, FnLTB });
+                        util = r.max; gname = r.governing; detail = r;
+                    }
+                    const st = env[mi][k];
+                    if (util > st.util) {
+                        env[mi][k] = { ...st, N: act.N[k], V: act.V[k], M: act.M[k], util, combo: combo.name, governing: gname };
+                    }
+                    if (util > gov[mi].util) {
+                        gov[mi] = { util, combo: combo.name, s, check: gname, detail: opts.detail === false ? null : detail, section: p };
+                    }
+                });
+            });
+        });
+    }
+
+    const members: MemberResult[] = model.members.map((m, mi) => ({
+        name: m.name, group: m.group, length: memberLen[mi], mass: memberMass(m.section, memberLen[mi]),
+        stations: env[mi], maxUtil: gov[mi].util,
+        governing: { combo: gov[mi].combo, s: gov[mi].s, check: gov[mi].check, detail: gov[mi].detail, section: gov[mi].section },
+        segments: segByCombo[mi][gov[mi].combo] ?? segDefs[mi].map(sg => ({ from: sg.from, to: sg.to, minDepth: sg.pMin.D })),
+        PeIn: code === 'AISC360' ? PeIn[mi] : undefined,
+    }));
+    const groupNames = [...new Set(model.members.map(m => m.group))];
+    const groups = groupNames.map(g => {
+        const ms = members.filter(m => m.group === g);
+        const worst = ms.reduce((a, b) => (b.maxUtil > a.maxUtil ? b : a));
+        return { group: g, maxUtil: worst.maxUtil, member: worst.name, mass: ms.reduce((s, m) => s + m.mass, 0) };
+    });
+    const maxUtil = Math.max(...members.map(m => m.maxUtil), ...deflections.map(d => d.ratio));
+    const mass = members.reduce((s, m) => s + m.mass, 0);
+    return {
+        code, ok: maxUtil <= 1 + 1e-9 && combos.every(c => c.stable), maxUtil, mass, members, groups, combos, deflections, warnings,
+        geometry: { nodes: model.nodes, members: model.members.map(m => ({ name: m.name, i: m.i, j: m.j })) },
+    };
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Load combinations
+// ═══════════════════════════════════════════════════════════════
+export function strengthCombos(code: SteelCode, windCases: string[], hasLive = true): ComboDef[] {
+    const c: ComboDef[] = [];
+    const L: Record<string, number> = hasLive ? { L: 1 } : {};
+    const scale = (f: Record<string, number>, k: number) => Object.fromEntries(Object.entries(f).map(([a, b]) => [a, b * k]));
+    if (code === 'IS800') {
+        // IS 800:2007 Table 4
+        c.push({ name: hasLive ? '1.5(D+L)' : '1.5D', factors: { D: 1.5, ...scale(L, 1.5) }, kind: 'strength', gravityOnly: true });
+        for (const w of windCases) {
+            if (hasLive) c.push({ name: `1.2(D+L+${w})`, factors: { D: 1.2, L: 1.2, [w]: 1.2 }, kind: 'strength', gravityOnly: false });
+            c.push({ name: `1.5(D+${w})`, factors: { D: 1.5, [w]: 1.5 }, kind: 'strength', gravityOnly: false });
+            c.push({ name: `0.9D+1.5${w}`, factors: { D: 0.9, [w]: 1.5 }, kind: 'strength', gravityOnly: false });
+        }
+    } else {
+        // ASCE 7-22 §2.3.1 (L = roof live load Lr)
+        c.push({ name: '1.4D', factors: { D: 1.4 }, kind: 'strength', gravityOnly: true });
+        if (hasLive) c.push({ name: '1.2D+1.6Lr', factors: { D: 1.2, L: 1.6 }, kind: 'strength', gravityOnly: true });
+        for (const w of windCases) {
+            if (hasLive) c.push({ name: `1.2D+1.6Lr+0.5${w}`, factors: { D: 1.2, L: 1.6, [w]: 0.5 }, kind: 'strength', gravityOnly: false });
+            c.push({ name: `1.2D+1.0${w}${hasLive ? '+0.5Lr' : ''}`, factors: { D: 1.2, [w]: 1.0, ...scale(L, 0.5) }, kind: 'strength', gravityOnly: false });
+            c.push({ name: `0.9D+1.0${w}`, factors: { D: 0.9, [w]: 1.0 }, kind: 'strength', gravityOnly: false });
+        }
+    }
+    return c;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Portal frame
+// ═══════════════════════════════════════════════════════════════
+export interface PortalFrameInput {
+    code: SteelCode;
+    fy: number;                 // MPa
+    span: number;               // m, column centre lines
+    eaveHeight: number;         // m
+    roofSlope: number;          // degrees
+    baySpacing: number;         // m
+    base: 'pinned' | 'fixed';
+    column: MemberSection;      // profile: base (0) → eave (1)
+    rafter: MemberSection;      // profile: eave (0) → apex (1)
+    dead: number;               // kN/m² on the roof slope (sheeting, purlins, services, collateral)
+    live: number;               // kN/m² on plan (roof live load)
+    windPressure: number;       // kN/m² — IS 875-3: pd; ASCE 7-22: qh·Kd
+    cpe: { windwardWall: number; leewardWall: number; windwardRoof: number; leewardRoof: number };  // Cpe or GCp
+    cpi: number[];              // internal pressure coefficients (e.g. +0.2, −0.2)
+    columnLy: number;           // m — flange-brace spacing on the columns
+    rafterLy: number;           // m — flange-brace spacing on the rafters
+    verticalLimit: number;      // span / this (rafter, live load)
+    lateralLimit: number;       // height / this (eave, wind)
+    windServiceFactor: number;  // wind factor for the drift check
+    nSub?: number;
+}
+
+export function portalFrameModel(inp: PortalFrameInput): StructureModel {
+    const th = inp.roofSlope * Math.PI / 180;
+    const S = inp.span, H = inp.eaveHeight, B = inp.baySpacing;
+    const rise = S / 2 * Math.tan(th);
+    const nodes = [{ x: 0, y: 0 }, { x: 0, y: H }, { x: S / 2, y: H + rise }, { x: S, y: H }, { x: S, y: 0 }];
+    // chain order keeps the band narrow: base L → eave L → apex → eave R → base R
+    const members: MemberDef[] = [
+        { name: 'Column L', group: 'Column', i: 0, j: 1, section: inp.column, reverse: false, Ly: inp.columnLy, sway: true },
+        { name: 'Rafter L', group: 'Rafter', i: 1, j: 2, section: inp.rafter, reverse: false, Ly: inp.rafterLy, sway: true },
+        { name: 'Rafter R', group: 'Rafter', i: 2, j: 3, section: inp.rafter, reverse: true, Ly: inp.rafterLy, sway: true },
+        { name: 'Column R', group: 'Column', i: 3, j: 4, section: inp.column, reverse: true, Ly: inp.columnLy, sway: true },
+    ];
+    const rest = inp.base === 'fixed';
+    const supports = [{ node: 0, ux: true, uy: true, rz: rest }, { node: 4, ux: true, uy: true, rz: rest }];
+    const c = Math.cos(th);
+    // Dead on slope; live on plan (per member length: × cos θ)
+    const D: LoadCaseDef = { memberLoads: [1, 2].map(m => ({ member: m, wx: 0, wy: -inp.dead * B })), nodalLoads: [] };
+    const L: LoadCaseDef = { memberLoads: [1, 2].map(m => ({ member: m, wx: 0, wy: -inp.live * B * c })), nodalLoads: [] };
+    // Wind from the left. Net pressure p·(Cpe − Cpi) acts toward the surface
+    // when positive: force = −p_net·n_out per unit length.
+    const windCase = (cpi: number): LoadCaseDef => {
+        const p = inp.windPressure * B;
+        const pn = (cpe: number) => p * (cpe - cpi);
+        const nL = { x: -Math.sin(th), y: Math.cos(th) };    // outward normal, windward roof
+        const nR = { x: Math.sin(th), y: Math.cos(th) };     // leeward roof
+        return {
+            memberLoads: [
+                { member: 0, wx: pn(inp.cpe.windwardWall), wy: 0 },                 // outward normal −x
+                { member: 1, wx: -pn(inp.cpe.windwardRoof) * nL.x, wy: -pn(inp.cpe.windwardRoof) * nL.y },
+                { member: 2, wx: -pn(inp.cpe.leewardRoof) * nR.x, wy: -pn(inp.cpe.leewardRoof) * nR.y },
+                { member: 3, wx: -pn(inp.cpe.leewardWall), wy: 0 },                 // outward normal +x
+            ],
+            nodalLoads: [],
+        };
+    };
+    const loadCases: Record<string, LoadCaseDef> = { D, L };
+    const windNames: string[] = [];
+    inp.cpi.forEach((cpi, k) => {
+        const name = `W${k + 1}`;
+        loadCases[name] = windCase(cpi);
+        windNames.push(name);
+    });
+    const combos = strengthCombos(inp.code, windNames, inp.live > 0);
+    combos.push({ name: 'SLS: L', factors: { L: 1 }, kind: 'service', gravityOnly: true });
+    windNames.forEach(w => combos.push({ name: `SLS: ${inp.windServiceFactor}${w}`, factors: { [w]: inp.windServiceFactor }, kind: 'service', gravityOnly: false }));
+    const deflections: DeflectionCheckDef[] = [
+        {
+            name: `Rafter vertical (span/${inp.verticalLimit})`, combos: ['SLS: L'], limit: S * 1000 / inp.verticalLimit,
+            evaluate: (u, fe) => {
+                // largest vertical movement of the rafter nodes relative to the eaves
+                const eaveL = fe.mainNode[1], eaveR = fe.mainNode[3];
+                return Math.max(...[...fe.memberNodes[1], ...fe.memberNodes[2]].map(n =>
+                    Math.abs(u[3 * n + 1] - 0.5 * (u[3 * eaveL + 1] + u[3 * eaveR + 1])))) * 1000;
+            },
+        },
+        {
+            name: `Eave drift (H/${inp.lateralLimit})`, combos: windNames.map(w => `SLS: ${inp.windServiceFactor}${w}`),
+            limit: H * 1000 / inp.lateralLimit,
+            evaluate: (u, fe) => Math.max(Math.abs(u[3 * fe.mainNode[1]]), Math.abs(u[3 * fe.mainNode[3]])) * 1000,
+        },
+    ];
+    return {
+        code: inp.code, fy: inp.fy, nodes, members, supports, loadCases, combos,
+        notionalNodes: [1, 3], deflections, nSub: inp.nSub ?? 10,
+    };
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Single column
+// ═══════════════════════════════════════════════════════════════
+export interface ColumnInput {
+    code: SteelCode;
+    fy: number;
+    height: number;                     // m
+    base: 'pinned' | 'fixed';
+    top: 'free' | 'braced';             // braced = held laterally at the top (no sway)
+    member: MemberSection;              // profile base (0) → top (1)
+    P: { D: number; L: number; W: number };      // kN at the top, compression positive
+    Mtop: { D: number; L: number; W: number };   // kN·m at the top
+    wWind: number;                      // kN/m lateral along the height (wind)
+    Ly: number;                         // m — out-of-plane / LTB unbraced length
+    lateralLimit: number;               // H / this under wind
+    windServiceFactor: number;
+    nSub?: number;
+}
+
+export function columnModel(inp: ColumnInput): StructureModel {
+    const H = inp.height;
+    const nodes = [{ x: 0, y: 0 }, { x: 0, y: H }];
+    const members: MemberDef[] = [{ name: 'Column', group: 'Column', i: 0, j: 1, section: inp.member, reverse: false, Ly: inp.Ly, sway: inp.top === 'free' }];
+    const supports: SupportDef[] = [{ node: 0, ux: true, uy: true, rz: inp.base === 'fixed' }];
+    if (inp.top === 'braced') supports.push({ node: 1, ux: true, uy: false, rz: false });
+    if (inp.base === 'pinned' && inp.top === 'free') throw new Error('A column pinned at the base must be braced at the top');
+    const lc = (P: number, M: number, w = 0): LoadCaseDef => ({
+        memberLoads: w ? [{ member: 0, wx: w, wy: 0 }] : [],
+        nodalLoads: [{ node: 1, fx: 0, fy: -P, mz: M }],
+    });
+    const loadCases = { D: lc(inp.P.D, inp.Mtop.D), L: lc(inp.P.L, inp.Mtop.L), W1: lc(inp.P.W, inp.Mtop.W, inp.wWind) };
+    const hasWind = inp.P.W !== 0 || inp.Mtop.W !== 0 || inp.wWind !== 0;
+    const combos = strengthCombos(inp.code, hasWind ? ['W1'] : [], inp.P.L !== 0 || inp.Mtop.L !== 0);
+    const deflections: DeflectionCheckDef[] = [];
+    if (hasWind) {
+        combos.push({ name: `SLS: ${inp.windServiceFactor}W1`, factors: { W1: inp.windServiceFactor }, kind: 'service', gravityOnly: false });
+        deflections.push({
+            name: `Top drift (H/${inp.lateralLimit})`, combos: [`SLS: ${inp.windServiceFactor}W1`], limit: H * 1000 / inp.lateralLimit,
+            evaluate: (u, fe) => Math.max(...fe.memberNodes[0].map(n => Math.abs(u[3 * n]))) * 1000,
+        });
+    }
+    return {
+        code: inp.code, fy: inp.fy, nodes, members, supports, loadCases, combos,
+        notionalNodes: inp.top === 'free' ? [1] : [], deflections, nSub: inp.nSub ?? 12,
+    };
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Single beam
+// ═══════════════════════════════════════════════════════════════
+export interface BeamInput {
+    code: SteelCode;
+    fy: number;
+    span: number;                       // m
+    supports: 'pinned-pinned' | 'fixed-fixed' | 'fixed-pinned' | 'cantilever';
+    member: MemberSection;              // profile left (0) → right (1)
+    w: { D: number; L: number; W: number };      // kN/m, downward positive (wind uplift negative)
+    P: { D: number; L: number; a: number };      // point load (kN) at a (m) from the left
+    Ly: number;                         // m — compression flange unbraced length
+    verticalLimit: number;              // span / this under live load
+    nSub?: number;
+}
+
+export function beamModel(inp: BeamInput): StructureModel {
+    const Ls = inp.span;
+    const withPoint = (inp.P.D !== 0 || inp.P.L !== 0) && inp.P.a > 0 && inp.P.a < Ls;
+    const nodes = withPoint ? [{ x: 0, y: 0 }, { x: inp.P.a, y: 0 }, { x: Ls, y: 0 }] : [{ x: 0, y: 0 }, { x: Ls, y: 0 }];
+    const last = nodes.length - 1;
+    const members: MemberDef[] = withPoint
+        ? [
+            { name: 'Beam (left)', group: 'Beam', i: 0, j: 1, section: splitSection(inp.member, 0, inp.P.a / Ls), reverse: false, Ly: inp.Ly, sway: false },
+            { name: 'Beam (right)', group: 'Beam', i: 1, j: 2, section: splitSection(inp.member, inp.P.a / Ls, 1), reverse: false, Ly: inp.Ly, sway: false },
+        ]
+        : [{ name: 'Beam', group: 'Beam', i: 0, j: 1, section: inp.member, reverse: false, Ly: inp.Ly, sway: false }];
+    const sup = inp.supports;
+    const supports: SupportDef[] = [];
+    if (sup === 'cantilever') supports.push({ node: 0, ux: true, uy: true, rz: true });
+    else {
+        supports.push({ node: 0, ux: true, uy: true, rz: sup !== 'pinned-pinned' });
+        supports.push({ node: last, ux: false, uy: true, rz: sup === 'fixed-fixed' });
+    }
+    const ml = (w: number) => members.map((_, k) => ({ member: k, wx: 0, wy: -w }));
+    const pl = (P: number): NodalLoad[] => (withPoint && P ? [{ node: 1, fx: 0, fy: -P, mz: 0 }] : []);
+    const loadCases: Record<string, LoadCaseDef> = {
+        D: { memberLoads: ml(inp.w.D), nodalLoads: pl(inp.P.D) },
+        L: { memberLoads: ml(inp.w.L), nodalLoads: pl(inp.P.L) },
+        W1: { memberLoads: ml(inp.w.W), nodalLoads: [] },
+    };
+    const hasWind = inp.w.W !== 0;
+    const hasLive = inp.w.L !== 0 || inp.P.L !== 0;
+    const combos = strengthCombos(inp.code, hasWind ? ['W1'] : [], hasLive);
+    const deflections: DeflectionCheckDef[] = [];
+    if (hasLive) {
+        combos.push({ name: 'SLS: L', factors: { L: 1 }, kind: 'service', gravityOnly: true });
+        const limitLen = sup === 'cantilever' ? 2 * Ls : Ls;
+        deflections.push({
+            name: `Vertical (${sup === 'cantilever' ? '2×' : ''}span/${inp.verticalLimit})`, combos: ['SLS: L'],
+            limit: limitLen * 1000 / inp.verticalLimit,
+            evaluate: (u, fe) => Math.max(...fe.memberNodes.flat().map(n => Math.abs(u[3 * n + 1]))) * 1000,
+        });
+    }
+    return { code: inp.code, fy: inp.fy, nodes, members, supports, loadCases, combos, notionalNodes: [], deflections, nSub: inp.nSub ?? 12 };
+}
+
+function depthOver(m: MemberSection, s: number): number {
+    const p = m.profile;
+    for (let k = 0; k < p.at.length - 1; k++) {
+        if (s <= p.at[k + 1] + 1e-12) {
+            const r = (s - p.at[k]) / Math.max(1e-12, p.at[k + 1] - p.at[k]);
+            return p.D[k] + (p.D[k + 1] - p.D[k]) * r;
+        }
+    }
+    return p.D[p.D.length - 1];
+}
+
+/** Part [a, b] (fractions) of a tapered member as a member of its own. */
+function splitSection(m: MemberSection, a: number, b: number): MemberSection {
+    const at = [0], D = [depthOver(m, a)];
+    m.profile.at.forEach((f, k) => {
+        if (f > a + 1e-9 && f < b - 1e-9) { at.push((f - a) / (b - a)); D.push(m.profile.D[k]); }
+    });
+    at.push(1); D.push(depthOver(m, b));
+    return { ...m, profile: { at, D } };
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Optimizer — minimum steel weight subject to every strength,
+//  stability and serviceability check, discrete plate sizes
+// ═══════════════════════════════════════════════════════════════
+export interface SteelOptimizeParams {
+    depthMin: number; depthMax: number; depthStep: number;   // mm
+    bfList: number[]; tfList: number[]; twList: number[];    // mm
+    maxPasses?: number;
+}
+
+export type SteelMode = 'frame' | 'column' | 'beam';
+export type SteelInput =
+    | { mode: 'frame'; input: PortalFrameInput }
+    | { mode: 'column'; input: ColumnInput }
+    | { mode: 'beam'; input: BeamInput };
+
+export function buildModel(si: SteelInput): StructureModel {
+    return si.mode === 'frame' ? portalFrameModel(si.input) : si.mode === 'column' ? columnModel(si.input) : beamModel(si.input);
+}
+
+/** Build the model and run the design. */
+export function runDesign(si: SteelInput, opts: { detail?: boolean } = {}): DesignResult {
+    return designStructure(buildModel(si), opts);
+}
+
+type VarKey = { group: 'a' | 'b'; field: 'D0' | 'D1' | 'bf' | 'tf' | 'tw' };
+
+export interface SteelOptimizeResult {
+    best: SteelInput | null;
+    result: DesignResult | null;
+    evaluations: number;
+    feasibleFound: number;
+    history: { mass: number; maxUtil: number }[];
+    approximate: true;
+}
+
+/**
+ * Discrete local search over plate sizes and taper depths — minimum steel
+ * mass subject to every strength, stability and serviceability check.
+ *   • two starts: the user's design (snapped to the lists) and the heaviest
+ *     combination; the lighter feasible result is kept;
+ *   • coordinate sweeps (each variable over its whole list, others fixed),
+ *     then exchange moves (one variable a step down, another a step up —
+ *     e.g. deeper web with thinner flanges, which single-variable sweeps
+ *     cannot reach when deflection governs); repeat until no move helps.
+ * Heuristic: the best design found, not a proven global minimum.
+ * Practical rules: tf ≥ tw; bf ≤ 30·tf; rafters deepest at the eave; columns
+ * of pinned-base frames deepest at the top.
+ */
+export function optimizeSteel(si: SteelInput, p: SteelOptimizeParams, onProgress?: (done: number, total: number, feasible: number) => void): SteelOptimizeResult {
+    const depths: number[] = [];
+    for (let d = p.depthMin; d <= p.depthMax + 1e-9; d += p.depthStep) depths.push(Math.round(d));
+    const sorted = (a: number[]) => [...new Set(a)].sort((x, y) => x - y);
+    const lists: Record<VarKey['field'], number[]> = { D0: depths, D1: depths, bf: sorted(p.bfList), tf: sorted(p.tfList), tw: sorted(p.twList) };
+
+    // Variables: group a = column / beam; group b = rafter (frame only)
+    const groupsOf = si.mode === 'frame' ? (['a', 'b'] as const) : (['a'] as const);
+    const keys: VarKey[] = [];
+    const getSec0 = (g: 'a' | 'b'): MemberSection =>
+        si.mode === 'frame' ? (g === 'a' ? si.input.column : si.input.rafter) : si.input.member;
+    for (const g of groupsOf) for (const f of ['D0', 'D1', 'bf', 'tf', 'tw'] as const) {
+        if (f === 'D1' && getSec0(g).profile.D.length < 2) continue;
+        keys.push({ group: g, field: f });
+    }
+
+    const getSec = (x: SteelInput, g: 'a' | 'b'): MemberSection =>
+        x.mode === 'frame' ? (g === 'a' ? x.input.column : x.input.rafter) : x.input.member;
+    const withSec = (x: SteelInput, g: 'a' | 'b', sec: MemberSection): SteelInput => {
+        if (x.mode === 'frame') return { mode: 'frame', input: { ...x.input, [g === 'a' ? 'column' : 'rafter']: sec } };
+        if (x.mode === 'column') return { mode: 'column', input: { ...x.input, member: sec } };
+        return { mode: 'beam', input: { ...x.input, member: sec } };
+    };
+    // D0 = depth at the first profile point; D1 = at the second and beyond
+    const varOf = (sec: MemberSection, q: number) => sec.profile.vars?.[q] ?? (q === 0 ? 0 : 1);
+    const getVar = (x: SteelInput, k: VarKey): number => {
+        const sec = getSec(x, k.group);
+        if (k.field === 'D0' || k.field === 'D1') {
+            const want = k.field === 'D0' ? 0 : 1;
+            const q = sec.profile.D.findIndex((_, i) => varOf(sec, i) === want);
+            return q >= 0 ? sec.profile.D[q] : NaN;
+        }
+        return sec[k.field];
+    };
+    const setVar = (x: SteelInput, k: VarKey, v: number): SteelInput => {
+        const sec = getSec(x, k.group);
+        if (k.field === 'D0' || k.field === 'D1') {
+            const want = k.field === 'D0' ? 0 : 1;
+            const D = sec.profile.D.map((d, i) => (varOf(sec, i) === want ? v : d));
+            return withSec(x, k.group, { ...sec, profile: { ...sec.profile, D } });
+        }
+        return withSec(x, k.group, { ...sec, [k.field]: v });
+    };
+    const practical = (x: SteelInput) => groupsOf.every(g => {
+        const sc = getSec(x, g);
+        if (sc.tf < sc.tw || sc.bf > 30 * sc.tf) return false;
+        if (x.mode === 'frame') {
+            const D = sc.profile.D;
+            if (g === 'b' && D.length > 1 && D[0] < D[1]) return false;                  // rafter haunch at the eave
+            if (g === 'a' && x.input.base === 'pinned' && D.length > 1 && D[1] < D[0]) return false;   // pinned-base column deepest at the top
+        }
+        return true;
+    });
+    const key = (x: SteelInput) => keys.map(k => getVar(x, k)).join('|');
+
+    let evaluations = 0, feasibleFound = 0;
+    const history: { mass: number; maxUtil: number }[] = [];
+    const memo = new Map<string, DesignResult>();
+    const budget = 2500;
+    const evaluate = (x: SteelInput): DesignResult => {
+        const kx = key(x);
+        const hit = memo.get(kx);
+        if (hit) return hit;
+        evaluations++;
+        const r = runDesign(x, { detail: false });
+        if (r.ok) feasibleFound++;
+        memo.set(kx, r);
+        if (onProgress && evaluations % 10 === 0) onProgress(evaluations, budget, feasibleFound);
+        return r;
+    };
+    const snapUp = (list: number[], v: number) => list.find(q => q >= v - 1e-9) ?? list[list.length - 1];
+
+    const descend = (start: SteelInput): { x: SteelInput; r: DesignResult } | null => {
+        let cur = start;
+        let curRes = evaluate(cur);
+        if (!curRes.ok || !practical(cur)) return null;
+        history.push({ mass: curRes.mass, maxUtil: curRes.maxUtil });
+        const tryMove = (trial: SteelInput) => {
+            if (!practical(trial) || evaluations >= budget) return false;
+            const r = evaluate(trial);
+            if (r.ok && r.mass < curRes.mass - 1e-6) {
+                cur = trial; curRes = r;
+                history.push({ mass: r.mass, maxUtil: r.maxUtil });
+                return true;
+            }
+            return false;
+        };
+        for (let round = 0; round < 20 && evaluations < budget; round++) {
+            // coordinate sweeps
+            let improved = true;
+            while (improved && evaluations < budget) {
+                improved = false;
+                for (const k of keys) for (const v of lists[k.field]) {
+                    if (v >= getVar(cur, k)) break;
+                    if (tryMove(setVar(cur, k, v))) improved = true;
+                }
+            }
+            // exchange moves: one variable a step down, another a step up
+            let exchanged = false;
+            outer: for (const k1 of keys) {
+                const l1 = lists[k1.field], i1 = l1.indexOf(getVar(cur, k1));
+                if (i1 <= 0) continue;
+                for (const k2 of keys) {
+                    if (k1 === k2) continue;
+                    const l2 = lists[k2.field], i2 = l2.indexOf(getVar(cur, k2));
+                    if (i2 < 0 || i2 >= l2.length - 1) continue;
+                    if (tryMove(setVar(setVar(cur, k1, l1[i1 - 1]), k2, l2[i2 + 1]))) { exchanged = true; break outer; }
+                }
+            }
+            if (!exchanged) break;
+        }
+        return { x: cur, r: curRes };
+    };
+
+    let userStart = si;
+    for (const k of keys) userStart = setVar(userStart, k, snapUp(lists[k.field], getVar(si, k)));
+    let heavy = si;
+    for (const k of keys) heavy = setVar(heavy, k, lists[k.field][lists[k.field].length - 1]);
+    const runs = [descend(userStart), descend(heavy)].filter((v): v is { x: SteelInput; r: DesignResult } => v !== null);
+    onProgress?.(budget, budget, feasibleFound);
+    if (!runs.length) return { best: null, result: evaluate(heavy), evaluations, feasibleFound, history, approximate: true };
+    const best = runs.reduce((a, b) => (b.r.mass < a.r.mass ? b : a));
+    return { best: best.x, result: runDesign(best.x), evaluations, feasibleFound, history, approximate: true };
+}
