@@ -8,7 +8,7 @@ import { chiIS, classifyIS, shearIS, mcrIS, IS800 } from '../lib/steelIS800';
 import { fcrE3, cbAISC, shearAISC, ltbStressAISC, classifyAISC, AISC } from '../lib/steelAISC360';
 import {
     runDesign, optimizeSteel, strengthCombos,
-    type BeamInput, type ColumnInput, type PortalFrameInput,
+    portalGeometry, craneReactions, type BeamInput, type ColumnInput, type PortalFrameInput, type MultiSpanFrameInput, type CraneInput,
 } from '../components/steelFrameEngine';
 
 const prism = (D: number, bf: number, tf: number, tw: number): MemberSection => ({ bf, tf, tw, profile: { at: [0, 1], D: [D, D] } });
@@ -160,6 +160,204 @@ describe('portal frame', () => {
             expect(r.mass).toBeGreaterThan(0);
         }
     });
+});
+
+describe('portal frame — unsymmetric frames and wind from the right', () => {
+    const base = (over: Partial<PortalFrameInput> = {}): PortalFrameInput => ({
+        code: 'IS800', fy: 345, span: 20, eaveHeight: 7, roofSlope: 6, baySpacing: 6, base: 'pinned',
+        column: { bf: 200, tf: 12, tw: 6, profile: { at: [0, 1], D: [300, 650] } },
+        rafter: { bf: 200, tf: 12, tw: 6, profile: { at: [0, 0.3, 1], D: [650, 400, 400] } },
+        dead: 0.25, live: 0.75, windPressure: 0.9,
+        cpe: { windwardWall: 0.7, leewardWall: -0.25, windwardRoof: -0.9, leewardRoof: -0.4 }, cpi: [0.2, -0.2],
+        columnLy: 2.5, rafterLy: 3, verticalLimit: 180, lateralLimit: 150, windServiceFactor: 1, nSub: 8, ...over,
+    });
+    const sls = (r: ReturnType<typeof runDesign>, name: string) => r.combos.find(c => c.name === name)!;
+    const sumRx = (c: ReturnType<typeof sls>) => c.reactions.reduce((a, x) => a + x.Rx, 0);
+    const sumRy = (c: ReturnType<typeof sls>) => c.reactions.reduce((a, x) => a + x.Ry, 0);
+
+    it('apex position from unequal slopes and eave heights', () => {
+        const g = portalGeometry({ span: 20, eaveHeight: 7, roofSlope: 10, eaveHeightR: 8, roofSlopeR: 5 });
+        const t = (d: number) => Math.tan(d * Math.PI / 180);
+        const x = (8 - 7 + 20 * t(5)) / (t(10) + t(5));
+        expect(g.xA).toBeCloseTo(x, 9);
+        expect(g.yA).toBeCloseTo(7 + x * t(10), 9);
+        expect(g.yA).toBeCloseTo(8 + (20 - x) * t(5), 9);
+        expect(() => portalGeometry({ span: 20, eaveHeight: 7, roofSlope: 2, eaveHeightR: 12, roofSlopeR: 2 })).toThrow();
+    });
+
+    it('symmetric frame: auto runs wind from the left only; "both" gives the mirror image', () => {
+        const auto = runDesign({ mode: 'frame', input: base() });
+        expect(auto.combos.some(c => c.name.includes('WR'))).toBe(false);
+        const r = runDesign({ mode: 'frame', input: base({ windDirections: 'both' }) });
+        const L = sls(r, 'SLS: 1WL1'), R = sls(r, 'SLS: 1WR1');
+        const byNode = (c: typeof L, n: number) => c.reactions.find(x => x.node === n)!;
+        // left support under wind from the right = mirror of the right support under wind from the left
+        expect(byNode(R, 0).Rx).toBeCloseTo(-byNode(L, 4).Rx, 6);
+        expect(byNode(R, 0).Ry).toBeCloseTo(byNode(L, 4).Ry, 6);
+        expect(byNode(R, 4).Rx).toBeCloseTo(-byNode(L, 0).Rx, 6);
+        // the mirror case adds nothing to the design of a symmetric frame
+        // (members are designed as groups: Column L+R, Rafter L+R)
+        for (const g of auto.groups) {
+            expect(r.groups.find(x => x.group === g.group)!.maxUtil).toBeCloseTo(g.maxUtil, 6);
+        }
+    });
+
+    it('unsymmetric frame: wind from the right is added automatically and satisfies equilibrium', () => {
+        const inp = base({ roofSlope: 10, roofSlopeR: 5, eaveHeightR: 8 });
+        const g = portalGeometry(inp);
+        const r = runDesign({ mode: 'frame', input: inp });
+        expect(r.combos.some(c => c.name === '1.5(D+WR2)')).toBe(true);
+        expect(r.deflections.map(d => d.name)).toEqual(expect.arrayContaining(['Left eave drift (H/150)', 'Right eave drift (H/150)']));
+        // Horizontal resultant of wind from the right (cpi = +0.2), by surface:
+        // right wall pushed −x, left wall sucked −x, roof suction on the projected rises
+        const p = 0.9 * 6, cpi = 0.2, c = inp.cpe;
+        const riseL = g.yA - g.HL, riseR = g.yA - g.HR;
+        const Fx = -p * (c.windwardWall - cpi) * g.HR + p * (c.leewardWall - cpi) * g.HL
+            - p * (c.windwardRoof - cpi) * riseR + p * (c.leewardRoof - cpi) * riseL;
+        expect(sumRx(sls(r, 'SLS: 1WR1'))).toBeCloseTo(-Fx, 4);
+        expect(Fx).toBeLessThan(0);                        // net push toward −x
+    });
+
+    it('notional loads follow the first-order sway of an unsymmetric frame', () => {
+        const ratio = (inp: PortalFrameInput) => {
+            const c = runDesign({ mode: 'frame', input: inp }).combos.find(x => x.name === '1.5(D+L)')!;
+            expect(c.notional).toBe(true);
+            return sumRx(c) / sumRy(c);
+        };
+        // symmetric: +x notional (reaction −0.005·ΣV)
+        expect(ratio(base())).toBeCloseTo(-0.005, 6);
+        // mirrored unsymmetric frames sway in opposite directions → opposite notional loads
+        const a = ratio(base({ roofSlope: 12, roofSlopeR: 4 }));
+        const b = ratio(base({ roofSlope: 4, roofSlopeR: 12 }));
+        expect(Math.abs(a)).toBeCloseTo(0.005, 6);
+        expect(b).toBeCloseTo(-a, 6);
+    });
+});
+
+describe('crane loads', () => {
+    const crane: CraneInput = {
+        span: 0, capacity: 100, crabWeight: 30, bridgeWeight: 120, hookApproach: 1.0, wheelBase: 3.5, eccentricity: 0.5,
+        bracketLevel: 5.5, railLevel: 6.1, impact: 0.25, surge: 0.10, girderWeight: 1.5, lateralLimit: 400, spreadLimit: 10,
+    };
+    it('wheel loads and column reactions by hand', () => {
+        const r = craneReactions(crane, 20, 7.5);
+        // crane span 20 − 2·0.5 = 19 m; crab + load 130 kN at 1.0 m from the near rail
+        expect(r.craneSpan).toBeCloseTo(19, 12);
+        expect(r.Pmax).toBeCloseTo((120 / 2 + 130 * 18 / 19) / 2, 9);     // 91.58 kN per wheel
+        expect(r.Pmin).toBeCloseTo((120 / 2 + 130 * 1 / 19) / 2, 9);
+        // two wheels 3.5 m apart on 7.5 m simply supported girders, one wheel over the frame
+        expect(r.k).toBeCloseTo(1 + 4 / 7.5, 12);
+        expect(r.Rmax).toBeCloseTo(r.Pmax * r.k, 9);
+        expect(r.H).toBeCloseTo(0.10 * 130 / 4 * r.k, 9);                  // per wheel × k
+        expect(r.Rg).toBeCloseTo(1.5 * 7.5, 12);
+    });
+
+    const portal = (over: Partial<PortalFrameInput> = {}): PortalFrameInput => ({
+        code: 'IS800', fy: 345, span: 20, eaveHeight: 8, roofSlope: 6, baySpacing: 7.5, base: 'pinned',
+        column: { bf: 250, tf: 12, tw: 8, profile: { at: [0, 1], D: [400, 750] } },
+        rafter: { bf: 200, tf: 12, tw: 6, profile: { at: [0, 0.3, 1], D: [700, 450, 450] } },
+        dead: 0.15, live: 0.75, windPressure: 1.0,
+        cpe: { windwardWall: 0.7, leewardWall: -0.25, windwardRoof: -0.9, leewardRoof: -0.4 }, cpi: [0.2, -0.2],
+        columnLy: 1.5, rafterLy: 1.5, verticalLimit: 180, lateralLimit: 150, windServiceFactor: 1, nSub: 8, crane, ...over,
+    });
+
+    it('crane load cases: equilibrium, bracket moment and axial jump', () => {
+        const r = runDesign({ mode: 'frame', input: portal() });
+        const rx = craneReactions(crane, 20, 7.5);
+        const c = r.combos.find(x => x.name === 'SLS: CV1+CH')!;       // static crane loads, surge +x
+        expect(c.reactions.reduce((a, x) => a + x.Ry, 0)).toBeCloseTo(rx.Rmax + rx.Rmin, 6);
+        expect(c.reactions.reduce((a, x) => a + x.Rx, 0)).toBeCloseTo(-2 * rx.H, 6);
+        // left column: axial and moment step by Rmax and Rmax·e across the bracket
+        const col = c.members.find(m => m.name === 'Column L')!;
+        const sb = 5.5 / 8;
+        const idx = col.s.map((v, k) => [v, k]).filter(([v]) => Math.abs(v - sb) < 1e-9).map(([, k]) => k);
+        expect(idx.length).toBe(2);
+        expect(Math.abs(col.N[idx[0]] - col.N[idx[1]])).toBeCloseTo(rx.Rmax, 6);
+        expect(Math.abs(col.M[idx[0]] - col.M[idx[1]])).toBeCloseTo(rx.Rmax * 0.5, 6);
+        expect(r.deflections.map(d => d.name)).toEqual(expect.arrayContaining(['Crane rail lateral (H/400)', 'Crane rail spread']));
+    });
+
+    it('IS 800 crane combinations: leading and accompanying imposed loads', () => {
+        const r = runDesign({ mode: 'frame', input: portal() });
+        const names = r.combos.map(c => c.name);
+        expect(names).toEqual(expect.arrayContaining([
+            '1.5D+1.5(CV1+CH)+1.05L', '1.5D+1.5L+1.05(CV2−CH)',
+            '1.2D+1.2(CV1+CH)+1.05L+0.6W1', '1.2D+1.2(CV2+CH)+0.53L+1.2W2', '1.2D+1.2L+0.53(CV1+CH)+1.2W1',
+        ]));
+        // crane in the only span of a symmetric frame → wind from the left suffices (surge ± covered)
+        expect(names.some(n => n.includes('WR'))).toBe(false);
+        const ra = runDesign({ mode: 'frame', input: portal({ code: 'AISC360' }) });
+        expect(ra.combos.map(c => c.name)).toEqual(expect.arrayContaining([
+            '1.2D+1.6(CV1+CH)+0.5Lr', '1.2D+1.6Lr+1.0(CV2−CH)', '1.2D+1.0W1+1.0(CV1+CH)+0.5Lr',
+        ]));
+    });
+});
+
+describe('multi-span (multi-gable) frame', () => {
+    const ms = (over: Partial<MultiSpanFrameInput> = {}): MultiSpanFrameInput => ({
+        code: 'IS800', fy: 345, spans: [{ span: 18, slopeL: 6, slopeR: 6 }, { span: 18, slopeL: 6, slopeR: 6 }], heights: [8, 8, 8],
+        baySpacing: 7.5, base: 'pinned',
+        column: { bf: 200, tf: 10, tw: 6, profile: { at: [0, 1], D: [350, 650] } },
+        interiorColumn: { bf: 200, tf: 10, tw: 6, profile: { at: [0, 1], D: [350, 350] } },
+        rafter: { bf: 200, tf: 10, tw: 6, profile: { at: [0, 0.3, 1], D: [650, 400, 400] } },
+        dead: 0.15, live: 0.75, windPressure: 1.0, wallCpe: { windward: 0.7, leeward: -0.25 }, roofCpe: [-0.9, -0.4],
+        cpi: [0.2, -0.2], columnLy: 1.5, rafterLy: 1.5, verticalLimit: 180, lateralLimit: 150, windServiceFactor: 1, nSub: 6, ...over,
+    });
+    const sum = (c: { reactions: { Rx: number; Ry: number }[] }, k: 'Rx' | 'Ry') => c.reactions.reduce((a, x) => a + x[k], 0);
+
+    it('members, groups and gravity equilibrium', () => {
+        const r = runDesign({ mode: 'multispan', input: ms() });
+        expect(r.members.map(m => m.name)).toEqual(['Column 1', 'Rafter 1L', 'Rafter 1R', 'Column 2', 'Rafter 2L', 'Rafter 2R', 'Column 3']);
+        expect(r.groups.map(g => g.group).sort()).toEqual(['Column', 'Interior column', 'Rafter']);
+        const L = r.combos.find(c => c.name === 'SLS: L')!;
+        expect(sum(L, 'Ry')).toBeCloseTo(0.75 * 7.5 * 36, 6);
+        expect(L.reactions.length).toBe(3);
+        expect(r.combos.some(c => c.name.includes('WR'))).toBe(false);     // symmetric → left only
+    });
+
+    it('wind: horizontal equilibrium over walls and all roof slopes', () => {
+        const inp = ms({ roofCpe: [-0.9, -0.5, -0.4, -0.3] });
+        const r = runDesign({ mode: 'multispan', input: inp });
+        const c = r.combos.find(x => x.name === 'SLS: 1W1')!;
+        const p = 1.0 * 7.5, cpi = 0.2, rise = 9 * Math.tan(6 * Math.PI / 180);
+        // walls: windward pushes +x, leeward suction pulls +x; roof slopes alternate facing −x / +x
+        const cp = [-0.9, -0.5, -0.4, -0.3];
+        let Fx = p * (0.7 - cpi) * 8 - p * (-0.25 - cpi) * 8;
+        cp.forEach((v, j) => { Fx += (j % 2 === 0 ? 1 : -1) * p * (v - cpi) * rise; });
+        expect(sum(c, 'Rx')).toBeCloseTo(-Fx, 5);
+        // both directions read the list from the windward end: same list = mirror image → left only
+        expect(r.combos.some(x => x.name.startsWith('SLS: 1WR'))).toBe(false);
+        // different coefficients for wind from the right → both directions
+        const r2 = runDesign({ mode: 'multispan', input: { ...inp, roofCpeRight: [-0.8, -0.5] } });
+        expect(r2.combos.some(x => x.name === 'SLS: 1WR1')).toBe(true);
+    });
+
+    it('crane in an end span makes the frame unsymmetric; heights set per column', () => {
+        const crane: CraneInput = {
+            span: 1, capacity: 50, crabWeight: 15, bridgeWeight: 60, hookApproach: 0.8, wheelBase: 3, eccentricity: 0.45,
+            bracketLevel: 5, railLevel: 5.5, impact: 0.25, surge: 0.1, girderWeight: 1, lateralLimit: 400, spreadLimit: 10,
+        };
+        const r = runDesign({ mode: 'multispan', input: ms({ crane }) });
+        expect(r.combos.some(c => c.name.includes('WR1'))).toBe(true);
+        const s = r.combos.find(c => c.name === 'SLS: CV2−CH')!;
+        const rx = craneReactions(crane, 18, 7.5);
+        expect(sum(s, 'Ry')).toBeCloseTo(rx.Rmax + rx.Rmin, 6);
+        expect(sum(s, 'Rx')).toBeCloseTo(2 * rx.H, 6);
+        expect(() => runDesign({ mode: 'multispan', input: ms({ heights: [8, 8] }) })).toThrow();
+    });
+
+    it('optimizer sizes the three groups', () => {
+        const r = optimizeSteel({ mode: 'multispan', input: ms() }, {
+            depthMin: 300, depthMax: 800, depthStep: 100, bfList: [150, 200], tfList: [8, 10, 12], twList: [5, 6],
+        });
+        expect(r.result?.ok).toBe(true);
+        const b = r.best!;
+        expect(b.mode).toBe('multispan');
+        if (b.mode === 'multispan') {
+            for (const sec of [b.input.column, b.input.interiorColumn, b.input.rafter]) expect(sec.tf).toBeGreaterThanOrEqual(sec.tw);
+            expect(b.input.rafter.profile.D[0]).toBeGreaterThanOrEqual(b.input.rafter.profile.D[1]);
+        }
+    }, 120000);
 });
 
 describe('optimizer', () => {
