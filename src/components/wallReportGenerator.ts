@@ -172,7 +172,8 @@ export async function generateWallReport(config: any, result: any, canvas: HTMLC
                             <p style="margin: 10px 0; font-weight: bold; color: ${z.shearOk ? '#10b981' : '#ef4444'};">
                                 Result: ${kxInline(`\\tau_v ${z.shearOk ? '\\le' : '>'} k\\,\\tau_c`)} &rarr; ${z.shearOk ? 'OK — no shear links required' : 'FAIL — increase thickness'}
                             </p>
-                            <p style="font-size: 12px; color: #64748b;">Shear links are not used in the wall; where τc falls short the tension bars at the support are increased to raise p<sub>t</sub>. The bars counted in p<sub>t</sub> must extend at least d beyond the section (Table 19 note).</p>
+                            <p style="font-size: 12px; color: #64748b;">Shear links are not used in the wall; where τc of the continuous bars falls short, extra tension bars are added near that support to raise p<sub>t</sub> (Table 19). They run over the length where the continuous bars are short, plus max(d, 12φ) (Cl. 26.2.3.1), plus L<sub>d</sub> past the support face (Cl. 26.2.1).</p>
+                            ${(z.shearBars || []).map((e: any) => `<div class="provided-box"><strong>Extra ${e.face === 'h' ? 'earth-face' : 'inner-face'} bars at the ${e.at} support:</strong> ${e.bars.label}, length ${e.length.toFixed(2)} m ${kxInline(`(A_{st} = ${e.Ast_total} \\text{ mm}^2\\text{/m at the section})`)}${e.ok ? '' : ' <span style="color:#ef4444">— not sufficient, increase thickness</span>'}</div>`).join('')}
                         </div>
                     </div>
                 </div>

@@ -10,6 +10,7 @@ import { analyzeBeam, toFrac } from './beamEngine';
 import {
     TAU_C_MAX,
     getTauC,
+    developmentLength,
     flexuralDesign,
     selectBars,
     shearDesign,
@@ -133,6 +134,9 @@ interface ZoneDesign {
     shearOk: boolean;          // τv ≤ k·τc (no links in the wall)
     // governing shear section: support end, tension face (h = earth, s = inner), d (mm)
     shearAt: { at: 'top' | 'bottom'; face: 'h' | 's'; d: number };
+    // extra tension bars near a support where τc of the continuous bars is
+    // short; length (m) includes the extension and the anchorage
+    shearBars: { at: 'top' | 'bottom'; face: 'h' | 's'; bars: BarSelection; length: number; Ast_total: number; ok: boolean }[];
     mainBars_hogging: BarSelection;
     mainBars_sagging: BarSelection;
     distBars: BarSelection;    // horizontal steel per face (Cl. 32.5 c)
@@ -801,7 +805,7 @@ export function analyzeWall(config: WallConfig): WallAnalysisResult {
         // the sign of M there: sagging (inner face) below a pinned top, hogging
         // (earth face) at continuous supports and at the fixed base.
         const shearCases = () => {
-            const cases: { V: number; face: 'h' | 's'; at: 'top' | 'bottom'; d: number; k: number }[] = [];
+            const cases: { V: number; face: 'h' | 's'; at: 'top' | 'bottom'; d: number; k: number; stage: 'propped' | 'construction' }[] = [];
             for (const at of ['top', 'bottom'] as const) {
                 const xEnd = at === 'top' ? 0 : h_m;
                 const sec = (face: 'h' | 's') => {
@@ -815,12 +819,12 @@ export function analyzeWall(config: WallConfig): WallAnalysisResult {
                 else if (fs.M > 0 && !(fh.M < 0)) face = 's';
                 else face = mainBars_hogging.Ast_provided <= mainBars_sagging.Ast_provided ? 'h' : 's';
                 const f = face === 'h' ? fh : fs;
-                cases.push({ V: Math.abs(f.V), face, at, d: dAt(face, f.x), k: kSlab(tAt(f.x)) });
+                cases.push({ V: Math.abs(f.V), face, at, d: dAt(face, f.x), k: kSlab(tAt(f.x)), stage: 'propped' });
             }
             // Construction stage: cantilever shear at d above the base, earth face in tension
             if (consStage) {
                 const dm = Math.min(dAt('h', h_m) / 1000, h_m);
-                cases.push({ V: cantileverAt(cumDepths[i + 1] - dm).V, face: 'h', at: 'bottom', d: dAt('h', h_m - dm), k: kSlab(tAt(h_m - dm)) });
+                cases.push({ V: cantileverAt(cumDepths[i + 1] - dm).V, face: 'h', at: 'bottom', d: dAt('h', h_m - dm), k: kSlab(tAt(h_m - dm)), stage: 'construction' });
             }
             return cases;
         };
@@ -836,30 +840,79 @@ export function analyzeWall(config: WallConfig): WallAnalysisResult {
             return hi;
         };
 
-        // Where the crack width or τc falls short, the tension bars of that face
-        // are increased (a zone that still fails needs a thicker section).
-        for (let pass = 0; pass < 6; pass++) {
-            let changed = false;
-            for (const face of ['h', 's'] as const) {
-                for (let it = 0; it < 25 && crackFails(face) && barsOf(face).adequate !== false; it++) {
-                    setBars(face, selectBars(barsOf(face).Ast_provided * 1.1, barDias, spacings, b));
-                    changed = true;
-                }
+        // Where the crack width falls short, the tension bars of that face are
+        // increased over the whole zone (a zone that still fails needs a
+        // thicker section).
+        for (const face of ['h', 's'] as const) {
+            for (let it = 0; it < 25 && crackFails(face) && barsOf(face).adequate !== false; it++) {
+                setBars(face, selectBars(barsOf(face).Ast_provided * 1.1, barDias, spacings, b));
             }
-            for (const c of shearCases()) {
-                const tau_v = c.V * 1e3 / (b * c.d);
-                const ptNow = 100 * barsOf(c.face).Ast_provided / (b * c.d);
-                if (tau_v <= c.k * getTauC(ptNow, fck)) continue;  // already enough
-                const pt = ptForTauC(tau_v / c.k);
-                if (pt === null) continue;                        // needs a thicker section
-                const AstReq = pt * b * c.d / 100;
-                if (barsOf(c.face).Ast_provided < AstReq - 1e-6 && barsOf(c.face).adequate !== false) {
-                    setBars(c.face, selectBars(AstReq, barDias, spacings, b));
-                    changed = true;
-                }
-            }
-            if (!changed) break;
         }
+
+        // Where τc of the continuous bars falls short at a support, EXTRA
+        // tension bars are added near that support only (Table 19: p_t counts
+        // the bars continuing at least d beyond the section). Their length:
+        //   the stretch where the continuous bars alone are short
+        //   + max(d, 12φ) beyond it (Cl. 26.2.3.1)
+        //   + Ld anchorage past the support face (Cl. 26.2.1).
+        // Previously the bars of the whole face were increased over the full
+        // zone height, which over-stated the steel and pushed the optimizer
+        // towards thicker walls.
+        type ShearCase = ReturnType<typeof shearCases>[number];
+        const shearAtSection = (c: ShearCase, a: number) => {
+            // a = distance from the support face (m); sections nearer than d
+            // take the shear at d (Cl. 22.6.2.1)
+            const aa = Math.max(a, c.d / 1000);
+            const x = c.at === 'top' ? Math.min(aa, h_m) : Math.max(h_m - aa, 0);
+            const V = c.stage === 'construction'
+                ? cantileverAt(cumDepths[i] + x).V
+                : Math.abs(forcesAt(x).V);
+            return { V, d: dAt(c.face, x), k: kSlab(tAt(x)) };
+        };
+        const baseShort = (c: ShearCase, a: number) => {
+            const q = shearAtSection(c, a);
+            const pt = 100 * barsOf(c.face).Ast_provided / (b * q.d);
+            return q.V * 1e3 / (b * q.d) > q.k * getTauC(pt, fck);
+        };
+        type ExtraBars = { at: 'top' | 'bottom'; face: 'h' | 's'; bars: BarSelection; length: number; Ast_total: number; ok: boolean };
+        const extras = new Map<string, ExtraBars>();
+        for (const c of shearCases()) {
+            if (!baseShort(c, 0)) continue;                         // continuous bars suffice
+            const tau_v = c.V * 1e3 / (b * c.d);
+            const pt = ptForTauC(tau_v / c.k);
+            const base = barsOf(c.face);
+            const key = `${c.at}/${c.face}`;
+            const prev = extras.get(key);
+            const merge = (cand: ExtraBars) => extras.set(key, !prev ? cand : {
+                at: c.at, face: c.face,
+                bars: cand.bars.Ast_provided >= prev.bars.Ast_provided ? cand.bars : prev.bars,
+                length: Math.max(cand.length, prev.length),
+                Ast_total: base.Ast_provided + Math.max(cand.bars.Ast_provided, prev.bars.Ast_provided),
+                ok: cand.ok && prev.ok,
+            });
+            if (pt === null) {                                      // needs a thicker section
+                merge({ at: c.at, face: c.face, bars: base, length: 0, Ast_total: base.Ast_provided, ok: false });
+                continue;
+            }
+            const AstAdd = pt * b * c.d / 100 - base.Ast_provided;
+            // extra bars no larger than the continuous bars, so d is unchanged
+            const bars = selectBars(AstAdd, barDias.filter(x => x <= base.dia), spacings, b);
+            // stretch where the continuous bars alone are short
+            let aReq = c.d / 1000;
+            const nScan = 40;
+            for (let j = 1; j <= nScan; j++) {
+                const a = (j / nScan) * h_m;
+                if (a <= c.d / 1000) continue;
+                if (!baseShort(c, a)) break;
+                aReq = a;
+            }
+            const Ld = developmentLength(bars.dia, fy, material.grade) / 1000;
+            const length = Math.min(aReq + Math.max(c.d / 1000, 12 * bars.dia / 1000), h_m) + Ld;
+            merge({ at: c.at, face: c.face, bars, length, Ast_total: base.Ast_provided + bars.Ast_provided, ok: bars.adequate !== false });
+        }
+        const shearBars = [...extras.values()];
+        const AstAt = (c: ShearCase) =>
+            barsOf(c.face).Ast_provided + (extras.get(`${c.at}/${c.face}`)?.bars.Ast_provided ?? 0);
 
         // Reported effective depths: at the governing flexural section of each face
         const d_hogging = dAt('h', hogGov.x);
@@ -881,14 +934,14 @@ export function analyzeWall(config: WallConfig): WallAnalysisResult {
         let V_gov = 0, shearRatio = -1, k_shear = kSlab(tMin);
         let shearAt: ZoneDesign['shearAt'] = { at: 'bottom', face: 'h', d: d_hogging };
         for (const c of shearCases()) {
-            const sd = shearDesign(c.V, b, c.d, barsOf(c.face).Ast_provided, fck, fy, material.grade);
+            const sd = shearDesign(c.V, b, c.d, AstAt(c), fck, fy, material.grade);
             const ratio = sd.tau_v / (c.k * sd.tau_c);
             if (ratio > shearRatio) {
                 shearRatio = ratio; shear = sd; V_gov = c.V; k_shear = c.k;
                 shearAt = { at: c.at, face: c.face, d: c.d };
             }
         }
-        const shearOk = shear.tau_v <= k_shear * shear.tau_c;
+        const shearOk = shear.tau_v <= k_shear * shear.tau_c && shearBars.every(e => e.ok);
 
         // Axial load + bending with slenderness — IS 456 Cl. 32.2 / Cl. 39.
         // Slenderness and ea on the thinnest section (conservative for a
@@ -968,6 +1021,7 @@ export function analyzeWall(config: WallConfig): WallAnalysisResult {
             shear_k: k_shear,
             shearOk,
             shearAt,
+            shearBars,
             mainBars_hogging,
             mainBars_sagging,
             distBars,
@@ -994,7 +1048,8 @@ export function analyzeWall(config: WallConfig): WallAnalysisResult {
         totalConcreteVol += (zd.thickness / 1000) * zd.height;
         const mainSteelWeight = ((zd.mainBars_hogging.Ast_provided + zd.mainBars_sagging.Ast_provided) / 1e6) * zd.height * 7850;
         const distSteelWeight = (2 * zd.distBars.Ast_provided / 1e6) * zd.height * 7850;
-        totalSteelWeight += mainSteelWeight + distSteelWeight;
+        const shearSteelWeight = zd.shearBars.reduce((w, e) => w + (e.bars.Ast_provided / 1e6) * e.length * 7850, 0);
+        totalSteelWeight += mainSteelWeight + distSteelWeight + shearSteelWeight;
         if (!zd.ok) feasible = false;
         const maxUtil = Math.max(zd.flex_hogging.utilization, zd.flex_sagging.utilization);
         if (maxUtil > maxUtilization) {

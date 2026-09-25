@@ -67,15 +67,23 @@ export function renderWallDesignTable(container: HTMLElement | null, wallResult:
         const rS = zd.pm.cap_s > 0 ? zd.pm.Mu_s / zd.pm.cap_s : Infinity;
         const pmMu = rS > rH ? `${zd.pm.Mu_s} / ${zd.pm.cap_s}` : `${zd.pm.Mu_h} / ${zd.pm.cap_h}`;
 
+        // Extra bars near a support for shear (τc), with their length
+        const extraCell = (face: 'h' | 's') => zd.shearBars
+            .filter(e => e.face === face)
+            .map(e => `<br/><span style="font-size:0.75em;color:var(--text-muted)">+ ${e.bars.label} at ${e.at}, ${e.length.toFixed(2)} m</span>`)
+            .join('');
+
         // Build bar cell with Ast demand/provided
         const hogCell = `<span style="font-size:0.85em">${zd.mainBars_hogging.label}</span><br/>`
             + `<span style="font-size:0.75em;color:var(--text-muted)">`
             + `${zd.flex_hogging.Ast_req}/${zd.mainBars_hogging.Ast_provided} mm²`
-            + `${hogOk ? '' : ' <span style="color:var(--negative)">✗</span>'}</span>`;
+            + `${hogOk ? '' : ' <span style="color:var(--negative)">✗</span>'}</span>`
+            + extraCell('h');
         const sagCell = `<span style="font-size:0.85em">${zd.mainBars_sagging.label}</span><br/>`
             + `<span style="font-size:0.75em;color:var(--text-muted)">`
             + `${zd.flex_sagging.Ast_req}/${zd.mainBars_sagging.Ast_provided} mm²`
-            + `${sagOk ? '' : ' <span style="color:var(--negative)">✗</span>'}</span>`;
+            + `${sagOk ? '' : ' <span style="color:var(--negative)">✗</span>'}</span>`
+            + extraCell('s');
 
         html += `<tr>
             <td><strong>${zd.zone}</strong></td>
@@ -97,7 +105,7 @@ export function renderWallDesignTable(container: HTMLElement | null, wallResult:
     html += '</tbody></table>';
     const consChecked = config.checkConstructionStage === true;
     html += `<div class="config-note" style="margin-top:8px;font-size:0.78rem;color:var(--text-muted)">
-        Shear is resisted without links (τv ≤ k·τc, Cl. 40.2.1.1); where needed the tension bars are increased to raise τc (Table 19).
+        Shear is resisted without links (τv ≤ k·τc, Cl. 40.2.1.1); where needed, extra tension bars near the support raise τc (Table 19) — length includes max(d, 12φ) and Ld.
         Crack width limits ${(config.crackWidthLimitEarth ?? 0.2)} mm earth face / ${(config.crackWidthLimitInner ?? 0.3)} mm inner face (Cl. 35.3.2, Annex F${config.checkCrackWidth === false ? ' — check switched off' : ''}).
         Horizontal steel ${mat.fy >= 415 ? '0.20' : '0.25'} % of b·t, half per face (Cl. 32.5 c).
         ${consChecked ? 'Construction stage (cantilever before floors are cast) included.' : 'Construction stage not checked — backfill only after the floor slabs are cast.'}

@@ -325,17 +325,33 @@ describe('Basement wall optimizer — per-zone minimum thickness', () => {
         }
     });
 
-    test('where τc falls short the tension bars are increased (Table 19) instead of adding links', () => {
-        // 325 mm bottom zone: τv ≈ 0.70 N/mm² needs p_t ≈ 1.4 % at the fixed base,
-        // well above the steel needed for flexure
+    test('where τc falls short, extra bars are added near that support only (Table 19)', () => {
+        // 325 mm bottom zone: τv ≈ 0.69 N/mm² at d above the fixed base needs
+        // p_t ≈ 1.3 %; the continuous earth-face bars give less.
         const r = analyzeWall({ ...cfg, zones: [{ height: 3.0, thickness: 275 }, { height: 3.2, thickness: 275 }, { height: 3.5, thickness: 325 }] });
         const zd = r.zoneDesigns[2];
-        const faceBars = zd.shearAt.face === 'h' ? zd.mainBars_hogging : zd.mainBars_sagging;
-        const flexReq = zd.shearAt.face === 'h' ? zd.flex_hogging.Ast_req : zd.flex_sagging.Ast_req;
-        expect(faceBars.Ast_provided).toBeGreaterThan(flexReq * 1.2);
-        const pt = 100 * faceBars.Ast_provided / (1000 * zd.shearAt.d);
-        expect(zd.shear.tau_v).toBeLessThanOrEqual(zd.shear_k * getTauC(pt, 25) + 1e-3);
+        expect(zd.shearBars).toHaveLength(1);
+        const e = zd.shearBars[0];
+        expect(e.at).toBe('bottom');
+        expect(e.face).toBe('h');
+        const d = zd.shearAt.d;
+        // continuous bars alone fall short; continuous + extra satisfy τv ≤ k·τc
+        expect(zd.shear.tau_v).toBeGreaterThan(zd.shear_k * getTauC(100 * zd.mainBars_hogging.Ast_provided / (1000 * d), 25));
+        expect(e.Ast_total).toBe(zd.mainBars_hogging.Ast_provided + e.bars.Ast_provided);
+        expect(zd.shear.tau_v).toBeLessThanOrEqual(zd.shear_k * getTauC(100 * e.Ast_total / (1000 * d), 25) + 1e-3);
+        expect(e.bars.dia).toBeLessThanOrEqual(zd.mainBars_hogging.dia);          // same layer, d unchanged
+        // length = stretch short (≥ d) + max(d, 12φ) + Ld; Ld = φ·0.87fy/(4·1.6·1.4) for M25 deformed bars
+        const Ld = e.bars.dia * 0.87 * 500 / (4 * 1.6 * 1.4) / 1000;
+        expect(e.length).toBeGreaterThanOrEqual(d / 1000 + Math.max(d / 1000, 12 * e.bars.dia / 1000) + Ld - 1e-9);
+        expect(e.length).toBeLessThan(zd.height);                                  // local, not the full zone
+        // quantity: extra bars over their own length only
+        const kg = r.zoneDesigns.reduce((w, z) =>
+            w + (z.mainBars_hogging.Ast_provided + z.mainBars_sagging.Ast_provided + 2 * z.distBars.Ast_provided) / 1e6 * z.height * 7850
+              + z.shearBars.reduce((x, q) => x + q.bars.Ast_provided / 1e6 * q.length * 7850, 0), 0);
+        expect(r.totalSteelWeight).toBeCloseTo(kg, -1);
+        expect(Math.abs(r.totalSteelWeight - Math.round(kg))).toBeLessThanOrEqual(1);
     });
+
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
