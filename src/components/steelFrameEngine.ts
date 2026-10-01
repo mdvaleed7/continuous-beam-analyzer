@@ -1,7 +1,9 @@
 /**
  * steelFrameEngine.ts — analysis and design of web-tapered steel members:
- * a single column, a single beam, and a 2D pitched-roof portal frame
- * (two columns + two rafters), to IS 800:2007 or AISC 360-22.
+ * a single column, a single beam, and 2D pitched-roof portal / multi-span
+ * frames with tapered rafters or a roof truss (CHS, SHS or double-angle
+ * members; see TrussRoof), optional cranes and optimiser-chosen transverse
+ * web stiffeners, to IS 800:2007 or AISC 360-22.
  *
  * ANALYSIS
  *  • 2D frame finite elements; each tapered member is split into prismatic
@@ -2164,3 +2166,45 @@ export function optimizeSteel(si: SteelInput, p: SteelOptimizeParams, onProgress
     const bx = sizedOf.get(key(best.x)) ?? best.x;
     return { best: bx, result: runDesign(bx), evaluations, feasibleFound, history, approximate: true };
 }
+
+// ═══════════════════════════════════════════════════════════════
+//  Roof scheme comparison — tapered rafters vs roof trusses
+// ═══════════════════════════════════════════════════════════════
+export interface RoofSchemeResult {
+    scheme: string;                     // 'Tapered rafters' | 'Truss CHS' | …
+    family: TrussFamily | null;
+    best: SteelInput | null;
+    result: DesignResult | null;
+    evaluations: number;
+}
+
+/** Starting sections of a truss family (middle of the optimiser catalogue; the sizing moves from there). */
+export function defaultTrussSections(family: TrussFamily, fy: number, code: SteelCode, gusset = 8): Pick<TrussRoof, TrussRole> {
+    const cat = trussCatalogue(family, fy, code, gusset);
+    const s = cat[Math.floor(cat.length / 2)].name;
+    return { top: s, bottom: s, vertical: s, diagonal: s };
+}
+
+/**
+ * Optimise the same frame with tapered rafters and with a roof truss of each
+ * family (the truss geometry inputs as given; sections and depth optimised).
+ */
+export function compareRoofSchemes(si: SteelInput, p: SteelOptimizeParams, truss: TrussRoof, families: TrussFamily[],
+    onProgress?: (done: number, total: number, feasible: number) => void): RoofSchemeResult[] {
+    if (si.mode !== 'frame' && si.mode !== 'multispan') throw new Error('Roof schemes apply to portal and multi-span frames');
+    const schemes: { scheme: string; family: TrussFamily | null; x: SteelInput }[] = [
+        { scheme: 'Tapered rafters', family: null, x: withTrussOrNull(si, null) },
+        ...families.map(f => ({
+            scheme: `Truss ${f === '2L' ? '2-ISA' : f}`, family: f,
+            x: withTrussOrNull(si, { ...truss, family: f, ...(f === truss.family ? {} : defaultTrussSections(f, si.input.fy, si.input.code, truss.gusset)) }),
+        })),
+    ];
+    const out: RoofSchemeResult[] = [];
+    schemes.forEach((s, k) => {
+        const o = optimizeSteel(s.x, p, (done, total, feasible) => onProgress?.(k * total + done, schemes.length * total, feasible));
+        out.push({ scheme: s.scheme, family: s.family, best: o.best, result: o.result, evaluations: o.evaluations });
+    });
+    return out;
+}
+
+const withTrussOrNull = (x: SteelInput, t: TrussRoof | null): SteelInput => ({ mode: x.mode, input: { ...x.input, truss: t } }) as SteelInput;

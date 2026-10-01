@@ -2,10 +2,11 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-    runDesign, portalGeometry, craneReactions, isSymmetricPortal, isSymmetricMultiSpan,
-    type SteelCode, type SteelInput, type DesignResult, type SteelOptimizeResult,
+    runDesign, portalGeometry, craneReactions, isSymmetricPortal, isSymmetricMultiSpan, defaultTrussSections, defaultFu, TRUSS_ROLES, TRUSS_ROLE_GROUP,
+    type SteelCode, type SteelInput, type DesignResult, type SteelOptimizeResult, type RoofSchemeResult, type TrussRoof,
     type PortalFrameInput, type MultiSpanFrameInput, type CraneInput, type ColumnInput, type BeamInput,
 } from "./steelFrameEngine";
+import { allTrussSections, type TrussFamily } from "../lib/steelTruss";
 import type { MemberSection } from "../lib/steelSection";
 import type { ISStationResult } from "../lib/steelIS800";
 import type { AISCStationResult } from "../lib/steelAISC360";
@@ -112,6 +113,23 @@ export default function SteelAnalyzer() {
         setMsHeights(prev => Array.from({ length: n + 1 }, (_, k) => prev[k] ?? prev[prev.length - 1]));
     };
 
+    // ── Roof structure (portal and multi-span frames): tapered rafters or a roof truss ──
+    const [roofType, setRoofType] = useState<'rafter' | 'truss'>('rafter');
+    const [truss, setTruss] = useState<TrussRoof>({
+        family: 'SHS', depthEave: 1.5, bottomSlope: 0.5, panel: 1.5, K: 1.0, bottomLy: 3.0, gusset: 8, ...defaultTrussSections('SHS', 345, 'IS800'),
+    });
+    const setTr = <K extends keyof TrussRoof>(k: K) => (v: TrussRoof[K]) => setTruss(t => ({ ...t, [k]: v }));
+    const [trussDepths, setTrussDepths] = useState('0.8, 1.0, 1.2, 1.5, 1.8, 2.1, 2.4');
+    const trussNames = useMemo(() => allTrussSections(truss.family, truss.gusset).map(s => s.name), [truss.family, truss.gusset]);
+
+    // ── Transverse web stiffeners (all modes) ──
+    const [stiffOn, setStiffOn] = useState(false);
+    const [stiffPenalty, setStiffPenalty] = useState(5);
+
+    // ── Roof scheme comparison: cost per kg by product (enter project rates) ──
+    const [rates, setRates] = useState({ plate: 1.0, tube: 1.0, angle: 1.0, stiffener: 0 });
+    const [cmpResult, setCmpResult] = useState<RoofSchemeResult[] | null>(null);
+
     // ── Crane (portal and multi-span frames) ──
     const [craneOn, setCraneOn] = useState(false);
     const [crane, setCrane] = useState<CraneInput>({
@@ -177,6 +195,8 @@ export default function SteelAnalyzer() {
         [craneOn, crane, mode, msSpans.length]);
 
     const input: SteelInput = useMemo(() => {
+        const stiffeners = stiffOn ? { enabled: true, penaltyKg: Math.max(0, stiffPenalty) } : undefined;
+        const roofTruss = roofType === 'truss' ? truss : null;
         if (mode === 'multispan') {
             const cr = craneOn ? { ...crane, span: Math.min(crane.span, msSpans.length - 1) } : null;
             const mi: MultiSpanFrameInput = {
@@ -189,6 +209,7 @@ export default function SteelAnalyzer() {
                 roofCpeRight: cpeRSame ? undefined : parseSigned(roofListR),
                 windDirections: windDirs, cpi: [...cpi],
                 columnLy: colLy, rafterLy: rafLy, verticalLimit: vLim, lateralLimit: hLim, windServiceFactor: wsf, crane: cr,
+                stiffeners, truss: roofTruss,
             };
             return { mode: 'multispan', input: mi };
         }
@@ -198,23 +219,23 @@ export default function SteelAnalyzer() {
                 column: toCol(col), rafter: toRaf(raf, taper),
                 dead, live, windPressure: windP, cpe, cpeRight: cpeRSame ? undefined : cpeR, windDirections: windDirs, cpi: [...cpi],
                 columnLy: colLy, rafterLy: rafLy, verticalLimit: vLim, lateralLimit: hLim, windServiceFactor: wsf,
-                crane: craneOn ? { ...crane, span: 0 } : null,
+                crane: craneOn ? { ...crane, span: 0 } : null, stiffeners, truss: roofTruss,
             };
             return { mode: 'frame', input: fi };
         }
         if (mode === 'column') {
             const ci: ColumnInput = {
                 code, fy, height: cH, base: cBase, top: cTop, member: toCol(cSec), P: cP, Mtop: cM, wWind: cW,
-                Ly: cLy, lateralLimit: hLim, windServiceFactor: wsf,
+                Ly: cLy, lateralLimit: hLim, windServiceFactor: wsf, stiffeners,
             };
             return { mode: 'column', input: ci };
         }
         const bi: BeamInput = {
-            code, fy, span: bSpan, supports: bSup, member: toBeam(bSec, bShape, bHaunch), w: bw, P: bP, Ly: bLy, verticalLimit: bVLim,
+            code, fy, span: bSpan, supports: bSup, member: toBeam(bSec, bShape, bHaunch), w: bw, P: bP, Ly: bLy, verticalLimit: bVLim, stiffeners,
         };
         return { mode: 'beam', input: bi };
     }, [mode, code, fy, span, eave, slope, eaveR, slopeR, bay, base, col, raf, taper, dead, live, windP, cpe, cpeR, cpeRSame, windDirs, cpi, colLy, rafLy, vLim, hLim, wsf,
-        msSpans, msHeights, icol, roofList, roofListR, craneOn, crane,
+        msSpans, msHeights, icol, roofList, roofListR, craneOn, crane, stiffOn, stiffPenalty, roofType, truss,
         cH, cBase, cTop, cSec, cP, cM, cW, cLy, bSpan, bSup, bShape, bHaunch, bSec, bw, bP, bLy, bVLim]);
 
     const frameSym = useMemo(() => {
@@ -243,14 +264,21 @@ export default function SteelAnalyzer() {
     // ── Worker ──
     useEffect(() => () => { workerRef.current?.terminate(); }, []);
     const applyBest = useCallback((best: SteelInput) => {
-        if (best.mode === 'frame') { setCol(fromSec(best.input.column)); setRaf(fromSec(best.input.rafter)); }
-        else if (best.mode === 'multispan') { setCol(fromSec(best.input.column)); setRaf(fromSec(best.input.rafter)); setICol(fromSec(best.input.interiorColumn)); }
+        if (best.mode === 'frame' || best.mode === 'multispan') {
+            setCol(fromSec(best.input.column));
+            if (best.input.truss) { setRoofType('truss'); setTruss(best.input.truss); } else { setRoofType('rafter'); setRaf(fromSec(best.input.rafter)); }
+            if (best.mode === 'multispan') setICol(fromSec(best.input.interiorColumn));
+        }
         else if (best.mode === 'column') setCSec(fromSec(best.input.member));
         else setBSec(fromSec(best.input.member));
     }, []);
-    const runOptimizer = useCallback(() => {
+    const runOptimizer = useCallback((compare = false) => {
         setOptError(null); setOptResult(null);
-        const params = { depthMin: dMin, depthMax: dMax, depthStep: Math.max(5, dStep), bfList: parseList(bfList), tfList: parseList(tfList), twList: parseList(twList) };
+        if (compare) setCmpResult(null);
+        const params = {
+            depthMin: dMin, depthMax: dMax, depthStep: Math.max(5, dStep), bfList: parseList(bfList), tfList: parseList(tfList), twList: parseList(twList),
+            trussDepths: parseList(trussDepths),
+        };
         if (!params.bfList.length || !params.tfList.length || !params.twList.length) { setOptError('Plate lists must not be empty'); return; }
         workerRef.current?.terminate();
         const w = new Worker(new URL('../workers/steelOptimizer.worker.ts', import.meta.url));
@@ -262,10 +290,16 @@ export default function SteelAnalyzer() {
             if (msg.type === 'progress') setOptProgress({ done: msg.done, total: msg.total, feasible: msg.feasible });
             else if (msg.type === 'done') {
                 setOptRunning(false); setOptProgress(null);
-                const r = msg.result as SteelOptimizeResult;
-                setOptResult(r);
-                if (r.best) applyBest(r.best);
-                else setOptError('No feasible design within the lists — widen the depth range or plate lists.');
+                if (compare) {
+                    const list = msg.result as RoofSchemeResult[];
+                    setCmpResult(list);
+                    if (!list.some(s => s.best)) setOptError('No feasible scheme within the lists — widen the depth range or plate lists.');
+                } else {
+                    const r = msg.result as SteelOptimizeResult;
+                    setOptResult(r);
+                    if (r.best) applyBest(r.best);
+                    else setOptError('No feasible design within the lists — widen the depth range or plate lists.');
+                }
                 w.terminate(); workerRef.current = null;
             } else if (msg.type === 'error') {
                 setOptRunning(false); setOptProgress(null); setOptError(msg.error);
@@ -273,8 +307,8 @@ export default function SteelAnalyzer() {
             }
         };
         w.onerror = (ev) => { setOptRunning(false); setOptError(ev.message || 'optimizer worker failed'); };
-        w.postMessage({ type: 'optimize', input, params });
-    }, [input, dMin, dMax, dStep, bfList, tfList, twList, applyBest]);
+        w.postMessage({ type: 'optimize', input, params, compare: compare ? { truss, families: ['CHS', 'SHS', '2L'] } : undefined });
+    }, [input, dMin, dMax, dStep, bfList, tfList, twList, trussDepths, truss, applyBest]);
     const cancelOptimizer = useCallback(() => {
         workerRef.current?.terminate(); workerRef.current = null;
         setOptRunning(false); setOptProgress(null);
@@ -374,8 +408,55 @@ export default function SteelAnalyzer() {
                         {mode === 'multispan' && msSpans.length > 1 && (
                             <SecInputs label="Interior columns" value={icol} onChange={setICol} d0Label="Depth at base" d1Label="Depth at top" />
                         )}
-                        <SecInputs label="Rafter (tapered haunch)" value={raf} onChange={setRaf} d0Label="Depth at eave" d1Label="Depth after taper"
-                            extra={<Num label="Taper length (fraction of rafter)" value={taper} onChange={v => setTaper(Math.min(0.95, Math.max(0.05, v)))} step={0.05} />} />
+                        <div className="panel mt-16px">
+                            <h3 className="panel-title"><span className="panel-icon">⛺</span>Roof structure</h3>
+                            <div className="control-group">
+                                <label>Roof members</label>
+                                <select value={roofType} onChange={e => setRoofType(e.target.value as 'rafter' | 'truss')} title="roof structure">
+                                    <option value="rafter">Tapered built-up rafters (PEB)</option>
+                                    <option value="truss">Roof truss (portal truss)</option>
+                                </select>
+                            </div>
+                            {roofType === 'truss' && (<>
+                                <div className="control-group">
+                                    <label>Truss sections</label>
+                                    <select value={truss.family} title="truss family"
+                                        onChange={e => { const f = e.target.value as TrussFamily; setTruss(t => ({ ...t, family: f, ...defaultTrussSections(f, fy, code, t.gusset) })); }}>
+                                        <option value="CHS">CHS — circular hollow (IS 1161)</option>
+                                        <option value="SHS">SHS — square hollow (IS 4923)</option>
+                                        <option value="2L">2-ISA — two equal angles back to back (IS 808)</option>
+                                    </select>
+                                </div>
+                                <div className="norm-ref-row">
+                                    <Num label="Depth at eaves h0 (m)" value={truss.depthEave} onChange={setTr('depthEave')} step={0.1} title="top chord to bottom chord centre lines at the column" />
+                                    <Num label="Bottom-chord slope (× roof)" value={truss.bottomSlope} onChange={v => setTr('bottomSlope')(Math.min(1, Math.max(0, v)))} step={0.1} title="0 = flat bottom chord, 1 = parallel chords" />
+                                </div>
+                                <div className="norm-ref-row">
+                                    <Num label="Max panel length (m)" value={truss.panel} onChange={setTr('panel')} step={0.25} title="horizontal; purlins at the panel points" />
+                                    <Num label="Chord in-plane K" value={truss.K} onChange={setTr('K')} step={0.05} title="effective length factor of the chords in the truss plane (IS 800 Table 11 / AISC: 1.0 conservative)" />
+                                </div>
+                                <div className="norm-ref-row">
+                                    <Num label="Bottom-chord brace spacing (m)" value={truss.bottomLy} onChange={setTr('bottomLy')} step={0.5} title="out-of-plane restraint of the bottom chord (fly braces / bottom-chord ties)" />
+                                    {truss.family === '2L' && <Num label="Gusset (mm)" value={truss.gusset} onChange={setTr('gusset')} step={2} />}
+                                </div>
+                                {TRUSS_ROLES.map(role => (
+                                    <div className="control-group" key={role}>
+                                        <label>{TRUSS_ROLE_GROUP[role]}</label>
+                                        <select value={truss[role]} onChange={e => setTr(role)(e.target.value)} title={TRUSS_ROLE_GROUP[role]}>
+                                            {trussNames.map(n => <option key={n} value={n}>{n}</option>)}
+                                        </select>
+                                    </div>
+                                ))}
+                                <div className="info-note-inline">
+                                    Pratt webs (diagonals from the top chord at the column side), pin-ended; chords continuous; the bottom chord frames into the columns h0 below the eaves.
+                                    Top chord out-of-plane length = the purlin restraint spacing (Bracing panel below). Truss sizes and depth are optimised by the optimiser.
+                                </div>
+                            </>)}
+                        </div>
+                        {roofType === 'rafter' && (
+                            <SecInputs label="Rafter (tapered haunch)" value={raf} onChange={setRaf} d0Label="Depth at eave" d1Label="Depth after taper"
+                                extra={<Num label="Taper length (fraction of rafter)" value={taper} onChange={v => setTaper(Math.min(0.95, Math.max(0.05, v)))} step={0.05} />} />
+                        )}
                         <div className="panel mt-16px">
                             <h3 className="panel-title"><span className="panel-icon">⬇</span>Loads (unfactored)</h3>
                             <div className="norm-ref-row">
@@ -511,7 +592,7 @@ export default function SteelAnalyzer() {
                             <h3 className="panel-title"><span className="panel-icon">🔗</span>Bracing &amp; serviceability</h3>
                             <div className="norm-ref-row">
                                 <Num label="Column flange-brace spacing (m)" value={colLy} onChange={setColLy} step={0.25} />
-                                <Num label="Rafter flange-brace spacing (m)" value={rafLy} onChange={setRafLy} step={0.25} />
+                                <Num label={roofType === 'truss' ? 'Top chord out-of-plane (purlin) spacing (m)' : 'Rafter flange-brace spacing (m)'} value={rafLy} onChange={setRafLy} step={0.25} />
                             </div>
                             <div className="norm-ref-row">
                                 <Num label="Rafter deflection: span /" value={vLim} onChange={setVLim} step={10} />
@@ -604,6 +685,25 @@ export default function SteelAnalyzer() {
                 )}
 
                 <div className="panel mt-16px">
+                    <h3 className="panel-title"><span className="panel-icon">▥</span>Web stiffeners</h3>
+                    <div className="control-group">
+                        <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                            <input type="checkbox" checked={stiffOn} onChange={e => setStiffOn(e.target.checked)} title="transverse web stiffeners" />
+                            Use transverse stiffeners where they help
+                        </label>
+                    </div>
+                    {stiffOn && (<>
+                        <Num label="Optimiser penalty per stiffener (kg)" value={stiffPenalty} onChange={setStiffPenalty} step={1}
+                            title="fabrication cost of one stiffener pair expressed as steel weight — only in the optimiser objective" />
+                        <div className="info-note-inline">
+                            Per sub-element: none, or stiffeners at L/1, L/2, L/3 — the fewest that pass are used.
+                            {code === 'IS800' ? ' IS 800 Cl. 8.4.2.2(a) kv, Cl. 8.6.1 web limits, Cl. 8.7.1.2 outstand ≤ 20tε, Cl. 8.7.2.4 stiffness.' : ' AISC 360-22 G2.1 kv, F13.2 h/tw, G2.3 stiffener stiffness and b/t ≤ 0.56√(E/Fy).'}
+                            {' '}Single-sided flat plates; welds and bearing stiffeners at supports / point loads are not designed here.
+                        </div>
+                    </>)}
+                </div>
+
+                <div className="panel mt-16px">
                     <h3 className="panel-title"><span className="panel-icon">⚙</span>Optimize (minimum steel)</h3>
                     <div className="norm-ref-row">
                         <Num label="Depth min (mm)" value={dMin} onChange={setDMin} step={25} />
@@ -613,9 +713,24 @@ export default function SteelAnalyzer() {
                     <div className="control-group"><label>Flange widths bf (mm)</label><input value={bfList} onChange={e => setBfList(e.target.value)} title="bf list" /></div>
                     <div className="control-group"><label>Flange thicknesses tf (mm)</label><input value={tfList} onChange={e => setTfList(e.target.value)} title="tf list" /></div>
                     <div className="control-group"><label>Web thicknesses tw (mm)</label><input value={twList} onChange={e => setTwList(e.target.value)} title="tw list" /></div>
-                    <button className="btn btn-primary w-full mt-16px" onClick={runOptimizer} disabled={optRunning}>
+                    {isFrame && roofType === 'truss' && (
+                        <div className="control-group"><label>Truss depths at eaves to try (m)</label><input value={trussDepths} onChange={e => setTrussDepths(e.target.value)} title="truss depth list" /></div>
+                    )}
+                    <button className="btn btn-primary w-full mt-16px" onClick={() => runOptimizer(false)} disabled={optRunning}>
                         {optRunning ? 'Optimizing…' : '⚙ Run optimization'}
                     </button>
+                    {isFrame && (<>
+                        <div className="info-note-inline" style={{ marginTop: 10 }}>
+                            Scheme comparison: optimises this frame with tapered rafters and with CHS, SHS and 2-ISA roof trusses (truss geometry as entered, depth from the list above).
+                        </div>
+                        <div className="norm-ref-row">
+                            <Num label="Cost / kg: plates" value={rates.plate} onChange={v => setRates(r => ({ ...r, plate: v }))} step={0.05} title="built-up plate members (fabricated)" />
+                            <Num label="tubes" value={rates.tube} onChange={v => setRates(r => ({ ...r, tube: v }))} step={0.05} title="CHS / SHS (fabricated)" />
+                            <Num label="angles" value={rates.angle} onChange={v => setRates(r => ({ ...r, angle: v }))} step={0.05} title="angles (fabricated)" />
+                        </div>
+                        <Num label="Cost per stiffener" value={rates.stiffener} onChange={v => setRates(r => ({ ...r, stiffener: v }))} step={1} />
+                        <button className="btn btn-secondary w-full mt-16px" onClick={() => runOptimizer(true)} disabled={optRunning}>⚖ Compare roof schemes</button>
+                    </>)}
                     {optRunning && <button className="btn btn-secondary w-full mt-16px" onClick={cancelOptimizer}>✕ Cancel</button>}
                     {optProgress && (
                         <div className="info-note-inline">{optProgress.done} / {optProgress.total} designs evaluated · {optProgress.feasible} feasible</div>
@@ -636,12 +751,13 @@ export default function SteelAnalyzer() {
                     <>
                         <div className={`panel status-banner ${result.ok ? 'status-safe' : 'status-fail'}`}>
                             <h2 style={{ margin: 0 }}>
-                                {mode === 'frame' ? 'Portal frame' : mode === 'multispan' ? `Multi-span frame (${msSpans.length} spans)` : mode === 'column' ? 'Column' : 'Beam'}{craneOn && isFrame ? ' with crane' : ''} — {result.ok ? 'ADEQUATE' : 'REVISE'}
+                                {mode === 'frame' ? 'Portal frame' : mode === 'multispan' ? `Multi-span frame (${msSpans.length} spans)` : mode === 'column' ? 'Column' : 'Beam'}{isFrame && roofType === 'truss' ? ` — ${truss.family === '2L' ? '2-ISA' : truss.family} roof truss` : ''}{craneOn && isFrame ? ' with crane' : ''} — {result.ok ? 'ADEQUATE' : 'REVISE'}
                             </h2>
                             <p style={{ margin: '6px 0 0' }}>
                                 Max utilization <strong>{f3(result.maxUtil)}</strong> · steel {result.mass.toFixed(0)} kg
                                 {isFrame ? ` (${(result.mass / ((mode === 'frame' ? span : msSpans.reduce((a, q) => a + q.span, 0)) * bay)).toFixed(1)} kg/m² of plan per frame)` : ''} ·
                                 {' '}{code === 'IS800' ? 'IS 800:2007 LSM' : 'AISC 360-22 LRFD'}
+                                {result.stiffeners.n > 0 ? ` · ${result.stiffeners.n} web stiffeners (${result.stiffeners.mass.toFixed(0)} kg, included)` : ''}
                             </p>
                             {result.warnings.map((w, i) => <p key={i} style={{ color: 'var(--negative)', margin: '4px 0 0' }}>{w}</p>)}
                         </div>
@@ -662,19 +778,19 @@ export default function SteelAnalyzer() {
                             <div className="table-wrap">
                                 <table className="data-table">
                                     <thead><tr>
-                                        <th>Member</th><th>Depth (mm)</th><th>bf × tf / tw</th><th>Mass (kg)</th>
+                                        <th>Member</th><th>Depth (mm)</th><th>Section</th><th>Mass (kg)</th>
                                         <th>Max util.</th><th>Combination</th><th>At (m)</th><th>Governing check</th>
                                     </tr></thead>
                                     <tbody>
-                                        {result.members.map(m => {
+                                        {memberRows(result).map(({ m, label, mass }) => {
                                             const Ds = m.stations.map(s => s.D);
                                             const sec = m.governing.section;
                                             return (
                                                 <tr key={m.name}>
-                                                    <td><strong>{m.name}</strong></td>
-                                                    <td>{Math.min(...Ds).toFixed(0)} – {Math.max(...Ds).toFixed(0)}</td>
-                                                    <td>{sec ? `${sec.bf} × ${sec.tf} / ${sec.tw}` : '—'}</td>
-                                                    <td>{m.mass.toFixed(0)}</td>
+                                                    <td><strong>{label}</strong></td>
+                                                    <td>{Math.min(...Ds).toFixed(0)}{m.truss ? '' : ` – ${Math.max(...Ds).toFixed(0)}`}</td>
+                                                    <td>{m.truss ? m.truss.section.name : sec ? `${sec.bf} × ${sec.tf} / ${sec.tw}` : '—'}{m.stiffeners.length ? ` · ${m.stiffeners.length} stiff.` : ''}</td>
+                                                    <td>{mass.toFixed(0)}</td>
                                                     <td style={{ color: utilColor(m.maxUtil), fontWeight: 700 }}>{f3(m.maxUtil)}</td>
                                                     <td>{m.governing.combo}</td>
                                                     <td>{(m.governing.s * m.length).toFixed(2)}</td>
@@ -687,8 +803,88 @@ export default function SteelAnalyzer() {
                             </div>
                             {result.members.filter((m, i, arr) => arr.findIndex(x => x.group === m.group && x.maxUtil >= m.maxUtil) === i || arr.filter(x => x.group === m.group).length === 1)
                                 .filter((m, i, arr) => arr.findIndex(x => x.group === m.group) === i)
-                                .map(m => <GoverningDetail key={m.name} m={m} code={code} />)}
+                                .map(m => (m.truss ? <TrussDetail key={m.name} m={m} code={code} /> : <GoverningDetail key={m.name} m={m} code={code} />))}
                         </div>
+
+                        {result.stiffeners.n > 0 && (
+                            <div className="panel mt-16px">
+                                <h3 className="panel-title"><span className="panel-icon">▥</span>Transverse web stiffeners (single-sided flat plates)</h3>
+                                <div className="table-wrap">
+                                    <table className="data-table">
+                                        <thead><tr><th>Member</th><th>Positions from the start (m)</th><th>Panel c (mm)</th><th>Plate ts × bs (mm)</th><th>No.</th><th>Mass (kg)</th></tr></thead>
+                                        <tbody>
+                                            {result.members.filter(m => m.stiffeners.length).map(m => {
+                                                const plates = [...new Set(m.stiffeners.map(s => `${s.ts} × ${s.bs.toFixed(0)}`))].join(', ');
+                                                const cs = m.stiffeners.map(s => s.spacing);
+                                                return (
+                                                    <tr key={m.name}>
+                                                        <td>{m.name}</td>
+                                                        <td style={{ fontSize: '0.85em' }}>{m.stiffeners.map(s => (s.s * m.length).toFixed(2)).join(', ')}</td>
+                                                        <td>{Math.min(...cs).toFixed(0)}{Math.max(...cs) > Math.min(...cs) + 1 ? ` – ${Math.max(...cs).toFixed(0)}` : ''}</td>
+                                                        <td>{plates}</td>
+                                                        <td>{m.stiffeners.length}</td>
+                                                        <td>{m.stiffeners.reduce((a, s) => a + s.mass, 0).toFixed(1)}</td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                                <p className="config-note" style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                                    Positions at the sub-element ends and at the chosen spacing; plate width bs toward the flange tip, height = web depth there. Stiffener-to-web welds and end
+                                    (bearing) stiffeners are not designed here — detail per {code === 'IS800' ? 'IS 800 Cl. 8.7' : 'AISC 360-22 G2.3 / J10'}.
+                                </p>
+                            </div>
+                        )}
+
+                        {cmpResult && isFrame && (
+                            <div className="panel mt-16px">
+                                <h3 className="panel-title"><span className="panel-icon">⚖</span>Roof scheme comparison (each optimised)</h3>
+                                <div className="table-wrap">
+                                    <table className="data-table">
+                                        <thead><tr><th>Scheme</th><th>Status</th><th>Steel (kg)</th><th>Columns</th><th>Roof members</th><th>kg/m² plan</th><th>Stiffeners</th><th>Cost</th><th>Roof sections / depth</th><th></th></tr></thead>
+                                        <tbody>
+                                            {(() => {
+                                                const plan = (mode === 'frame' ? span : msSpans.reduce((a, q) => a + q.span, 0)) * bay;
+                                                const rows = cmpResult.map(s => {
+                                                    const r = s.result;
+                                                    if (!r || !s.best) return { s, r, cost: Infinity, cols: 0, roof: 0 };
+                                                    const cols = r.members.filter(m => /column/i.test(m.group)).reduce((a, m) => a + m.mass, 0);
+                                                    const cost = r.members.reduce((a, m) => a + m.mass * (m.truss ? (m.truss.section.family === '2L' ? rates.angle : rates.tube) : rates.plate), 0)
+                                                        + r.stiffeners.n * rates.stiffener;
+                                                    return { s, r, cost, cols, roof: r.mass - cols };
+                                                });
+                                                const best = Math.min(...rows.map(x => x.cost));
+                                                return rows.map(({ s, r, cost, cols, roof }) => {
+                                                    const t = s.best && (s.best.mode === 'frame' || s.best.mode === 'multispan') ? s.best.input.truss : null;
+                                                    const rafter = s.best && (s.best.mode === 'frame' || s.best.mode === 'multispan') ? s.best.input.rafter : null;
+                                                    return (
+                                                        <tr key={s.scheme} style={cost === best && Number.isFinite(best) ? { fontWeight: 700 } : undefined}>
+                                                            <td>{s.scheme}</td>
+                                                            <td style={{ color: r && s.best ? utilColor(r.maxUtil) : 'var(--negative)' }}>{r && s.best ? `OK (${f2(r.maxUtil)})` : 'no feasible design'}</td>
+                                                            <td>{r && s.best ? r.mass.toFixed(0) : '—'}</td>
+                                                            <td>{s.best ? cols.toFixed(0) : '—'}</td>
+                                                            <td>{s.best ? roof.toFixed(0) : '—'}</td>
+                                                            <td>{r && s.best ? (r.mass / plan).toFixed(1) : '—'}</td>
+                                                            <td>{r && s.best ? r.stiffeners.n : '—'}</td>
+                                                            <td>{Number.isFinite(cost) ? `${cost.toFixed(0)}${cost === best ? ' ★' : ` (+${((cost / best - 1) * 100).toFixed(0)} %)`}` : '—'}</td>
+                                                            <td style={{ fontSize: '0.8em' }}>{t ? `${TRUSS_ROLES.map(k => t[k]).join(' / ')}; h0 = ${t.depthEave} m`
+                                                                : rafter ? `${rafter.profile.D[0]}→${rafter.profile.D[1] ?? rafter.profile.D[0]} · ${rafter.bf}×${rafter.tf}/${rafter.tw}` : '—'}</td>
+                                                            <td>{s.best && <button className="btn btn-secondary" onClick={() => applyBest(s.best!)}>Apply</button>}</td>
+                                                        </tr>
+                                                    );
+                                                });
+                                            })()}
+                                        </tbody>
+                                    </table>
+                                </div>
+                                <p className="config-note" style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                                    Cost = Σ member mass × rate per kg (plates for built-up members and stiffeners, tubes, angles) + stiffeners × rate each. The default rates are 1.0 —
+                                    enter fabricated and erected project rates; connections (knee, apex, gussets, splices), purlin cleats and painting area are not included and
+                                    differ between schemes (tubes: less paint area, end preparation; angles: more gussets and bolts).
+                                </p>
+                            </div>
+                        )}
 
                         {result.deflections.length > 0 && (
                             <div className="panel mt-16px">
@@ -753,6 +949,13 @@ export default function SteelAnalyzer() {
                                         : 'Crane combinations (ASCE 7-22 §2.3.1, crane as L with factor 1.0 in combinations 3 and 4): 1.2D + 1.6C + 0.5Lr, 1.2D + 1.6Lr + 1.0C, 1.2D + 1.0W + 1.0C + 0.5Lr.'}
                                         {' '}Crane serviceability (rail-level sway, change of rail gauge) under static crane loads with surge, and under 0.8 × (crane + wind) with the surge in the wind direction (wind × the drift wind factor). IS 800 Table 6: H/400 cab-operated, H/200 pendent-operated cranes.</li>
                                 )}
+                                {isFrame && roofType === 'truss' && (
+                                    <li>Roof truss: continuous chords and pin-ended verticals / Pratt diagonals; the bottom chord frames into the columns h0 below the eaves (knee moment in the
+                                        column). Truss members are designed as axial members with bending from their own loads: {code === 'IS800'
+                                            ? 'IS 800 Cl. 7.1.2 (curve b for cold-formed hollow sections, c for angles), Cl. 6.2 / 6.3.3 tension (β = 0.7 for angles, conservative), Cl. 8.2.1 / 9.3 interaction (KLT = 1, Cmz = 1), Table 2 class (CHS 88ε², SHS 42ε, angles 15.7ε and 25ε), Table 3 slenderness from the sign of the axial force (180 / 250 with wind only / 400 tension only).'
+                                            : 'AISC 360-22 E3 (and E4 flexural-torsional buckling for double angles), D2 / D3 tension (U = 1 for welded HSS, 1 − x̄/l with l = 2b for double angles), F7 / F8 / F9 flexure, G shear, H1-1; slender elements excluded (no E7); KL/r ≤ 200 / L/r ≤ 300 user notes.'}
+                                        {' '}Chord effective length K × panel in plane, purlin / brace spacing out of plane; web members L both ways. Built-up double-angle connectors (stitch plates), gussets and joint design (CHS / SHS joint resistance, IS 800 Cl. 10, EN 1993-1-8 Ch. 7 / AISC Ch. K) are not checked here — verify.</li>
+                                )}
                                 {mode === 'multispan' && (
                                     <li>Multi-span frame: exterior columns, interior columns and rafters designed as three groups; wind on the two end walls and on every roof slope; interior columns carry no wall wind. In-plane buckling from the elastic buckling analysis of the whole frame.</li>
                                 )}
@@ -763,6 +966,38 @@ export default function SteelAnalyzer() {
                     </>
                 )}
             </section>
+        </div>
+    );
+}
+
+/** Member table rows: every I-section member; one row per truss group (its governing member). */
+function memberRows(result: DesignResult) {
+    const rows: { m: DesignResult['members'][number]; label: string; mass: number }[] = [];
+    const done = new Set<string>();
+    for (const m of result.members) {
+        if (!m.truss) { rows.push({ m, label: m.name, mass: m.mass }); continue; }
+        if (done.has(m.group)) continue;
+        done.add(m.group);
+        const ms = result.members.filter(x => x.group === m.group);
+        const worst = ms.reduce((a, b) => (b.maxUtil > a.maxUtil ? b : a));
+        rows.push({ m: worst, label: ms.length > 1 ? `${m.group} (${ms.length}) — ${worst.name}` : worst.name, mass: ms.reduce((a, x) => a + x.mass, 0) });
+    }
+    return rows;
+}
+
+function TrussDetail({ m, code }: { m: DesignResult['members'][number]; code: SteelCode }) {
+    const t = m.truss;
+    if (!t) return null;
+    const r = t.result;
+    const kN = (v: number) => (Number.isFinite(v) ? (v / 1e3).toFixed(1) : '∞');
+    const st = m.stations.reduce((a, b) => (b.util > a.util ? b : a));
+    return (
+        <div className="info-note-inline" style={{ marginTop: 10 }}>
+            <strong>{m.group} — {m.name}</strong> ({t.section.name}, {t.section.w.toFixed(1)} kg/m): N = {f1(st.N)} kN, M = {f1(st.M)} kN·m ({m.governing.combo}).
+            {' '}Effective lengths in plane {t.Lz.toFixed(2)} m, out of plane {t.Ly.toFixed(2)} m; KL/r = {t.KLr.toFixed(0)} ≤ {t.slenderLimit} ({t.slenderBasis}).
+            {r && <>{' '}{code === 'IS800' ? 'Pd' : 'φPn'} = {kN(r.Pc)} kN, {code === 'IS800' ? 'Td' : 'φTn'} = {kN(r.Tc)} kN, {code === 'IS800' ? 'Md' : 'φMn'} = {(r.Mc / 1e6).toFixed(1)} kN·m.
+                {' '}Ratios: tension {f3(r.util.tension)}, section {f3(r.util.section)}, in-plane {f3(r.util.bucklingZ)}, out-of-plane {f3(r.util.bucklingY)}, class {f3(r.util.class)}.
+                {r.notes.length ? ` ${r.notes.join('; ')}.` : ''}</>}
         </div>
     );
 }
@@ -833,9 +1068,14 @@ function FrameDiagram({ result, combo }: { result: DesignResult; combo?: DesignR
                     return `${X(x + nx * o).toFixed(1)},${Y(y + ny * o).toFixed(1)}`;
                 }) : [];
                 const Mpk = cm ? cm.M.reduce((p, v, k) => (Math.abs(v) > Math.abs(cm.M[p]) ? k : p), 0) : -1;
+                const ticks = m.stiffeners.map((s, k) => {
+                    const h = s.D * depthScale / 2;
+                    return <line key={`st${k}`} x1={X(s.x + nx * h)} y1={Y(s.y + ny * h)} x2={X(s.x - nx * h)} y2={Y(s.y - ny * h)} stroke="#0f172a" strokeWidth={0.8} />;
+                });
                 return (
                     <g key={m.name}>
                         {polys}
+                        {ticks}
                         {bmd.length > 0 && <polyline points={`${X(a.x)},${Y(a.y)} ${bmd.join(' ')} ${X(b.x)},${Y(b.y)}`} fill="none" stroke="#6366f1" strokeWidth={1.4} />}
                         {cm && Mpk >= 0 && Math.abs(cm.M[Mpk]) > 1e-6 && (
                             <text x={X(a.x + (b.x - a.x) * cm.s[Mpk] + nx * cm.M[Mpk] * mScale)} y={Y(a.y + (b.y - a.y) * cm.s[Mpk] + ny * cm.M[Mpk] * mScale) - 4}
