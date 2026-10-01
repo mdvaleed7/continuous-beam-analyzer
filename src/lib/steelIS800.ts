@@ -17,8 +17,16 @@
  *  Slender web (d/tw beyond the semi-compact limit): moment carried by the
  *                          flanges only, Mfd = Af·h0·fy/γm0 (plate-girder
  *                          approach); d/tw ≤ 200ε without stiffeners (Cl. 8.6.1.1)
- *  Shear ................. Cl. 8.4, web buckling Cl. 8.4.2.2(a), kv = 5.35
- *                          (no intermediate stiffeners)
+ *  Shear ................. Cl. 8.4, web buckling Cl. 8.4.2.2(a) (simple
+ *                          post-critical): kv = 5.35 without intermediate
+ *                          stiffeners; with transverse stiffeners at spacing c
+ *                          kv = 4 + 5.35/(c/d)² (c/d < 1), 5.35 + 4/(c/d)² (c/d ≥ 1)
+ *  Web limits ............ Cl. 8.6.1.1 / 8.6.1.2: d/tw ≤ min(200ε, 345ε²) unstiffened;
+ *                          stiffened d ≤ c ≤ 3d: 200ε; 0.74d ≤ c < d: c/tw ≤ 200ε;
+ *                          c < 0.74d: 270ε; flange buckling 345ε² (c ≥ 1.5d) / 345ε
+ *  Stiffeners ............ Cl. 8.7.1.2 outstand ≤ 20·ts·ε (core 14·ts·ε),
+ *                          Cl. 8.7.2.4 Is ≥ 0.75·d·tw³ (c/d ≥ √2) or 1.5·d³·tw³/c²;
+ *                          no tension field, so Fq = V − Vcr/γm0 ≤ 0 (Cl. 8.7.2.5)
  *  High shear ............ Cl. 9.2.2 (V > 0.6Vd)
  *  Combined .............. Cl. 9.3.1.3 (section, linear) and Cl. 9.3.2.2
  *                          (member buckling, Kz / KLT; Cmz = 0.9 sway frames)
@@ -99,15 +107,49 @@ export function ltbIS(pMin: SectionProps, fy: number, LLT: number, N = 0) {
     return { Mcr, lambdaLT, chiLT };
 }
 
-/** Shear strength with web buckling (Cl. 8.4, 8.4.2.2 a), N. */
-export function shearIS(p: SectionProps, fy: number) {
+/** Cl. 8.4.2.2(a) shear buckling coefficient; c = transverse stiffener spacing (mm), undefined = none. */
+export function kvIS(c: number | undefined, d: number): number {
+    if (c === undefined || !Number.isFinite(c)) return 5.35;
+    const r = c / d;
+    return r < 1 ? 4 + 5.35 / (r * r) : 5.35 + 4 / (r * r);
+}
+
+/** Largest d/tw by Cl. 8.6.1.1 (serviceability) and 8.6.1.2 (compression flange buckling into the web). */
+export function webLimitIS(d: number, c: number | undefined, fy: number): number {
+    const eps = Math.sqrt(250 / fy);
+    if (c === undefined || !Number.isFinite(c) || c > 3 * d) return Math.min(200 * eps, 345 * eps * eps);
+    const serv = c >= d ? 200 * eps : c >= 0.74 * d ? 200 * eps * d / c : 270 * eps;
+    return Math.min(serv, c >= 1.5 * d ? 345 * eps * eps : 345 * eps);
+}
+
+export const STIFFENER_T = [6, 8, 10, 12, 16];      // mm, flat plate thicknesses tried
+
+/**
+ * Lightest single-sided flat intermediate stiffener (outstand toward the
+ * flange tip): Cl. 8.7.1.2 outstand ≤ 20·ts·ε, stiffness from the core
+ * section (14·ts·ε) about the web face ≥ Cl. 8.7.2.4. Null if none works.
+ */
+export function stiffenerIS(d: number, tw: number, bf: number, fy: number, c: number) {
+    const eps = Math.sqrt(250 / fy);
+    const IsMin = c / d >= Math.SQRT2 ? 0.75 * d * tw ** 3 : 1.5 * d ** 3 * tw ** 3 / (c * c);
+    for (const ts of STIFFENER_T) {
+        const bs = Math.min((bf - tw) / 2, 20 * ts * eps);
+        const Is = ts * Math.min(bs, 14 * ts * eps) ** 3 / 3;
+        if (bs > 0 && Is >= IsMin) return { ts, bs, Is, IsMin, area: ts * bs };
+    }
+    return null;
+}
+
+/** Shear strength with web buckling (Cl. 8.4, 8.4.2.2 a), N; c = stiffener spacing (mm). */
+export function shearIS(p: SectionProps, fy: number, c?: number) {
     const { E } = IS800;
     const eps = Math.sqrt(250 / fy);
     const dt = p.hw / p.tw;
+    const kv = kvIS(c, p.hw);
     let tau_b = fy / Math.sqrt(3);
     let lambdaW = 0;
-    if (dt > 67 * eps) {
-        const kv = 5.35;                                                   // no transverse stiffeners
+    const buckling = dt > 67 * eps * Math.sqrt(kv / 5.35);                 // Cl. 8.4.2.1
+    if (buckling) {
         const tauCr = kv * Math.PI ** 2 * E / (12 * (1 - 0.3 * 0.3) * dt * dt);
         lambdaW = Math.sqrt(fy / (Math.sqrt(3) * tauCr));
         tau_b = lambdaW <= 0.8 ? fy / Math.sqrt(3)
@@ -116,7 +158,7 @@ export function shearIS(p: SectionProps, fy: number) {
     }
     // Cl. 8.4.1.1: shear area of a WELDED I-section Av = d·tw (d = clear web depth); h·tw is for rolled sections
     const Av = p.hw * p.tw;
-    return { Vd: Av * tau_b / IS800.gm0, tau_b, lambdaW, buckling: dt > 67 * eps };
+    return { Vd: Av * tau_b / IS800.gm0, tau_b, lambdaW, buckling, kv };
 }
 
 export interface ISStationInput {
@@ -129,6 +171,7 @@ export interface ISStationInput {
     lambdaLT: number;
     CmLT: number;       // equivalent uniform moment factor of the segment (Table 18)
     Cmz?: number;       // default 0.9 (sway frame, Table 18)
+    c?: number;         // transverse web stiffener spacing (mm); undefined = none
 }
 
 export interface ISStationResult {
@@ -148,7 +191,12 @@ export function checkStationIS(p: SectionProps, fy: number, s: ISStationInput): 
     const cls = classifyIS(p, fy, Ncomp);
     const eps = cls.eps;
     if (cls.flange === 'slender') notes.push(`flange b/tf = ${cls.bt.toFixed(1)} > 13.6ε — slender flange not covered`);
-    if (cls.dt > 200 * eps) notes.push(`web d/tw = ${cls.dt.toFixed(0)} > 200ε — stiffeners required (Cl. 8.6.1.1)`);
+    const dtMax = webLimitIS(p.hw, s.c, fy);
+    if (cls.dt > dtMax) {
+        notes.push(s.c === undefined
+            ? `web d/tw = ${cls.dt.toFixed(0)} > ${dtMax.toFixed(0)} — stiffeners required (Cl. 8.6.1.1)`
+            : `web d/tw = ${cls.dt.toFixed(0)} > ${dtMax.toFixed(0)} with stiffeners at ${s.c.toFixed(0)} mm — stiffeners required (Cl. 8.6.1)`);
+    }
 
     // Axial
     const Nd = p.A * fyd;
@@ -163,7 +211,7 @@ export function checkStationIS(p: SectionProps, fy: number, s: ISStationInput): 
     // Bending
     const sec = bendingSectionIS(p, fy, cls);
     let Md = sec.Md;
-    const Vs = shearIS(p, fy);
+    const Vs = shearIS(p, fy, s.c);
     const Vd = Vs.Vd;
     if (s.V > 0.6 * Vd && cls.web !== 'slender') {
         // Cl. 9.2.2: Mdv = Md − β(Md − Mfd) ≤ 1.2·Ze·fy/γm0, β = (2V/Vd − 1)²

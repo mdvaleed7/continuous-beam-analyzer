@@ -8,8 +8,14 @@
  *  Compression ...... E3 (Fcr = 0.658^(Fy/Fe)·Fy or 0.877Fe), E7 effective
  *                     widths for slender elements (Table E7.1 c1, c2)
  *  Flexure .......... F2 / F3 (compact web), F4 (noncompact web), F5 (slender
- *                     web); F13.2 h/tw ≤ 260 and aw ≤ 10 without stiffeners
- *  Shear ............ G2.1, kv = 5.34 (no transverse stiffeners), φv = 0.9
+ *                     web); F13.2 h/tw ≤ 260 and aw ≤ 10 without stiffeners;
+ *                     with transverse stiffeners at a: (h/tw)max = 12.0√(E/Fy)
+ *                     (a/h ≤ 1.5) or 0.40E/Fy (a/h > 1.5)
+ *  Shear ............ G2.1 (no tension field), φv = 0.9: kv = 5.34 without
+ *                     stiffeners or a/h > 3, else kv = 5 + 5/(a/h)²
+ *  Stiffeners ....... G2.3: Ist ≥ Ist2 = [2.5/(a/h)² − 2]·b·tw³ ≥ 0.5·b·tw³,
+ *                     b = min(a, h), about the web face (single plate);
+ *                     (b/t)st ≤ 0.56√(E/Fyst)
  *  Tension .......... D2(a) yielding, φt = 0.9
  *  Interaction ...... H1-1a / H1-1b
  *  φ = 0.90 for compression, flexure, shear (built-up) and tension yielding.
@@ -145,14 +151,37 @@ export function cbAISC(Mmax: number, MA: number, MB: number, MC: number): number
     return den > 0 ? Math.min(3, 12.5 * Mmax / den) : 1;
 }
 
-/** G2.1 shear, no transverse stiffeners (N). */
-export function shearAISC(p: SectionProps, Fy: number) {
+/** G2.1 shear without tension field (N); a = transverse stiffener spacing (mm), undefined = none. */
+export function shearAISC(p: SectionProps, Fy: number, a?: number) {
     const { E } = AISC;
-    const kv = 5.34;
+    const ah = a !== undefined && Number.isFinite(a) ? a / p.hw : Infinity;
+    const kv = ah <= 3 ? 5 + 5 / (ah * ah) : 5.34;
     const ht = p.hw / p.tw;
     const lim = 1.10 * Math.sqrt(kv * E / Fy);
     const Cv1 = ht <= lim ? 1 : lim / ht;
-    return { Vn: 0.6 * Fy * p.Aw * Cv1, Cv1 };
+    return { Vn: 0.6 * Fy * p.Aw * Cv1, Cv1, kv };
+}
+
+/** F13.2 largest h/tw: 260 unstiffened (a/h > 3 counts as unstiffened); 12.0√(E/Fy) (a/h ≤ 1.5); 0.40E/Fy. */
+export function webLimitAISC(h: number, Fy: number, a?: number): number {
+    const { E } = AISC;
+    const ah = a !== undefined && Number.isFinite(a) ? a / h : Infinity;
+    if (ah > 3) return 260;
+    return ah <= 1.5 ? 12.0 * Math.sqrt(E / Fy) : 0.40 * E / Fy;
+}
+
+/** Lightest single-plate transverse stiffener meeting G2.3 (Ist2 and b/t), or null. */
+export function stiffenerAISC(h: number, tw: number, bf: number, Fy: number, a: number) {
+    const { E } = AISC;
+    const ah = a / h;
+    const b = Math.min(a, h);
+    const IsMin = Math.max(0.5, 2.5 / (ah * ah) - 2) * b * tw ** 3;
+    for (const ts of [6, 8, 10, 12, 16]) {
+        const bs = Math.min((bf - tw) / 2, 0.56 * Math.sqrt(E / Fy) * ts);
+        const Is = ts * bs ** 3 / 3;
+        if (bs > 0 && Is >= IsMin) return { ts, bs, Is, IsMin, area: ts * bs };
+    }
+    return null;
 }
 
 export interface AISCStationInput {
@@ -162,6 +191,7 @@ export interface AISCStationInput {
     FeIn: number;   // in-plane elastic buckling stress at the section (MPa)
     FeOut: number;  // out-of-plane elastic buckling stress (MPa)
     FnLTB: number;  // LTB stress capacity of the segment (MPa)
+    a?: number;     // transverse web stiffener spacing (mm); undefined = none
 }
 
 export interface AISCStationResult {
@@ -179,14 +209,15 @@ export function checkStationAISC(p: SectionProps, Fy: number, s: AISCStationInpu
     const cls = classifyAISC(p, Fy);
     const notes: string[] = [];
     const aw = p.hw * p.tw / (p.bf * p.tf);
-    if (cls.lw > 260) notes.push(`h/tw = ${cls.lw.toFixed(0)} > 260 — stiffeners required (F13.2)`);
+    const htMax = webLimitAISC(p.hw, Fy, s.a);
+    if (cls.lw > htMax) notes.push(`h/tw = ${cls.lw.toFixed(0)} > ${htMax.toFixed(0)}${s.a === undefined ? '' : ` with stiffeners at ${s.a.toFixed(0)} mm`} — stiffeners required (F13.2)`);
     if (aw > 10) notes.push(`aw = ${aw.toFixed(1)} > 10 (F13.2)`);
 
     const loc = flexureLocalAISC(p, Fy);
     const MnLTB = s.FnLTB * p.Zez;
     const Mn = Math.min(loc.Mn, MnLTB);
     const Mc = phi * Mn;
-    const Vc = phi * shearAISC(p, Fy).Vn;
+    const Vc = phi * shearAISC(p, Fy, s.a).Vn;
     const Tc = phi * Fy * p.A;
 
     let interaction: number;

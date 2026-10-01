@@ -38,9 +38,10 @@
  *  lines (no rigid knee zones). Connections, purlins, girts and bracing are
  *  not designed here.
  */
-import { memberSectionAt, memberMass, type MemberSection, type SectionProps } from '../lib/steelSection';
-import { checkStationIS, ltbIS, IS800, type ISStationResult } from '../lib/steelIS800';
-import { checkStationAISC, ltbStressAISC, cbAISC, AISC, type AISCStationResult } from '../lib/steelAISC360';
+import { memberSectionAt, memberMass, STEEL_DENSITY, type MemberSection, type SectionProps } from '../lib/steelSection';
+import { checkStationIS, ltbIS, stiffenerIS, IS800, type ISStationResult } from '../lib/steelIS800';
+import { checkStationAISC, ltbStressAISC, cbAISC, stiffenerAISC, AISC, type AISCStationResult } from '../lib/steelAISC360';
+import { checkTrussIS, checkTrussAISC, trussSectionByName, trussCatalogue, type TrussSection, type TrussFamily, type TrussMemberResult } from '../lib/steelTruss';
 
 export type SteelCode = 'IS800' | 'AISC360';
 
@@ -120,6 +121,10 @@ export interface MemberDef {
     Ly: number;                  // unbraced length out-of-plane / LTB (m)
     sway: boolean;               // IS 800: Cmz = 0.9 (sway) or from ψ (non-sway)
     breaks?: number[];           // extra FE nodes at these fractions (i → j), e.g. crane brackets
+    nSub?: number;               // sub-elements of this member (default: the model's nSub)
+    // truss member (CHS / SHS / double angle): designed as an axial member with explicit
+    // effective lengths; bar = pin-ended (axial only, no bending stiffness)
+    truss?: { sec: TrussSection; bar: boolean; Lz: number; role: string };   // Lz: in-plane effective length (m); Ly gives out of plane
 }
 
 export interface MemberLoad { member: number; wx: number; wy: number }   // kN/m of member length, global
@@ -149,6 +154,7 @@ export interface DeflectionCheckDef {
 export interface StructureModel {
     code: SteelCode;
     fy: number;
+    fu?: number;                                // MPa — truss member tension rupture (default 410 IS / 450 AISC)
     nodes: { x: number; y: number }[];
     members: MemberDef[];
     supports: SupportDef[];
@@ -157,6 +163,9 @@ export interface StructureModel {
     notionalNodes: number[];                    // main nodes receiving notional loads
     deflections: DeflectionCheckDef[];
     nSub: number;
+    // transverse web stiffeners chosen per sub-element where they let the member pass
+    // (spacing = element length / k, k = 1, 2, 3); penaltyKg per stiffener in the objective only
+    stiffeners?: { enabled: boolean; penaltyKg: number };
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -168,6 +177,9 @@ interface Element {
     L: number; c: number; s: number;    // m, direction cosines
     sMid: number;                       // member fraction (geometric) at mid
     A: number; I: number;               // mm², mm⁴ at mid (for stiffness)
+    bar: boolean;                       // pin-ended truss member: axial stiffness only
+    tr: boolean;                        // truss member: string geometric stiffness (P-Δ of the chord, no member buckling —
+                                        //   member buckling is checked with its effective length)
 }
 
 export interface FEModel {
@@ -225,13 +237,21 @@ function buildFE(model: StructureModel): FEModel {
         if (mainNode[m] < 0) { mainNode[m] = nodeXY.length; nodeXY.push({ ...model.nodes[m] }); }
         return mainNode[m];
     };
+    // a main node lying on an intermediate point of a member joins it there (truss panel points)
+    const mainAt = (x: number, y: number) => {
+        const q = model.nodes.findIndex(p => Math.abs(p.x - x) < 1e-6 && Math.abs(p.y - y) < 1e-6);
+        return q < 0 ? undefined : q;
+    };
     model.members.forEach((mem, mi) => {
         const A = model.nodes[mem.i], B = model.nodes[mem.j];
-        const fr = memberFractions(model.nSub, mem.breaks);
+        const fr = memberFractions(mem.nSub ?? model.nSub, mem.breaks);
         const list = [nodeOf(mem.i)];
         for (let k = 1; k < fr.length - 1; k++) {
             const r = fr[k];
-            nodeXY.push({ x: A.x + (B.x - A.x) * r, y: A.y + (B.y - A.y) * r });
+            const x = A.x + (B.x - A.x) * r, y = A.y + (B.y - A.y) * r;
+            const q = mainAt(x, y);
+            if (q !== undefined) { list.push(nodeOf(q)); continue; }
+            nodeXY.push({ x, y });
             list.push(nodeXY.length - 1);
         }
         list.push(nodeOf(mem.j));
@@ -241,8 +261,11 @@ function buildFE(model: StructureModel): FEModel {
         const c = (B.x - A.x) / Ltot, s = (B.y - A.y) / Ltot;
         for (let k = 0; k < fr.length - 1; k++) {
             const sMid = 0.5 * (fr[k] + fr[k + 1]);
-            const p = memberSectionAt(mem.section, mem.reverse ? 1 - sMid : sMid);
-            elements.push({ member: mi, k, n1: list[k], n2: list[k + 1], L: Ltot * (fr[k + 1] - fr[k]), c, s, sMid, A: p.A, I: p.Iz });
+            const p = mem.truss ? { A: mem.truss.sec.A, Iz: mem.truss.sec.Iz } : memberSectionAt(mem.section, mem.reverse ? 1 - sMid : sMid);
+            elements.push({
+                member: mi, k, n1: list[k], n2: list[k + 1], L: Ltot * (fr[k + 1] - fr[k]), c, s, sMid, A: p.A, I: p.Iz,
+                bar: !!mem.truss?.bar, tr: !!mem.truss,
+            });
         }
     });
     // Reverse Cuthill–McKee renumbering: narrow band for branched frames
@@ -259,6 +282,10 @@ function buildFE(model: StructureModel): FEModel {
     let hb = 0;
     for (const e of elements) hb = Math.max(hb, Math.abs(e.n1 - e.n2) * 3 + 2);
     const fixed = new Array(ndof).fill(false);
+    // rotation of a node joined only by pin-ended bars has no stiffness: restrain it
+    const bends = new Array<boolean>(nodeXY.length).fill(false);
+    for (const e of elements) if (!e.bar) { bends[e.n1] = true; bends[e.n2] = true; }
+    bends.forEach((b, n) => { if (!b) fixed[3 * n + 2] = true; });
     for (const sp of model.supports) {
         const n = mainNode[sp.node];
         if (sp.ux) fixed[3 * n] = true;
@@ -270,7 +297,7 @@ function buildFE(model: StructureModel): FEModel {
 
 // local stiffness (kN, m) — E in MPa, A mm², I mm⁴
 function kLocal(e: Element, E: number, fA: number, fI: number): number[][] {
-    const EA = E * e.A * 1e-3 * fA, EI = E * e.I * 1e-9 * fI, L = e.L;
+    const EA = E * e.A * 1e-3 * fA, EI = e.bar ? 0 : E * e.I * 1e-9 * fI, L = e.L;
     const a = EA / L, b = 12 * EI / L ** 3, c = 6 * EI / L ** 2, d = 4 * EI / L, f = 2 * EI / L;
     return [
         [a, 0, 0, -a, 0, 0],
@@ -282,9 +309,14 @@ function kLocal(e: Element, E: number, fA: number, fI: number): number[][] {
     ];
 }
 
-// consistent geometric stiffness, N tension positive (kN)
-function kgLocal(L: number, N: number): number[][] {
+// consistent geometric stiffness, N tension positive (kN); string = transverse terms only
+// (truss members: chord rotation P-Δ, member buckling checked separately)
+function kgLocal(L: number, N: number, string = false): number[][] {
     const q = N / L;
+    if (string) return [
+        [0, 0, 0, 0, 0, 0], [0, q, 0, 0, -q, 0], [0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0], [0, -q, 0, 0, q, 0], [0, 0, 0, 0, 0, 0],
+    ];
     return [
         [0, 0, 0, 0, 0, 0],
         [0, q * 6 / 5, q * L / 10, 0, -q * 6 / 5, q * L / 10],
@@ -330,7 +362,7 @@ function elementMats(fe: FEModel, E: number): ElementMats[] {
         const full = kLocal(e, E, 1, 1);
         const axialOnly = kLocal(e, E, 1, 0);
         const bend = full.map((row, i) => row.map((v, j) => v - axialOnly[i][j]));
-        return { KA: toGlobal(e, axialOnly), KB: toGlobal(e, bend), G: toGlobal(e, kgLocal(e.L, 1)) };
+        return { KA: toGlobal(e, axialOnly), KB: toGlobal(e, bend), G: toGlobal(e, kgLocal(e.L, 1, e.tr)) };
     });
     matCache.set(fe, { E, mats });
     return mats;
@@ -405,11 +437,18 @@ function combineLoads(model: StructureModel, fe: FEModel, combo: ComboDef): Fact
     return { F, elemLoads, totalGravity };
 }
 
+/** Consistent nodal loads (local) of a uniform load wx, wy (kN/m); pin-ended bar: no end moments. */
+function localFixedEnd(e: Element, wx: number, wy: number): number[] {
+    const { c, s, L } = e;
+    const qa = wx * c + wy * s, qt = -wx * s + wy * c;
+    const m = e.bar ? 0 : qt * L * L / 12;
+    return [qa * L / 2, qt * L / 2, m, qa * L / 2, qt * L / 2, -m];
+}
+
 /** Consistent nodal loads (global) of a uniform load wx, wy (kN/m). */
 function equivalentNodal(e: Element, wx: number, wy: number): number[] {
-    const { c, s, L } = e;
-    const qa = wx * c + wy * s, qt = -wx * s + wy * c;           // local
-    const fl = [qa * L / 2, qt * L / 2, qt * L * L / 12, qa * L / 2, qt * L / 2, -qt * L * L / 12];
+    const { c, s } = e;
+    const fl = localFixedEnd(e, wx, wy);
     return [
         c * fl[0] - s * fl[1], s * fl[0] + c * fl[1], fl[2],
         c * fl[3] - s * fl[4], s * fl[3] + c * fl[4], fl[5],
@@ -439,12 +478,11 @@ function elementForces(fe: FEModel, E: number, stiff: Stiff, u: Float64Array, lo
         const ul = [c * ug[0] + s * ug[1], -s * ug[0] + c * ug[1], ug[2], c * ug[3] + s * ug[4], -s * ug[3] + c * ug[4], ug[5]];
         const kl = kLocal(e, E, stiff[idx].a, stiff[idx].i);
         if (axial) {
-            const g = kgLocal(e.L, axial[idx]);
+            const g = kgLocal(e.L, axial[idx], e.tr);
             for (let i = 0; i < 6; i++) for (let j = 0; j < 6; j++) kl[i][j] += g[i][j];
         }
         const { wx, wy } = loads[idx];
-        const qa = wx * c + wy * s, qt = -wx * s + wy * c, L = e.L;
-        const feq = [qa * L / 2, qt * L / 2, qt * L * L / 12, qa * L / 2, qt * L / 2, -qt * L * L / 12];
+        const feq = localFixedEnd(e, wx, wy);
         const f = kl.map((row, i) => row.reduce((acc, v, j) => acc + v * ul[j], 0) - feq[i]);
         // internal actions: N tension +, V, M (sagging about local z with the i→j axis)
         forces.push({ N1: -f[0], V1: f[1], M1: -f[2], N2: f[3], V2: -f[4], M2: f[5] });
@@ -571,6 +609,26 @@ export interface MemberResult {
     governing: { combo: string; s: number; check: string; detail: ISStationResult | AISCStationResult | null; section: SectionProps | null };
     segments: { from: number; to: number; minDepth: number; Cb?: number; CmLT?: number; chiLT?: number; FnLTB?: number }[];
     PeIn?: number;                      // AISC: pinned-pinned member buckling load (kN)
+    stiffeners: StiffenerItem[];        // transverse web stiffeners of this member (mass included in `mass`)
+    truss?: TrussMemberSummary;         // truss members (CHS / SHS / double angle)
+}
+
+export interface TrussMemberSummary {
+    section: TrussSection;
+    role: string;
+    Lz: number; Ly: number;             // effective lengths (m)
+    KLr: number;                        // largest slenderness
+    slenderLimit: number;               // IS 800 Table 3 / AISC E2, D1 notes, from the sign of N over the combinations
+    slenderBasis: string;
+    result: TrussMemberResult | null;   // governing station check
+}
+
+export interface StiffenerItem {
+    s: number;          // member fraction (i → j)
+    x: number; y: number; D: number;   // position (m) and member depth there (mm)
+    ts: number; bs: number;            // plate thickness / outstand (mm)
+    spacing: number;    // panel length c (mm)
+    mass: number;       // kg
 }
 
 export interface ComboResult {
@@ -598,7 +656,15 @@ export interface DesignResult {
     combos: ComboResult[];
     deflections: DeflectionResult[];
     warnings: string[];
+    stiffeners: { n: number; mass: number };   // totals (mass included in `mass`)
+    cost: number;                        // optimizer objective: mass + penalty × stiffeners (kg)
     geometry: { nodes: { x: number; y: number }[]; members: { name: string; i: number; j: number }[] };
+}
+
+/** Ultimate strength (MPa) when not given: IS 2062 grades E250…E450; AISC: A36 / A500 Gr. C / A572 Gr. 50 typical. */
+export function defaultFu(code: SteelCode, fy: number): number {
+    if (code === 'IS800') return fy <= 250 ? 410 : fy <= 275 ? 430 : fy <= 300 ? 440 : fy <= 350 ? 490 : fy <= 410 ? 540 : 570;
+    return fy <= 250 ? 400 : fy <= 317 ? 427 : 450;
 }
 
 const interp = (xs: number[], ys: number[], x: number) => {
@@ -623,11 +689,13 @@ export function designStructure(model: StructureModel, opts: { detail?: boolean;
     const warnings: string[] = [];
     const memberLen = model.members.map(m => Math.hypot(model.nodes[m.j].x - model.nodes[m.i].x, model.nodes[m.j].y - model.nodes[m.i].y));
     const secAt = (mi: number, s: number) => memberSectionAt(model.members[mi].section, model.members[mi].reverse ? 1 - s : s);
+    const trussDepth = (t: TrussSection) => t.D ?? t.H ?? t.b ?? 0;
+    const depthAt = (mi: number, s: number) => { const t = model.members[mi].truss; return t ? trussDepth(t.sec) : secAt(mi, s).D; };
 
     // AISC: pinned-pinned elastic buckling of each member (K = 1)
     const peCache = new Map<string, number>();
     const PeIn = model.members.map((m, mi) => {
-        if (code !== 'AISC360') return Infinity;
+        if (code !== 'AISC360' || m.truss) return Infinity;
         const k = JSON.stringify([m.section, m.reverse ? 1 : 0, memberLen[mi].toFixed(6)]);
         const kr = JSON.stringify([m.section, m.reverse ? 0 : 1, memberLen[mi].toFixed(6)]);   // mirror has the same Pe
         const hit = peCache.get(k) ?? peCache.get(kr);
@@ -639,6 +707,7 @@ export function designStructure(model: StructureModel, opts: { detail?: boolean;
 
     // Unbraced segments (out-of-plane / LTB) and their critical sections
     const segDefs = model.members.map((m, mi) => {
+        if (m.truss) return [];
         const n = Math.max(1, Math.ceil(memberLen[mi] / Math.max(0.1, m.Ly) - 1e-9));
         return Array.from({ length: n }, (_, k) => {
             const from = k / n, to = (k + 1) / n;
@@ -666,10 +735,56 @@ export function designStructure(model: StructureModel, opts: { detail?: boolean;
         return out;
     });
     const env: StationResult[][] = model.members.map((m, mi) => stationDefs[mi].map(({ s, node }) =>
-        ({ s, x: fe.nodeXY[node].x, y: fe.nodeXY[node].y, D: secAt(mi, s).D, N: 0, V: 0, M: 0, util: 0, combo: '', governing: '' })));
+        ({ s, x: fe.nodeXY[node].x, y: fe.nodeXY[node].y, D: depthAt(mi, s), N: 0, V: 0, M: 0, util: 0, combo: '', governing: '' })));
     const gov = model.members.map(() => ({ util: -1, combo: '', s: 0, check: '', detail: null as ISStationResult | AISCStationResult | null, section: null as SectionProps | null }));
     // per member: segment data of each strength combination (reported for the governing one)
     const segByCombo: Record<string, MemberResult['segments']>[] = model.members.map(() => ({}));
+
+    // Transverse stiffener options per sub-element: k = 0 (none) or stiffeners at element length / k.
+    // Every option is checked at both ends of the element for every combination; the fewest
+    // stiffeners that pass are kept (as the Python PEB optimiser's check_design).
+    const stiffOn = !!model.stiffeners?.enabled;
+    const KS = stiffOn ? [0, 1, 2, 3] : [0];
+    const memEls = model.members.map((_, mi) => fe.elements.map((e, idx) => ({ e, idx })).filter(o => o.e.member === mi));
+    const elOfStation: number[][][] = stationDefs.map((defs, mi) => {
+        const local = new Map(memEls[mi].map((o, li) => [o.idx, li]));
+        return defs.map(st => {
+            const li = local.get(st.el)!;
+            const out = [li];
+            // a node station at an element end also starts the next element (unless a break gives it its own)
+            if (st.end === 2 && li + 1 < memEls[mi].length && !defs.some(d => d.el === memEls[mi][li + 1].idx && d.end === 1)) out.push(li + 1);
+            return out;
+        });
+    });
+    type StationVal = { util: number; N: number; V: number; M: number; combo: string; governing: string };
+    type Cand = {
+        k: number; c: number | undefined; ok: boolean; plate: { ts: number; bs: number; area: number } | null;
+        util: number; combo: string; s: number; check: string; detail: ISStationResult | AISCStationResult | null; section: SectionProps | null;
+        st: Map<number, StationVal>; truss?: TrussMemberResult;
+    };
+    const cand: Cand[][][] = model.members.map((m, mi) => memEls[mi].map(({ e }) => {
+        if (m.truss) return [{ k: 0, c: undefined, ok: true, plate: null, util: -1, combo: '', s: 0, check: '', detail: null, section: null, st: new Map() }];
+        const fr = fe.memberFr[mi];
+        const pa = secAt(mi, fr[e.k]), pb = secAt(mi, fr[e.k + 1]);
+        const p = pa.D >= pb.D ? pa : pb;                      // deepest end governs the stiffener
+        return KS.map(k => {
+            const c = k ? e.L * 1000 / k : undefined;
+            const plate = c === undefined ? null
+                : code === 'IS800' ? stiffenerIS(p.hw, p.tw, p.bf, fy, c) : stiffenerAISC(p.hw, p.tw, p.bf, fy, c);
+            return { k, c, ok: k === 0 || plate !== null, plate, util: -1, combo: '', s: 0, check: '', detail: null, section: null, st: new Map() };
+        });
+    }));
+    const unstable: (string | null)[] = model.members.map(() => null);
+    // truss members: compression seen in combinations without / with wind (slenderness limit)
+    const compNoWind = model.members.map(() => false), compWind = model.members.map(() => false);
+    const KLrOf = model.members.map(m => {
+        if (!m.truss) return 0;
+        const t = m.truss.sec;
+        return Math.max(m.truss.Lz * 1000 / Math.sqrt(t.Iz / t.A), m.Ly * 1000 / Math.sqrt(t.Iy / t.A));
+    });
+    // current utilization of a member with the best stiffener option of each element (early stop / screening)
+    const memberUtilSoFar = (mi: number) => unstable[mi] ? 99
+        : Math.max(0, ...cand[mi].map(cs => Math.min(...cs.filter(c => c.ok).map(c => Math.max(0, c.util)))));
     const combos: ComboResult[] = [];
     const deflections: DeflectionResult[] = [];
 
@@ -679,7 +794,7 @@ export function designStructure(model: StructureModel, opts: { detail?: boolean;
         : model.combos;
     for (const combo of comboOrder) {
         if (opts.stopAbove !== undefined
-            && (gov.some(g => g.util > opts.stopAbove!) || deflections.some(dr => dr.ratio > opts.stopAbove!))) break;
+            && (model.members.some((_, mi) => memberUtilSoFar(mi) > opts.stopAbove!) || deflections.some(dr => dr.ratio > opts.stopAbove!))) break;
         const strength = combo.kind === 'strength';
         let comboMax = 0;
         // AISC direct analysis (strength): 0.8·EA and 0.8·τb·EI; otherwise nominal
@@ -773,14 +888,37 @@ export function designStructure(model: StructureModel, opts: { detail?: boolean;
         }
         if (!sol.stable) {
             warnings.push(`${combo.name}: frame unstable under the factored loads (second-order analysis)`);
-            model.members.forEach((m, mi) => { if (gov[mi].util < 99) { gov[mi] = { ...gov[mi], util: 99, combo: combo.name, check: 'instability' }; } });
+            model.members.forEach((m, mi) => { unstable[mi] ??= combo.name; });
             combos[combos.length - 1].maxUtil = 99;
             continue;
         }
 
         // Station design
+        const comboUtil = cand.map(els => els.map(cs => cs.map(() => 0)));
+        const windy = Object.keys(combo.factors).some(k => /^W/.test(k) && combo.factors[k] !== 0);
         model.members.forEach((m, mi) => {
             const act = memActs[mi];
+            if (m.truss) {
+                const t = m.truss;
+                // pin-ended bar: self-weight moment wL²/8 at mid-length (not in the end actions)
+                const len = memberLen[mi];
+                const cosA = Math.abs(model.nodes[m.j].x - model.nodes[m.i].x) / Math.max(1e-9, len);
+                const Mself = t.bar ? (combo.factors.D ?? 0) * t.sec.A * 1e-6 * STEEL_UNIT_WEIGHT * cosA * len * len / 8 : 0;   // kN·m
+                act.s.forEach((s, k) => {
+                    if (act.N[k] < -1e-6) { if (windy) compWind[mi] = true; else compNoWind[mi] = true; }
+                    const q = { N: act.N[k] * 1e3, V: Math.abs(act.V[k]) * 1e3, M: (Math.abs(act.M[k]) + Mself) * 1e6, Lz: t.Lz * 1000, Ly: m.Ly * 1000 };
+                    const fu = model.fu ?? defaultFu(code, fy);
+                    const r = code === 'IS800' ? checkTrussIS(t.sec, fy, fu, q) : checkTrussAISC(t.sec, fy, fu, q);
+                    for (const li of elOfStation[mi][k]) {
+                        const cd = cand[mi][li][0];
+                        if (r.max > comboUtil[mi][li][0]) comboUtil[mi][li][0] = r.max;
+                        const prev = cd.st.get(k);
+                        if (!prev || r.max > prev.util) cd.st.set(k, { util: r.max, N: act.N[k], V: act.V[k], M: act.M[k], combo: combo.name, governing: r.governing });
+                        if (r.max > cd.util) Object.assign(cd, { util: r.max, combo: combo.name, s, check: r.governing, truss: r });
+                    }
+                });
+                return;
+            }
             const segs = segDefs[mi];
             segs.forEach((sg) => {
                 const Mabs = (s: number) => Math.abs(interp(act.s, act.M, s)) * 1e6;   // N·mm
@@ -808,38 +946,111 @@ export function designStructure(model: StructureModel, opts: { detail?: boolean;
                     if (s < sg.from - 1e-9 || s > sg.to + 1e-9) return;
                     const p = secAt(mi, s);
                     const N = act.N[k] * 1e3, V = Math.abs(act.V[k]) * 1e3, M = Math.abs(act.M[k]) * 1e6;
-                    let util: number, gname: string, detail: ISStationResult | AISCStationResult;
-                    if (code === 'IS800') {
-                        const fccZ = N < 0 && Number.isFinite(gammaE) ? gammaE * (-N) / p.A : Infinity;
-                        const r = checkStationIS(p, fy, {
-                            N, M, V, fccZ, fccY: PeY / p.A, chiLT, lambdaLT, CmLT,
-                            Cmz: m.sway ? 0.9 : Math.max(0.4, 0.6 + 0.4 * psi),
+                    const cache = new Map<string, ISStationResult | AISCStationResult>();
+                    const check = (c: number | undefined) => {
+                        const key = String(c);
+                        let r = cache.get(key);
+                        if (!r) {
+                            if (code === 'IS800') {
+                                const fccZ = N < 0 && Number.isFinite(gammaE) ? gammaE * (-N) / p.A : Infinity;
+                                r = checkStationIS(p, fy, {
+                                    N, M, V, fccZ, fccY: PeY / p.A, chiLT, lambdaLT, CmLT,
+                                    Cmz: m.sway ? 0.9 : Math.max(0.4, 0.6 + 0.4 * psi), c,
+                                });
+                            } else {
+                                r = checkStationAISC(p, fy, { N, M, V, FeIn: PeIn[mi] * 1e3 / p.A, FeOut: PeY / p.A, FnLTB, a: c });
+                            }
+                            cache.set(key, r);
+                        }
+                        return r;
+                    };
+                    for (const li of elOfStation[mi][k]) {
+                        cand[mi][li].forEach((cd, ci) => {
+                            if (!cd.ok) return;
+                            const r = check(cd.c);
+                            const util = r.max;
+                            if (util > comboUtil[mi][li][ci]) comboUtil[mi][li][ci] = util;
+                            const prev = cd.st.get(k);
+                            if (!prev || util > prev.util) {
+                                cd.st.set(k, { util, N: act.N[k], V: act.V[k], M: act.M[k], combo: combo.name, governing: r.governing });
+                            }
+                            if (util > cd.util) {
+                                Object.assign(cd, { util, combo: combo.name, s, check: r.governing, detail: opts.detail === false ? null : r, section: p });
+                            }
                         });
-                        util = r.max; gname = r.governing; detail = r;
-                    } else {
-                        const r = checkStationAISC(p, fy, { N, M, V, FeIn: PeIn[mi] * 1e3 / p.A, FeOut: PeY / p.A, FnLTB });
-                        util = r.max; gname = r.governing; detail = r;
-                    }
-                    const st = env[mi][k];
-                    if (util > comboMax) comboMax = util;
-                    if (util > st.util) {
-                        env[mi][k] = { ...st, N: act.N[k], V: act.V[k], M: act.M[k], util, combo: combo.name, governing: gname };
-                    }
-                    if (util > gov[mi].util) {
-                        gov[mi] = { util, combo: combo.name, s, check: gname, detail: opts.detail === false ? null : detail, section: p };
                     }
                 });
             });
         });
+        // the combination's utilization with the best stiffener option of each element
+        comboUtil.forEach((els, mi) => els.forEach((cs, li) => {
+            const best = Math.min(...cs.filter((_, ci) => cand[mi][li][ci].ok));
+            if (best > comboMax) comboMax = best;
+        }));
         combos[combos.length - 1].maxUtil = comboMax;
     }
 
+    // Slenderness limit of a truss member from the sign of its axial force over the combinations run
+    //   IS 800 Table 3: compression under dead / imposed 180; compression only with wind 250; always tension 400
+    //   AISC 360-22: E2 user note KL/r ≤ 200 (compression), D1 user note L/r ≤ 300 (tension) — recommendations
+    const slender = (mi: number) => code === 'IS800'
+        ? (compNoWind[mi] ? { limit: 180, basis: 'IS 800 Table 3 (i)' } : compWind[mi] ? { limit: 250, basis: 'IS 800 Table 3 (iii), compression only with wind' } : { limit: 400, basis: 'IS 800 Table 3 (vi), always in tension' })
+        : (compNoWind[mi] || compWind[mi] ? { limit: 200, basis: 'AISC E2 user note' } : { limit: 300, basis: 'AISC D1 user note' });
+    // Stiffener choice per element: the fewest stiffeners that pass, else the lowest utilization
+    const chosen = cand.map(els => els.map(cs => {
+        const valid = cs.filter(c => c.ok);
+        return valid.find(c => c.util <= 1 + 1e-9) ?? valid.reduce((a, b) => (b.util < a.util - 1e-12 ? b : a));
+    }));
+    model.members.forEach((m, mi) => {
+        env[mi].forEach((st, k) => {
+            for (const li of elOfStation[mi][k]) {
+                const v = chosen[mi][li].st.get(k);
+                if (v && v.util > env[mi][k].util) env[mi][k] = { ...env[mi][k], ...v };
+            }
+        });
+        for (const cd of chosen[mi]) {
+            if (cd.util > gov[mi].util) gov[mi] = { util: cd.util, combo: cd.combo, s: cd.s, check: cd.check, detail: cd.detail, section: cd.section };
+        }
+        if (m.truss) {
+            const lim = slender(mi);
+            const r = KLrOf[mi] / lim.limit;
+            if (r > gov[mi].util) gov[mi] = { ...gov[mi], util: r, check: `slenderness KL/r ≤ ${lim.limit} (${lim.basis})` };
+        }
+        if (unstable[mi] && gov[mi].util < 99) gov[mi] = { ...gov[mi], util: 99, combo: unstable[mi]!, check: 'instability' };
+    });
+    const stiffItems: StiffenerItem[][] = model.members.map((m, mi) => {
+        const pos = new Map<string, StiffenerItem>();
+        const fr = fe.memberFr[mi];
+        chosen[mi].forEach((cd, li) => {
+            if (!cd.k || !cd.plate || m.truss) return;
+            for (let i = 0; i <= cd.k; i++) {
+                const s = fr[li] + (fr[li + 1] - fr[li]) * i / cd.k;
+                const key = s.toFixed(6);
+                const p = secAt(mi, s);
+                const mass = cd.plate.area * p.hw * 1e-9 * STEEL_DENSITY;
+                const prev = pos.get(key);
+                if (!prev || mass > prev.mass) {
+                    const A = model.nodes[m.i], B = model.nodes[m.j];
+                    pos.set(key, { s, x: A.x + (B.x - A.x) * s, y: A.y + (B.y - A.y) * s, D: p.D, ts: cd.plate.ts, bs: cd.plate.bs, spacing: cd.c!, mass });
+                }
+            }
+        });
+        return [...pos.values()].sort((a, b) => a.s - b.s);
+    });
+
     const members: MemberResult[] = model.members.map((m, mi) => ({
-        name: m.name, group: m.group, length: memberLen[mi], mass: memberMass(m.section, memberLen[mi]),
+        name: m.name, group: m.group, length: memberLen[mi],
+        mass: (m.truss ? m.truss.sec.w * memberLen[mi] : memberMass(m.section, memberLen[mi])) + stiffItems[mi].reduce((a, it) => a + it.mass, 0),
         stations: env[mi], maxUtil: gov[mi].util,
         governing: { combo: gov[mi].combo, s: gov[mi].s, check: gov[mi].check, detail: gov[mi].detail, section: gov[mi].section },
         segments: segByCombo[mi][gov[mi].combo] ?? segDefs[mi].map(sg => ({ from: sg.from, to: sg.to, minDepth: sg.pMin.D })),
         PeIn: code === 'AISC360' ? PeIn[mi] : undefined,
+        stiffeners: stiffItems[mi],
+        truss: m.truss ? (() => {
+            const lim = slender(mi);
+            const worst = chosen[mi].reduce((a, b) => (b.util > a.util ? b : a));
+            return { section: m.truss.sec, role: m.truss.role, Lz: m.truss.Lz, Ly: m.Ly, KLr: KLrOf[mi], slenderLimit: lim.limit, slenderBasis: lim.basis, result: worst.truss ?? null };
+        })() : undefined,
     }));
     const groupNames = [...new Set(model.members.map(m => m.group))];
     const groups = groupNames.map(g => {
@@ -849,8 +1060,11 @@ export function designStructure(model: StructureModel, opts: { detail?: boolean;
     });
     const maxUtil = Math.max(...members.map(m => m.maxUtil), ...deflections.map(d => d.ratio));
     const mass = members.reduce((s, m) => s + m.mass, 0);
+    const nStiff = stiffItems.reduce((a, l) => a + l.length, 0);
+    const stiffMass = stiffItems.reduce((a, l) => a + l.reduce((b, it) => b + it.mass, 0), 0);
     return {
         code, ok: maxUtil <= 1 + 1e-9 && combos.every(c => c.stable), maxUtil, mass, members, groups, combos, deflections, warnings,
+        stiffeners: { n: nStiff, mass: stiffMass }, cost: mass + (model.stiffeners?.penaltyKg ?? 0) * nStiff,
         geometry: { nodes: model.nodes, members: model.members.map(m => ({ name: m.name, i: m.i, j: m.j })) },
     };
 }
@@ -994,7 +1208,39 @@ export interface PortalFrameInput {
     windServiceFactor: number;  // wind factor for the drift check
     crane?: CraneInput | null;
     nSub?: number;
+    stiffeners?: StiffenerOption;   // transverse web stiffeners where they help (optimizer objective: kg + penalty × count)
+    truss?: TrussRoof | null;       // roof truss instead of tapered rafters (rafter section then unused)
+    fu?: number;                    // MPa (default from the grade)
 }
+
+/**
+ * Roof truss in place of the tapered rafters of each span (portal truss):
+ * top chord along the roof (continuous, purlin loads on it), bottom chord
+ * from the columns at depth h0 below the eaves, rising toward the apex by
+ * bottomSlope × the roof rise; verticals at the panel points and at the
+ * apex; Pratt diagonals (from the top chord at the column side of each panel
+ * down to the bottom chord — tension under gravity). Chords are continuous
+ * members; verticals and diagonals are pin-ended. The bottom chord frames
+ * into the columns, which carry the knee moment.
+ *   Effective lengths: chords in plane K × panel length along the chord, out
+ *   of plane the purlin spacing (top: rafterLy) or the bottom-chord brace
+ *   spacing; web members L in both planes (K = 1, conservative for welded or
+ *   gusseted ends).
+ */
+export interface TrussRoof {
+    family: TrussFamily;        // CHS, SHS or 2L (two IS 808 equal angles back to back)
+    depthEave: number;          // m — h0, top chord to bottom chord centre lines at the column
+    bottomSlope: number;        // 0 (flat bottom chord) … 1 (parallel chords), fraction of the roof rise
+    panel: number;              // m — largest horizontal panel length
+    K: number;                  // chord in-plane effective length factor
+    bottomLy: number;           // m — out-of-plane brace spacing of the bottom chord (fly braces / ties)
+    gusset: number;             // mm — gusset between double angles
+    top: string; bottom: string; vertical: string; diagonal: string;   // section names
+}
+
+export const TRUSS_ROLES = ['top', 'bottom', 'vertical', 'diagonal'] as const;
+export type TrussRole = (typeof TRUSS_ROLES)[number];
+export const TRUSS_ROLE_GROUP: Record<TrussRole, string> = { top: 'Top chord', bottom: 'Bottom chord', vertical: 'Vertical', diagonal: 'Diagonal' };
 
 /** Multi-span (multi-gable) frame: n duo-pitch spans on n + 1 columns. */
 export interface MultiSpanFrameInput {
@@ -1023,6 +1269,9 @@ export interface MultiSpanFrameInput {
     windServiceFactor: number;
     crane?: CraneInput | null;
     nSub?: number;
+    stiffeners?: StiffenerOption;   // transverse web stiffeners where they help (optimizer objective: kg + penalty × count)
+    truss?: TrussRoof | null;       // roof truss in every span instead of tapered rafters
+    fu?: number;
 }
 
 /** Apex position of a (possibly unsymmetric) duo-pitch span. */
@@ -1052,6 +1301,8 @@ interface GableDef {
     crane: CraneInput | null;
     nSub: number;
     single: boolean;            // one span: portal naming
+    truss: TrussRoof | null;
+    fu?: number;
 }
 
 const sameArr = (a: number[], b: number[]) => a.length === b.length && a.every((v, i) => Math.abs(v - b[i]) < 1e-12);
@@ -1113,6 +1364,7 @@ function gableFrameModel(d: GableDef): StructureModel {
     }
     const rest = d.base === 'fixed';
     const supports: SupportDef[] = Array.from({ length: n + 1 }, (_, k) => ({ node: bot(k), ux: true, uy: true, rz: rest }));
+    if (d.truss) addRoofTruss(d, nodes, members, colMember, rafMember, apex, colX);
 
     // Gravity: dead on slope, live on plan (× cos θ per unit rafter length)
     const D: LoadCaseDef = { memberLoads: rafMember.flat().map(m => ({ member: m, wx: 0, wy: -d.dead * B })), nodalLoads: [], pointLoads: [] };
@@ -1188,8 +1440,9 @@ function gableFrameModel(d: GableDef): StructureModel {
         const mL = colMember[c], mR = colMember[c + 1];
         const fbL = frAt(c, cr.bracketLevel), fbR = frAt(c + 1, cr.bracketLevel);
         const frL = frAt(c, cr.railLevel), frR = frAt(c + 1, cr.railLevel);
-        members[mL] = { ...members[mL], breaks: [fbL, frL] };
-        members[mR] = { ...members[mR], breaks: [fbR, frR] };
+        if (d.truss && cr.railLevel >= Math.min(H[c], H[c + 1]) - d.truss.depthEave) throw new Error('Crane rail level must be below the bottom chord of the roof truss');
+        members[mL] = { ...members[mL], breaks: [...(members[mL].breaks ?? []), fbL, frL] };
+        members[mR] = { ...members[mR], breaks: [...(members[mR].breaks ?? []), fbR, frR] };
         craneNodes = { left: { member: mL, at: frL }, right: { member: mR, at: frR } };
         const e = cr.eccentricity;
         // bracket of the left column is on its right (+e): M = −R·e; right column: +R·e
@@ -1278,9 +1531,87 @@ function gableFrameModel(d: GableDef): StructureModel {
         });
     }
     return {
-        code: d.code, fy: d.fy, nodes, members, supports, loadCases, combos,
+        code: d.code, fy: d.fy, fu: d.fu, nodes, members, supports, loadCases, combos,
         notionalNodes: allTops.map(top), deflections, nSub: d.nSub,
     };
+}
+
+/** Replace the rafters of every span by a roof truss (see TrussRoof). Rafter members become the top chords. */
+function addRoofTruss(d: GableDef, nodes: { x: number; y: number }[], members: MemberDef[], colMember: number[],
+    rafMember: [number, number][], apex: { x: number; y: number }[], colX: number[]) {
+    const t = d.truss!;
+    const H = d.heights;
+    if (!(t.depthEave > 0)) throw new Error('Truss depth at the eaves must be positive');
+    if (!(t.bottomSlope >= 0 && t.bottomSlope <= 1)) throw new Error('Bottom-chord slope must be 0 … 1 of the roof slope');
+    if (!(t.panel > 0)) throw new Error('Truss panel length must be positive');
+    if (H.some(h => h - t.depthEave < 0.5)) throw new Error('Truss depth leaves less than 0.5 m of column below the bottom chord');
+    const sec = (r: TrussRole) => trussSectionByName(t.family, t[r], t.gusset);
+    const S = { top: sec('top'), bottom: sec('bottom'), vertical: sec('vertical'), diagonal: sec('diagonal') };
+    const addNode = (x: number, y: number) => { nodes.push({ x, y }); return nodes.length - 1; };
+    const at = (mi: number, r: number) => {
+        const A = nodes[members[mi].i], B = nodes[members[mi].j];
+        return { x: A.x + (B.x - A.x) * r, y: A.y + (B.y - A.y) * r };
+    };
+    const len = (a: number, b: number) => Math.hypot(nodes[b].x - nodes[a].x, nodes[b].y - nodes[a].y);
+    const bar = (name: string, role: 'vertical' | 'diagonal', i: number, j: number) => {
+        const L = len(i, j);
+        members.push({
+            name, group: TRUSS_ROLE_GROUP[role], i, j, section: d.rafter, reverse: false, Ly: L, sway: true, nSub: 1,
+            truss: { sec: S[role], bar: true, Lz: L, role },
+        });
+    };
+    // column break where the bottom chord frames in: one node per column (same level from both sides)
+    const colNode = H.map((h, k) => {
+        const mi = colMember[k];
+        const r = k === 0 ? (h - t.depthEave) / h : t.depthEave / h;          // column 0 runs base → top, others top → base
+        members[mi] = { ...members[mi], breaks: [...(members[mi].breaks ?? []), r] };
+        const p = at(mi, r);
+        return addNode(p.x, p.y);
+    });
+    rafMember.forEach(([ml, mr], k) => {
+        const hMid = 0.5 * (H[k] + H[k + 1]);
+        const yC = apex[k].y - t.depthEave - (1 - t.bottomSlope) * (apex[k].y - hMid);
+        const C = addNode(apex[k].x, yC);
+        const tag = d.single ? '' : ` ${k + 1}`;
+        const sides = [
+            { side: 'L', mi: ml, eave: members[ml].i, frCol: 0, col: colNode[k], x0: colX[k] },
+            { side: 'R', mi: mr, eave: members[mr].j, frCol: 1, col: colNode[k + 1], x0: colX[k + 1] },
+        ];
+        for (const sd of sides) {
+            const nP = Math.max(1, Math.ceil(Math.abs(apex[k].x - sd.x0) / t.panel - 1e-9));
+            const frTop = (i: number) => (sd.frCol === 0 ? i / nP : 1 - i / nP);      // panel point i from the column
+            // top chord = the rafter member, with panel breaks
+            const chordLen = len(members[sd.mi].i, members[sd.mi].j);
+            members[sd.mi] = {
+                ...members[sd.mi], group: TRUSS_ROLE_GROUP.top, name: `Top chord${tag} ${sd.side}`,
+                breaks: Array.from({ length: nP - 1 }, (_, i) => frTop(i + 1)), nSub: nP, Ly: d.rafterLy,
+                truss: { sec: S.top, bar: false, Lz: t.K * chordLen / nP, role: 'top' },
+            };
+            const T = [sd.eave];
+            for (let i = 1; i < nP; i++) { const p = at(sd.mi, frTop(i)); T.push(addNode(p.x, p.y)); }
+            T.push(sd.side === 'L' ? members[sd.mi].j : members[sd.mi].i);       // apex
+            // bottom chord column → centre, panel points at the same x as the top chord's
+            const P0 = nodes[sd.col], PC = nodes[C];
+            const B = [sd.col];
+            for (let i = 1; i < nP; i++) {
+                const r = i / nP;
+                const nb = addNode(P0.x + (PC.x - P0.x) * r, P0.y + (PC.y - P0.y) * r);
+                if (nodes[T[i]].y - nodes[nb].y < 0.05) throw new Error('Truss depth too small at a panel point — increase the depth or the bottom-chord slope');
+                B.push(nb);
+            }
+            B.push(C);
+            const bLen = Math.hypot(PC.x - P0.x, PC.y - P0.y);
+            members.push({
+                name: `Bottom chord${tag} ${sd.side}`, group: TRUSS_ROLE_GROUP.bottom, i: sd.col, j: C, section: d.rafter, reverse: false,
+                Ly: t.bottomLy, sway: true, breaks: Array.from({ length: nP - 1 }, (_, i) => (i + 1) / nP), nSub: nP,
+                truss: { sec: S.bottom, bar: false, Lz: t.K * bLen / nP, role: 'bottom' },
+            });
+            for (let i = 1; i < nP; i++) bar(`Vertical${tag} ${sd.side}${i}`, 'vertical', T[i], B[i]);
+            for (let i = 0; i < nP; i++) bar(`Diagonal${tag} ${sd.side}${i + 1}`, 'diagonal', T[i], B[i + 1]);
+        }
+        if (nodes[members[ml].j].y - yC < 0.05) throw new Error('Truss depth at the apex is too small');
+        bar(`Vertical${tag} apex`, 'vertical', members[ml].j, C);
+    });
 }
 
 /**
@@ -1339,6 +1670,7 @@ function portalToGable(inp: PortalFrameInput): GableDef {
         windDirections: inp.windDirections ?? 'auto', cpi: inp.cpi,
         columnLy: inp.columnLy, rafterLy: inp.rafterLy, verticalLimit: inp.verticalLimit, lateralLimit: inp.lateralLimit,
         windServiceFactor: inp.windServiceFactor, crane: inp.crane ?? null, nSub: inp.nSub ?? 10, single: true,
+        truss: inp.truss ?? null, fu: inp.fu,
     };
 }
 
@@ -1353,6 +1685,7 @@ function multiToGable(inp: MultiSpanFrameInput): GableDef {
         windDirections: inp.windDirections ?? 'auto', cpi: inp.cpi,
         columnLy: inp.columnLy, rafterLy: inp.rafterLy, verticalLimit: inp.verticalLimit, lateralLimit: inp.lateralLimit,
         windServiceFactor: inp.windServiceFactor, crane: inp.crane ?? null, nSub: inp.nSub ?? 8, single: inp.spans.length === 1,
+        truss: inp.truss ?? null, fu: inp.fu,
     };
 }
 
@@ -1378,6 +1711,7 @@ export interface ColumnInput {
     lateralLimit: number;               // H / this under wind
     windServiceFactor: number;
     nSub?: number;
+    stiffeners?: StiffenerOption;   // transverse web stiffeners where they help (optimizer objective: kg + penalty × count)
 }
 
 export function columnModel(inp: ColumnInput): StructureModel {
@@ -1422,6 +1756,7 @@ export interface BeamInput {
     Ly: number;                         // m — compression flange unbraced length
     verticalLimit: number;              // span / this under live load
     nSub?: number;
+    stiffeners?: StiffenerOption;   // transverse web stiffeners where they help (optimizer objective: kg + penalty × count)
 }
 
 export function beamModel(inp: BeamInput): StructureModel {
@@ -1494,6 +1829,7 @@ export interface SteelOptimizeParams {
     depthMin: number; depthMax: number; depthStep: number;   // mm
     bfList: number[]; tfList: number[]; twList: number[];    // mm
     maxPasses?: number;
+    trussDepths?: number[];     // m — truss depth at the eaves to try (roof truss); default 0.6 … 2.4 m
 }
 
 export type SteelMode = 'frame' | 'multispan' | 'column' | 'beam';
@@ -1503,13 +1839,16 @@ export type SteelInput =
     | { mode: 'column'; input: ColumnInput }
     | { mode: 'beam'; input: BeamInput };
 
+/** Transverse web stiffener option, common to every member type. */
+export interface StiffenerOption { enabled: boolean; penaltyKg: number }
+
 export function buildModel(si: SteelInput): StructureModel {
-    switch (si.mode) {
-        case 'frame': return portalFrameModel(si.input);
-        case 'multispan': return multiSpanFrameModel(si.input);
-        case 'column': return columnModel(si.input);
-        default: return beamModel(si.input);
-    }
+    const m = si.mode === 'frame' ? portalFrameModel(si.input)
+        : si.mode === 'multispan' ? multiSpanFrameModel(si.input)
+            : si.mode === 'column' ? columnModel(si.input)
+                : beamModel(si.input);
+    const st = (si.input as { stiffeners?: StiffenerOption }).stiffeners;
+    return st ? { ...m, stiffeners: st } : m;
 }
 
 /** Build the model and run the design. */
@@ -1518,7 +1857,11 @@ export function runDesign(si: SteelInput, opts: { detail?: boolean; only?: strin
 }
 
 type Grp = 'a' | 'b' | 'c';
-type VarKey = { group: Grp; field: 'D0' | 'D1' | 'bf' | 'tf' | 'tw' };
+type PlateKey = { group: Grp; field: 'D0' | 'D1' | 'bf' | 'tf' | 'tw' };
+// roof truss: catalogue index of each member role, and the depth at the eaves
+type VarKey = PlateKey | { role: TrussRole } | { geo: 'depthEave' };
+const trussOf = (x: SteelInput): TrussRoof | null => (x.mode === 'frame' || x.mode === 'multispan' ? x.input.truss ?? null : null);
+const withTruss = (x: SteelInput, t: TrussRoof): SteelInput => ({ mode: x.mode, input: { ...x.input, truss: t } }) as SteelInput;
 
 // optimizer groups: a = column (exterior) / member, b = rafter, c = interior column
 const groupField = (mode: SteelMode, g: Grp): 'column' | 'rafter' | 'interiorColumn' | 'member' =>
@@ -1534,6 +1877,94 @@ export interface SteelOptimizeResult {
     feasibleFound: number;
     history: { mass: number; maxUtil: number }[];
     approximate: true;
+}
+
+/**
+ * Fully stressed sizing of the roof-truss roles: from the member actions of
+ * every strength combination, each role (top chord, bottom chord, verticals,
+ * diagonals) takes the lightest catalogue section that passes every station
+ * of every member of the role, and its slenderness limit; re-analyse and
+ * repeat until the sections settle (member forces of a truss depend little
+ * on its member sizes). If only a deflection limit still fails, the chords
+ * are stepped up until it passes.
+ */
+function sizeTrussRoles(x0: SteelInput, cat: TrussSection[]): { x: SteelInput; r: DesignResult } {
+    let x = x0;
+    let r = runDesign(x, { detail: false });
+    // the columns (I-sections) and the sway / crane-rail limits depend little on the truss sizes: fail fast
+    const roofDefl = (d: DeflectionResult) => /rafter vertical/i.test(d.name);
+    if (r.members.some(m => !m.truss && m.maxUtil > 1 + 1e-9) || r.deflections.some(d => !roofDefl(d) && d.ratio > 1 + 1e-9)) return { x, r };
+    const idxOf = (t: TrussRoof, role: TrussRole) => {
+        const i = cat.findIndex(s => s.name === t[role]);
+        return i >= 0 ? i : cat.length - 1;
+    };
+    // lower bound per role once stepped up for a deflection limit (no oscillation with the strength sizing)
+    const floor: Record<TrussRole, number> = { top: 0, bottom: 0, vertical: 0, diagonal: 0 };
+    for (let it = 0; it < 8; it++) {
+        const t = trussOf(x)!;
+        const model = buildModel(x);
+        const { code, fy } = model;
+        const fu = model.fu ?? defaultFu(code, fy);
+        if (r.combos.some(c => c.kind === 'strength' && !c.stable)) {
+            // unstable: step every role up and try again
+            const up = { ...t };
+            TRUSS_ROLES.forEach(role => { up[role] = cat[Math.min(cat.length - 1, idxOf(t, role) + 2)].name; });
+            if (TRUSS_ROLES.every(role => up[role] === t[role])) break;
+            x = withTruss(x, up); r = runDesign(x, { detail: false });
+            continue;
+        }
+        const strength = r.combos.filter(c => c.kind === 'strength');
+        const comboDef = new Map(model.combos.map(c => [c.name, c]));
+        const next = { ...t };
+        for (const role of TRUSS_ROLES) {
+            // demands of the role: per member, per combination, per station
+            const dem: { N: number; V: number; M: number; D: number; m: MemberDef; len: number; cosA: number }[] = [];
+            const comp = { noWind: false, wind: false };
+            const ms = model.members.map((m, mi) => ({ m, mi })).filter(o => o.m.truss?.role === role);
+            for (const { m, mi } of ms) {
+                const len = Math.hypot(model.nodes[m.j].x - model.nodes[m.i].x, model.nodes[m.j].y - model.nodes[m.i].y);
+                const cosA = Math.abs(model.nodes[m.j].x - model.nodes[m.i].x) / Math.max(1e-9, len);
+                for (const c of strength) {
+                    const cd = comboDef.get(c.name);
+                    const windy = !!cd && Object.keys(cd.factors).some(k => /^W/.test(k) && cd.factors[k] !== 0);
+                    const act = c.members[mi];
+                    act.N.forEach((N, k) => {
+                        if (N < -1e-6) { if (windy) comp.wind = true; else comp.noWind = true; }
+                        dem.push({ N, V: act.V[k], M: act.M[k], D: cd?.factors.D ?? 0, m, len, cosA });
+                    });
+                }
+            }
+            const limit = code === 'IS800' ? (comp.noWind ? 180 : comp.wind ? 250 : 400) : (comp.noWind || comp.wind ? 200 : 300);
+            const passes = (s: TrussSection) => ms.every(({ m }) => {
+                const L = m.truss!;
+                return Math.max(L.Lz * 1000 / Math.sqrt(s.Iz / s.A), m.Ly * 1000 / Math.sqrt(s.Iy / s.A)) <= limit;
+            }) && dem.every(d => {
+                const L = d.m.truss!;
+                const Mself = L.bar ? d.D * s.A * 1e-6 * STEEL_UNIT_WEIGHT * d.cosA * d.len * d.len / 8 : 0;
+                const q = { N: d.N * 1e3, V: Math.abs(d.V) * 1e3, M: (Math.abs(d.M) + Mself) * 1e6, Lz: L.Lz * 1000, Ly: d.m.Ly * 1000 };
+                return (code === 'IS800' ? checkTrussIS(s, fy, fu, q) : checkTrussAISC(s, fy, fu, q)).max <= 1;
+            });
+            const i = cat.findIndex((s, q) => q >= floor[role] && passes(s));
+            next[role] = cat[i >= 0 ? i : cat.length - 1].name;
+        }
+        const same = TRUSS_ROLES.every(role => next[role] === t[role]);
+        if (same && r.members.every(m => !m.truss || m.maxUtil <= 1 + 1e-9)) {
+            // only deflections (or the columns) may still fail: stiffen the chords for the roof deflection
+            if (r.ok || !r.deflections.some(d => roofDefl(d) && d.ratio > 1 + 1e-9)) break;
+            const up = { ...t };
+            (['top', 'bottom'] as const).forEach(role => {
+                floor[role] = Math.min(cat.length - 1, idxOf(t, role) + 1);
+                up[role] = cat[floor[role]].name;
+            });
+            if (up.top === t.top && up.bottom === t.bottom) break;
+            x = withTruss(x, up); r = runDesign(x, { detail: false });
+            continue;
+        }
+        if (same) break;
+        x = withTruss(x, next);
+        r = runDesign(x, { detail: false });
+    }
+    return { x, r };
 }
 
 /**
@@ -1553,21 +1984,39 @@ export function optimizeSteel(si: SteelInput, p: SteelOptimizeParams, onProgress
     const depths: number[] = [];
     for (let d = p.depthMin; d <= p.depthMax + 1e-9; d += p.depthStep) depths.push(Math.round(d));
     const sorted = (a: number[]) => [...new Set(a)].sort((x, y) => x - y);
-    const lists: Record<VarKey['field'], number[]> = { D0: depths, D1: depths, bf: sorted(p.bfList), tf: sorted(p.tfList), tw: sorted(p.twList) };
+    const plateLists: Record<PlateKey['field'], number[]> = { D0: depths, D1: depths, bf: sorted(p.bfList), tf: sorted(p.tfList), tw: sorted(p.twList) };
+    const truss0 = trussOf(si);
+    // roof truss: each role over the family catalogue (lightest first, chain-filtered)
+    const cat = truss0 ? trussCatalogue(truss0.family, si.input.fy, si.input.code, truss0.gusset) : [];
+    const catIdx = cat.map((_, i) => i);
+    const depthList = sorted(p.trussDepths ?? [0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.4]);
+    const listOf = (k: VarKey): number[] => ('field' in k ? plateLists[k.field] : 'role' in k ? catIdx : depthList);
 
-    // Variables per group: depths D0 / D1, bf, tf, tw
-    const groupsOf: Grp[] = si.mode === 'frame' ? ['a', 'b']
+    // Variables per group: depths D0 / D1, bf, tf, tw (rafters replaced by the truss when there is one)
+    const groupsOf: Grp[] = (si.mode === 'frame' ? ['a', 'b']
         : si.mode === 'multispan' ? (si.input.spans.length > 1 ? ['a', 'b', 'c'] : ['a', 'b'])
-            : ['a'];
+            : ['a']).filter(g => !(truss0 && g === 'b')) as Grp[];
     const keys: VarKey[] = [];
     for (const g of groupsOf) for (const f of ['D0', 'D1', 'bf', 'tf', 'tw'] as const) {
         if (f === 'D1' && getSecOf(si, g).profile.D.length < 2) continue;
         keys.push({ group: g, field: f });
     }
+    // roof truss: member sections are sized inside each evaluation (fully stressed design per role);
+    // the search varies the columns and the truss depth
+    if (truss0) keys.push({ geo: 'depthEave' });
     const getSec = getSecOf, withSec = withSecOf;
     // D0 = depth at the first profile point; D1 = at the second and beyond
     const varOf = (sec: MemberSection, q: number) => sec.profile.vars?.[q] ?? (q === 0 ? 0 : 1);
     const getVar = (x: SteelInput, k: VarKey): number => {
+        if (!('field' in k)) {
+            const t = trussOf(x)!;
+            if ('geo' in k) return t.depthEave;
+            const i = cat.findIndex(s => s.name === t[k.role]);
+            if (i >= 0) return i;
+            const w = trussSectionByName(t.family, t[k.role], t.gusset).w;       // not in the chain: next heavier
+            const j = cat.findIndex(s => s.w >= w - 1e-9);
+            return j >= 0 ? j - 0.5 : cat.length - 0.5;
+        }
         const sec = getSec(x, k.group);
         if (k.field === 'D0' || k.field === 'D1') {
             const want = k.field === 'D0' ? 0 : 1;
@@ -1577,6 +2026,10 @@ export function optimizeSteel(si: SteelInput, p: SteelOptimizeParams, onProgress
         return sec[k.field];
     };
     const setVar = (x: SteelInput, k: VarKey, v: number): SteelInput => {
+        if (!('field' in k)) {
+            const t = trussOf(x)!;
+            return withTruss(x, 'geo' in k ? { ...t, depthEave: v } : { ...t, [k.role]: cat[v].name });
+        }
         const sec = getSec(x, k.group);
         if (k.field === 'D0' || k.field === 'D1') {
             const want = k.field === 'D0' ? 0 : 1;
@@ -1601,12 +2054,18 @@ export function optimizeSteel(si: SteelInput, p: SteelOptimizeParams, onProgress
     const history: { mass: number; maxUtil: number }[] = [];
     const memo = new Map<string, DesignResult>();
     const budget = 2500;
+    const sizedOf = new Map<string, SteelInput>();
     const evaluate = (x: SteelInput): DesignResult => {
         const kx = key(x);
         const hit = memo.get(kx);
         if (hit) return hit;
         evaluations++;
-        const r = runDesign(x, { detail: false });
+        let r: DesignResult;
+        if (truss0) {
+            const s = sizeTrussRoles(x, cat);
+            sizedOf.set(kx, s.x);
+            r = s.r;
+        } else r = runDesign(x, { detail: false });
         if (r.ok) feasibleFound++;
         memo.set(kx, r);
         if (onProgress && evaluations % 10 === 0) onProgress(evaluations, budget, feasibleFound);
@@ -1618,7 +2077,7 @@ export function optimizeSteel(si: SteelInput, p: SteelOptimizeParams, onProgress
     // than the current design gets the full check. A combination found
     // governing in a full check joins the active set.
     const nStrength = buildModel(si).combos.filter(c => c.kind === 'strength').length;
-    const useScreen = nStrength > 10;
+    const useScreen = nStrength > 10 && !truss0;
     const score = new Map<string, number>();       // latest full-check utilization per combination
     const active = new Set<string>();
     let activeVer = 0;
@@ -1650,18 +2109,19 @@ export function optimizeSteel(si: SteelInput, p: SteelOptimizeParams, onProgress
     const descend = (start: SteelInput): { x: SteelInput; r: DesignResult } | null => {
         let cur = start;
         let curRes = evaluate(cur);
+        cur = sizedOf.get(key(cur)) ?? cur;            // roof truss: continue from the sized sections (warm start)
         if (useScreen) learn(curRes);
         if (!curRes.ok || !practical(cur)) return null;
-        history.push({ mass: curRes.mass, maxUtil: curRes.maxUtil });
+        history.push({ mass: curRes.cost, maxUtil: curRes.maxUtil });
         const tryMove = (trial: SteelInput) => {
             if (!practical(trial) || evaluations >= budget) return false;
             const rs = screen(trial);
-            if (!rs.ok || rs.mass >= curRes.mass - 1e-6) return false;
+            if (!rs.ok || rs.cost >= curRes.cost - 1e-6) return false;
             const r = evaluate(trial);
             if (useScreen) learn(r);
-            if (r.ok) {
-                cur = trial; curRes = r;
-                history.push({ mass: r.mass, maxUtil: r.maxUtil });
+            if (r.ok && r.cost < curRes.cost - 1e-6) {
+                cur = sizedOf.get(key(trial)) ?? trial; curRes = r;
+                history.push({ mass: r.cost, maxUtil: r.maxUtil });
                 return true;
             }
             return false;
@@ -1671,7 +2131,7 @@ export function optimizeSteel(si: SteelInput, p: SteelOptimizeParams, onProgress
             let improved = true;
             while (improved && evaluations < budget) {
                 improved = false;
-                for (const k of keys) for (const v of lists[k.field]) {
+                for (const k of keys) for (const v of listOf(k)) {
                     if (v >= getVar(cur, k)) break;
                     if (tryMove(setVar(cur, k, v))) improved = true;
                 }
@@ -1679,11 +2139,11 @@ export function optimizeSteel(si: SteelInput, p: SteelOptimizeParams, onProgress
             // exchange moves: one variable a step down, another a step up
             let exchanged = false;
             outer: for (const k1 of keys) {
-                const l1 = lists[k1.field], i1 = l1.indexOf(getVar(cur, k1));
+                const l1 = listOf(k1), i1 = l1.indexOf(getVar(cur, k1));
                 if (i1 <= 0) continue;
                 for (const k2 of keys) {
                     if (k1 === k2) continue;
-                    const l2 = lists[k2.field], i2 = l2.indexOf(getVar(cur, k2));
+                    const l2 = listOf(k2), i2 = l2.indexOf(getVar(cur, k2));
                     if (i2 < 0 || i2 >= l2.length - 1) continue;
                     if (tryMove(setVar(setVar(cur, k1, l1[i1 - 1]), k2, l2[i2 + 1]))) { exchanged = true; break outer; }
                 }
@@ -1694,12 +2154,13 @@ export function optimizeSteel(si: SteelInput, p: SteelOptimizeParams, onProgress
     };
 
     let userStart = si;
-    for (const k of keys) userStart = setVar(userStart, k, snapUp(lists[k.field], getVar(si, k)));
+    for (const k of keys) userStart = setVar(userStart, k, snapUp(listOf(k), getVar(si, k)));
     let heavy = si;
-    for (const k of keys) heavy = setVar(heavy, k, lists[k.field][lists[k.field].length - 1]);
+    for (const k of keys) heavy = setVar(heavy, k, listOf(k)[listOf(k).length - 1]);
     const runs = [descend(userStart), descend(heavy)].filter((v): v is { x: SteelInput; r: DesignResult } => v !== null);
     onProgress?.(budget, budget, feasibleFound);
     if (!runs.length) return { best: null, result: evaluate(heavy), evaluations, feasibleFound, history, approximate: true };
-    const best = runs.reduce((a, b) => (b.r.mass < a.r.mass ? b : a));
-    return { best: best.x, result: runDesign(best.x), evaluations, feasibleFound, history, approximate: true };
+    const best = runs.reduce((a, b) => (b.r.cost < a.r.cost ? b : a));
+    const bx = sizedOf.get(key(best.x)) ?? best.x;
+    return { best: bx, result: runDesign(bx), evaluations, feasibleFound, history, approximate: true };
 }
