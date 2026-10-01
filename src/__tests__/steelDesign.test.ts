@@ -4,11 +4,11 @@
  * AISC 360-22 member checks, and the optimizer.
  */
 import { sectionProps, depthAt, memberMass, type MemberSection } from '../lib/steelSection';
-import { chiIS, classifyIS, shearIS, mcrIS, IS800 } from '../lib/steelIS800';
+import { chiIS, classifyIS, shearIS, mcrIS, checkStationIS, IS800 } from '../lib/steelIS800';
 import { fcrE3, cbAISC, shearAISC, ltbStressAISC, classifyAISC, AISC } from '../lib/steelAISC360';
 import {
     runDesign, optimizeSteel, strengthCombos,
-    portalGeometry, craneReactions, type BeamInput, type ColumnInput, type PortalFrameInput, type MultiSpanFrameInput, type CraneInput,
+    portalGeometry, craneReactions, buildModel, liveLoadPatterns, type BeamInput, type ColumnInput, type PortalFrameInput, type MultiSpanFrameInput, type CraneInput,
 } from '../components/steelFrameEngine';
 
 const prism = (D: number, bf: number, tf: number, tw: number): MemberSection => ({ bf, tf, tw, profile: { at: [0, 1], D: [D, D] } });
@@ -59,10 +59,29 @@ describe('IS 800:2007 member checks', () => {
         const tauCr = 5.35 * Math.PI ** 2 * 2e5 / (12 * 0.91 * 200 * 200);
         const lw = Math.sqrt(250 / (Math.sqrt(3) * tauCr));
         expect(r.lambdaW).toBeCloseTo(lw, 9);
-        expect(r.Vd).toBeCloseTo(1012 * 5 * (250 / (Math.sqrt(3) * lw * lw)) / 1.1, 3);
-        // stocky web: plastic shear
+        // Cl. 8.4.1.1: welded I-section, Av = d·tw (clear web depth d = 1012 − 2·6 = 1000)
+        expect(r.Vd).toBeCloseTo(1000 * 5 * (250 / (Math.sqrt(3) * lw * lw)) / 1.1, 3);
+        // stocky web: plastic shear on d·tw
         const q = sectionProps({ D: 400, bf: 200, tf: 12, tw: 8 });
-        expect(shearIS(q, 250).Vd).toBeCloseTo(400 * 8 * 250 / Math.sqrt(3) / 1.1, 6);
+        expect(shearIS(q, 250).Vd).toBeCloseTo(376 * 8 * 250 / Math.sqrt(3) / 1.1, 6);
+    });
+    it('shear area d·tw: 600×200×12/6, fy 345 → Vd 329.7 kN (as is800.py)', () => {
+        const p = sectionProps({ D: 600, bf: 200, tf: 12, tw: 6 });
+        const tauCr = 5.35 * Math.PI ** 2 * 2e5 / (12 * 0.91 * 96 * 96);            // d/tw = 576/6 = 96
+        const lw = Math.sqrt(345 / (Math.sqrt(3) * tauCr));                            // > 1.2
+        expect(shearIS(p, 345).Vd / 1e3).toBeCloseTo(576 * 6 * 345 / (Math.sqrt(3) * lw * lw) / 1.1 / 1e3, 6);
+        expect(shearIS(p, 345).Vd / 1e3).toBeCloseTo(329.7, 1);
+    });
+    it('high shear Cl. 9.2.2: Mdv capped at 1.2·Ze·fy/γm0', () => {
+        // thin flanges, thick web: Zp/Ze = 1.28 > 1.2, plastic section
+        const p = sectionProps({ D: 400, bf: 100, tf: 8, tw: 12 });
+        expect(p.Zpz / p.Zez).toBeGreaterThan(1.2);
+        const fyd = 250 / 1.1;
+        const base = { N: 0, M: 1e6, fccZ: Infinity, fccY: Infinity, chiLT: 1, lambdaLT: 0, CmLT: 1 };
+        const Vd = shearIS(p, 250).Vd;
+        expect(checkStationIS(p, 250, { ...base, V: 0.5 * Vd }).Md).toBeCloseTo(p.Zpz * fyd, 3);    // low shear
+        // V just above 0.6 Vd: β = 0.0441, Md − β(Md − Mfd) still above the cap → 1.2 Ze fy/γm0
+        expect(checkStationIS(p, 250, { ...base, V: 0.61 * Vd }).Md).toBeCloseTo(1.2 * p.Zez * fyd, 3);
     });
     it('Mcr Cl. 8.2.2.1', () => {
         const p = sectionProps({ D: 400, bf: 200, tf: 12, tw: 8 });
@@ -358,6 +377,76 @@ describe('multi-span (multi-gable) frame', () => {
             expect(b.input.rafter.profile.D[0]).toBeGreaterThanOrEqual(b.input.rafter.profile.D[1]);
         }
     }, 120000);
+});
+
+describe('cross-check fixes (Python PEB optimiser comparison)', () => {
+    const crane: CraneInput = {
+        span: 0, capacity: 98.1, crabWeight: 25, bridgeWeight: 110, hookApproach: 1.0, wheelBase: 3.2, eccentricity: 0.6,
+        bracketLevel: 6, railLevel: 6.6, impact: 0.25, surge: 0.10, girderWeight: 1.2, lateralLimit: 400, spreadLimit: 10,
+    };
+    const portal: PortalFrameInput = {
+        code: 'IS800', fy: 345, span: 24, eaveHeight: 8, roofSlope: 5.71, baySpacing: 7.5, base: 'pinned',
+        column: { bf: 250, tf: 12, tw: 8, profile: { at: [0, 1], D: [400, 800] } },
+        rafter: { bf: 200, tf: 12, tw: 6, profile: { at: [0, 0.3, 1], D: [750, 450, 450] } },
+        dead: 0.15, live: 0.75, windPressure: 0.81,
+        cpe: { windwardWall: 0.7, leewardWall: -0.3, windwardRoof: -0.9, leewardRoof: -0.5 }, cpi: [0.2, -0.2],
+        columnLy: 1.5, rafterLy: 1.5, verticalLimit: 180, lateralLimit: 150, windServiceFactor: 1, crane, nSub: 8,
+    };
+
+    it('crane impact on the maximum wheel load only (same Rmax / Rmin as the Python demo)', () => {
+        const rx = craneReactions(crane, 24, 7.5);
+        expect(rx.Rmax * 1.25).toBeCloseTo(169.82, 2);          // optimiser.py demo: Rmax 169.82 (with impact)
+        expect(rx.Rmin).toBeCloseTo(47.51, 2);                   //                   Rmin 47.51 (static)
+        const m = buildModel({ mode: 'frame', input: portal });
+        const fy = (lc: string) => m.loadCases[lc].pointLoads!.map(q => -q.fy);
+        expect(fy('CV1')[0]).toBeCloseTo(rx.Rmax * 1.25, 9);
+        expect(fy('CV1')[1]).toBeCloseTo(rx.Rmin, 9);
+        expect(fy('CV2')).toEqual([fy('CV1')[1], fy('CV1')[0]]);
+        expect(fy('CS1')).toEqual([rx.Rmax, rx.Rmin]);          // serviceability: static
+        // out-of-balance bracket moment (1.25 Rmax − Rmin)·e
+        const mz = m.loadCases.CV1.pointLoads!.reduce((a, q) => a + q.mz, 0);
+        expect(Math.abs(mz)).toBeCloseTo((1.25 * rx.Rmax - rx.Rmin) * 0.6, 9);
+    });
+
+    it('IS 800 Table 4: 1.2(D+L)+0.6W is generated', () => {
+        const names = buildModel({ mode: 'frame', input: { ...portal, crane: null } }).combos.map(c => c.name);
+        expect(names).toEqual(expect.arrayContaining(['1.2(D+L)+0.6W1', '1.2(D+L)+0.6W2', '1.2(D+L+W1)']));
+    });
+
+    it('crane serviceability includes 0.8(crane + wind) with surge in the wind direction', () => {
+        const m = buildModel({ mode: 'frame', input: portal });
+        const c = m.combos.find(x => x.name === 'SLS: 0.8(CV1+CH+W1)')!;
+        expect(c.factors).toEqual({ CS1: 0.8, CH: 0.8, W1: 0.8 });
+        expect(m.deflections.find(d => d.name === 'Crane rail spread')!.combos).toEqual(expect.arrayContaining(['SLS: CV2−CH', 'SLS: 0.8(CV2+CH+W2)']));
+        const r = runDesign({ mode: 'frame', input: portal });
+        expect(r.deflections.some(d => d.combo === 'SLS: 0.8(CV1+CH+W1)' && Number.isFinite(d.value))).toBe(true);
+    });
+
+    it('live-load patterns on multi-span frames', () => {
+        expect(liveLoadPatterns(1).map(p => p.name)).toEqual(['ALL']);
+        expect(liveLoadPatterns(2).map(p => p.spans)).toEqual([[0, 1], [0], [1]]);
+        expect(liveLoadPatterns(3).map(p => [p.name, p.spans])).toEqual([
+            ['ALL', [0, 1, 2]], ['ALT-A', [0, 2]], ['ALT-B', [1]], ['ADJ-C2', [0, 1]], ['ADJ-C3', [1, 2]]]);
+        const ms: MultiSpanFrameInput = {
+            code: 'IS800', fy: 345, spans: [18, 18, 18].map(span => ({ span, slopeL: 6, slopeR: 6 })), heights: [8, 8, 8, 8],
+            baySpacing: 7.5, base: 'pinned',
+            column: { bf: 200, tf: 10, tw: 6, profile: { at: [0, 1], D: [350, 650] } },
+            interiorColumn: { bf: 200, tf: 10, tw: 6, profile: { at: [0, 1], D: [350, 350] } },
+            rafter: { bf: 200, tf: 10, tw: 6, profile: { at: [0, 0.3, 1], D: [650, 400, 400] } },
+            dead: 0.15, live: 0.75, windPressure: 1.0, wallCpe: { windward: 0.7, leeward: -0.25 }, roofCpe: [-0.9, -0.4],
+            cpi: [0.2, -0.2], columnLy: 1.5, rafterLy: 1.5, verticalLimit: 180, lateralLimit: 150, windServiceFactor: 1, nSub: 6,
+        };
+        const r = runDesign({ mode: 'multispan', input: ms });
+        const names = r.combos.map(c => c.name);
+        expect(names).toEqual(expect.arrayContaining(['1.5(D+L[ALT-A])', '1.5(D+L[ADJ-C2])', 'SLS: L[ALT-B]']));
+        const sls = r.combos.find(c => c.name === 'SLS: L[ALT-A]')!;
+        expect(sls.reactions.reduce((a, x) => a + x.Ry, 0)).toBeCloseTo(0.75 * 7.5 * 36, 6);      // spans 1 and 3 loaded
+        const defl = (combo: string) => r.deflections.find(d => d.combo === combo)!.value;
+        // continuity: unloading span 2 increases the sag of spans 1 and 3
+        expect(defl('SLS: L[ALT-A]')).toBeGreaterThan(defl('SLS: L'));
+        // the portal frame (one span) has no patterns
+        expect(buildModel({ mode: 'frame', input: { ...portal, crane: null } }).combos.some(c => c.name.includes('['))).toBe(false);
+    });
 });
 
 describe('optimizer', () => {

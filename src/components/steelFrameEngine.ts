@@ -858,6 +858,33 @@ export function designStructure(model: StructureModel, opts: { detail?: boolean;
 // ═══════════════════════════════════════════════════════════════
 //  Load combinations
 // ═══════════════════════════════════════════════════════════════
+/**
+ * Roof live-load patterns of an n-span continuous frame: ALL; ALT-A / ALT-B
+ * (alternate spans, maximum sagging); ADJ-Ci (the two spans either side of
+ * interior column i plus every second span beyond, maximum hogging there).
+ * Duplicates removed.
+ */
+export function liveLoadPatterns(n: number): { name: string; spans: number[] }[] {
+    const pats: { name: string; spans: number[] }[] = [{ name: 'ALL', spans: Array.from({ length: n }, (_, k) => k) }];
+    if (n > 1) {
+        pats.push({ name: 'ALT-A', spans: Array.from({ length: n }, (_, k) => k).filter(k => k % 2 === 0) });
+        pats.push({ name: 'ALT-B', spans: Array.from({ length: n }, (_, k) => k).filter(k => k % 2 === 1) });
+        for (let i = 1; i < n; i++) {
+            const s = new Set([i - 1, i]);
+            for (let k = i - 3; k >= 0; k -= 2) s.add(k);
+            for (let k = i + 2; k < n; k += 2) s.add(k);
+            pats.push({ name: `ADJ-C${i + 1}`, spans: [...s].sort((a, b) => a - b) });
+        }
+    }
+    const seen = new Set<string>();
+    return pats.filter(p => {
+        const key = p.spans.join(',');
+        if (!p.spans.length || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+
 export function strengthCombos(code: SteelCode, windCases: string[], hasLive = true): ComboDef[] {
     const c: ComboDef[] = [];
     const L: Record<string, number> = hasLive ? { L: 1 } : {};
@@ -866,6 +893,7 @@ export function strengthCombos(code: SteelCode, windCases: string[], hasLive = t
         // IS 800:2007 Table 4
         c.push({ name: hasLive ? '1.5(D+L)' : '1.5D', factors: { D: 1.5, ...scale(L, 1.5) }, kind: 'strength', gravityOnly: true });
         for (const w of windCases) {
+            if (hasLive) c.push({ name: `1.2(D+L)+0.6${w}`, factors: { D: 1.2, L: 1.2, [w]: 0.6 }, kind: 'strength', gravityOnly: false });
             if (hasLive) c.push({ name: `1.2(D+L+${w})`, factors: { D: 1.2, L: 1.2, [w]: 1.2 }, kind: 'strength', gravityOnly: false });
             c.push({ name: `1.5(D+${w})`, factors: { D: 1.5, [w]: 1.5 }, kind: 'strength', gravityOnly: false });
             c.push({ name: `0.9D+1.5${w}`, factors: { D: 0.9, [w]: 1.5 }, kind: 'strength', gravityOnly: false });
@@ -1088,13 +1116,14 @@ function gableFrameModel(d: GableDef): StructureModel {
 
     // Gravity: dead on slope, live on plan (× cos θ per unit rafter length)
     const D: LoadCaseDef = { memberLoads: rafMember.flat().map(m => ({ member: m, wx: 0, wy: -d.dead * B })), nodalLoads: [], pointLoads: [] };
-    const L: LoadCaseDef = {
-        memberLoads: rafMember.flatMap(([ml, mr], k) => [
-            { member: ml, wx: 0, wy: -d.live * B * Math.cos(apex[k].thL) },
-            { member: mr, wx: 0, wy: -d.live * B * Math.cos(apex[k].thR) },
+    const liveOn = (spans: number[]): LoadCaseDef => ({
+        memberLoads: spans.flatMap(k => [
+            { member: rafMember[k][0], wx: 0, wy: -d.live * B * Math.cos(apex[k].thL) },
+            { member: rafMember[k][1], wx: 0, wy: -d.live * B * Math.cos(apex[k].thR) },
         ]),
         nodalLoads: [],
-    };
+    });
+    const L = liveOn(d.spans.map((_, k) => k));
 
     // Wind: net pressure p·(Cpe − Cpi) toward a surface when positive,
     // force per unit length −p_net·n_out. Interior columns carry no wall wind.
@@ -1132,6 +1161,16 @@ function gableFrameModel(d: GableDef): StructureModel {
     }
     const hasLive = d.live > 0;
     const combos = strengthCombos(d.code, windNames, hasLive);
+    // Roof live load patterns on multi-span frames (alternate spans, adjacent spans at each interior
+    // column) in the gravity combinations and the live-load deflection check; L = all spans loaded.
+    const patterns = hasLive ? liveLoadPatterns(n).filter(p => p.spans.length < n) : [];
+    for (const p of patterns) {
+        const lc = `L[${p.name}]`;
+        loadCases[lc] = liveOn(p.spans);
+        combos.push(d.code === 'IS800'
+            ? { name: `1.5(D+${lc})`, factors: { D: 1.5, [lc]: 1.5 }, kind: 'strength', gravityOnly: true }
+            : { name: `1.2D+1.6Lr[${p.name}]`, factors: { D: 1.2, [lc]: 1.6 }, kind: 'strength', gravityOnly: true });
+    }
 
     // Crane
     const cr = d.crane;
@@ -1158,10 +1197,14 @@ function gableFrameModel(d: GableDef): StructureModel {
             { member: mL, at: fbL, fx: 0, fy: -RL, mz: -RL * e },
             { member: mR, at: fbR, fx: 0, fy: -RR, mz: RR * e },
         ];
+        // impact on the maximum wheel loads only (IS 875-2 Cl. 6.3; ASCE 7-22 §4.9.3 "maximum wheel loads")
         const imp = 1 + cr.impact;
         D.pointLoads = vert(rx.Rg, rx.Rg);
-        loadCases.CV1 = { memberLoads: [], nodalLoads: [], pointLoads: vert(rx.Rmax * imp, rx.Rmin * imp) };
-        loadCases.CV2 = { memberLoads: [], nodalLoads: [], pointLoads: vert(rx.Rmin * imp, rx.Rmax * imp) };
+        loadCases.CV1 = { memberLoads: [], nodalLoads: [], pointLoads: vert(rx.Rmax * imp, rx.Rmin) };
+        loadCases.CV2 = { memberLoads: [], nodalLoads: [], pointLoads: vert(rx.Rmin, rx.Rmax * imp) };
+        // static wheel loads (no impact) for the serviceability checks
+        loadCases.CS1 = { memberLoads: [], nodalLoads: [], pointLoads: vert(rx.Rmax, rx.Rmin) };
+        loadCases.CS2 = { memberLoads: [], nodalLoads: [], pointLoads: vert(rx.Rmin, rx.Rmax) };
         loadCases.CH = {
             memberLoads: [], nodalLoads: [],
             pointLoads: [{ member: mL, at: frL, fx: rx.H, fy: 0, mz: 0 }, { member: mR, at: frR, fx: rx.H, fy: 0, mz: 0 }],
@@ -1170,6 +1213,11 @@ function gableFrameModel(d: GableDef): StructureModel {
     }
 
     combos.push({ name: 'SLS: L', factors: { L: 1 }, kind: 'service', gravityOnly: true });
+    const slsLive = ['SLS: L'];
+    for (const p of patterns) {
+        slsLive.push(`SLS: L[${p.name}]`);
+        combos.push({ name: `SLS: L[${p.name}]`, factors: { [`L[${p.name}]`]: 1 }, kind: 'service', gravityOnly: true });
+    }
     const slsWind = windNames.map(w => `SLS: ${d.windServiceFactor}${w}`);
     windNames.forEach((w, k) => combos.push({ name: slsWind[k], factors: { [w]: d.windServiceFactor }, kind: 'service', gravityOnly: false }));
 
@@ -1178,7 +1226,7 @@ function gableFrameModel(d: GableDef): StructureModel {
     const spanGroups = d.single ? [[0]] : d.spans.map((_, k) => [k]);
     const allSame = d.spans.every(s => Math.abs(s.span - d.spans[0].span) < 1e-9);
     const rafterCheck = (ks: number[], name: string): DeflectionCheckDef => ({
-        name, combos: ['SLS: L'], limit: Math.min(...ks.map(k => d.spans[k].span)) * 1000 / d.verticalLimit,
+        name, combos: slsLive, limit: Math.min(...ks.map(k => d.spans[k].span)) * 1000 / d.verticalLimit,
         evaluate: (u, fe) => Math.max(...ks.map(k => {
             const tl = fe.mainNode[top(k)], tr = fe.mainNode[top(k + 1)];
             const [ml, mr] = rafMember[k];
@@ -1201,13 +1249,21 @@ function gableFrameModel(d: GableDef): StructureModel {
     else allTops.forEach(k => deflections.push(drift(`Column ${k + 1} top drift`, H[k], [top(k)])));
 
     if (cr && craneNodes && craneRx) {
-        // crane serviceability: static crane loads (no impact) with surge either way
-        const f = 1 / (1 + cr.impact);
+        // crane serviceability (IS 800 Table 6 crane / crane + wind): static wheel loads (no impact) with
+        // surge either way, and 0.8 × (crane + wind) with the surge in the wind direction
         const sls: string[] = [];
         for (const p of [1, 2]) for (const sg of [1, -1]) {
             const name = `SLS: CV${p}${sg > 0 ? '+' : '−'}CH`;
             sls.push(name);
-            combos.push({ name, factors: { [`CV${p}`]: f, CH: sg }, kind: 'service', gravityOnly: false });
+            combos.push({ name, factors: { [`CS${p}`]: 1, CH: sg }, kind: 'service', gravityOnly: false });
+        }
+        // (wind also × the service factor of the drift checks, e.g. for strength-level ASCE 7 wind)
+        const wsf = d.windServiceFactor;
+        for (const p of [1, 2]) for (const w of windNames) {
+            const sg = windDir[w];
+            const name = `SLS: 0.8(CV${p}${sg > 0 ? '+' : '−'}CH+${wsf === 1 ? '' : wsf}${w})`;
+            sls.push(name);
+            combos.push({ name, factors: { [`CS${p}`]: 0.8, CH: 0.8 * sg, [w]: 0.8 * wsf }, kind: 'service', gravityOnly: false });
         }
         const nodeAt = (fe: FEModel, q: { member: number; at: number }) =>
             fe.memberNodes[q.member][fe.memberFr[q.member].findIndex(v => Math.abs(v - q.at) < 1e-6)];

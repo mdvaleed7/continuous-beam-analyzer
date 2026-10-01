@@ -489,14 +489,14 @@ export default function SteelAnalyzer() {
                                 </div>
                                 <Num label="Runway girder + rail (kN/m)" value={crane.girderWeight} onChange={setCr('girderWeight')} step={0.1} />
                                 <div className="norm-ref-row">
-                                    <Num label="Rail-level sway: height /" value={crane.lateralLimit} onChange={setCr('lateralLimit')} step={10} />
+                                    <Num label="Rail-level sway: height /" value={crane.lateralLimit} onChange={setCr('lateralLimit')} step={10} title={code === 'IS800' ? 'IS 800 Table 6, crane + wind: 400 cab-operated, 200 pendent-operated' : 'AISC Design Guide 7: verify for the crane type'} />
                                     <Num label="Rail spread limit (mm)" value={crane.spreadLimit} onChange={setCr('spreadLimit')} step={1} />
                                 </div>
                                 {craneRx && (
                                     <div className="info-note-inline">
                                         Crane span {craneRx.craneSpan.toFixed(2)} m · wheel loads {craneRx.Pmax.toFixed(1)} / {craneRx.Pmin.toFixed(1)} kN ·
                                         influence k = {craneRx.k.toFixed(3)} → column reactions R<sub>max</sub> {craneRx.Rmax.toFixed(1)} kN, R<sub>min</sub> {craneRx.Rmin.toFixed(1)} kN
-                                        (×{(1 + crane.impact).toFixed(2)} impact), surge {craneRx.H.toFixed(2)} kN per column, girder dead {craneRx.Rg.toFixed(1)} kN.
+                                        (static; R<sub>max</sub> × {(1 + crane.impact).toFixed(2)} impact in the strength combinations), surge {craneRx.H.toFixed(2)} kN per column, girder dead {craneRx.Rg.toFixed(1)} kN.
                                     </div>
                                 )}
                                 <div className="info-note-inline">
@@ -733,25 +733,25 @@ export default function SteelAnalyzer() {
                             <h3 className="panel-title"><span className="panel-icon">ℹ</span>Design basis and limitations</h3>
                             <ul style={{ fontSize: '0.85rem', lineHeight: 1.5, margin: 0, paddingLeft: 18 }}>
                                 {code === 'IS800' ? (<>
-                                    <li>IS 800:2007 LSM, γm0 = 1.10. Combinations (Table 4): 1.5(D+L), 1.2(D+L+W), 1.5(D+W), 0.9D+1.5W, each wind case with both internal pressures. Wind from the left (W1, W2); for unsymmetric frames also from the right (WL1, WL2, WR1, WR2).</li>
+                                    <li>IS 800:2007 LSM, γm0 = 1.10. Combinations (Table 4): 1.5(D+L), 1.2(D+L)+0.6W, 1.2(D+L+W), 1.5(D+W), 0.9D+1.5W, each wind case with both internal pressures; multi-span frames also 1.5(D+L) with roof live load on alternate / adjacent spans (and the same patterns in the live-load deflection check). Wind from the left (W1, W2); for unsymmetric frames also from the right (WL1, WL2, WR1, WR2).</li>
                                     <li>Second-order elastic analysis (P-Δ, P-δ); notional horizontal loads 0.5 % of the factored gravity load in gravity combinations (Cl. 4.3.6), acting in the direction of the first-order sway.</li>
                                     <li>In-plane buckling from the frame elastic buckling analysis: fcc = γe·N/A at each section (curve b). Out-of-plane over the flange-brace spacing, smallest section of the segment (curve c).</li>
                                     <li>LTB Cl. 8.2.2 with Mcr of Cl. 8.2.2.1 and c1 = 1 (conservative), αLT = 0.49; interaction Cl. 9.3.2.2 with Cmz = 0.9 for sway frames.</li>
                                     <li>Slender webs (d/tw above the semi-compact limit): moment carried by the flanges only; webs limited to d/tw ≤ 200ε without stiffeners. Shear with web buckling Cl. 8.4.2.2(a).</li>
                                 </>) : (<>
                                     <li>AISC 360-22 LRFD, direct analysis method: second-order analysis with 0.8EA and 0.8τbEI, notional loads 0.002ΣY in gravity combinations (and in all when Δ2nd/Δ1st &gt; 1.7), in the direction of the first-order sway; in-plane K = 1.</li>
-                                    <li>ASCE 7-22 §2.3.1 combinations: 1.4D, 1.2D+1.6Lr, 1.2D+1.6Lr+0.5W, 1.2D+1.0W+0.5Lr, 0.9D+1.0W, each wind case with both GCpi; wind from the right as well for unsymmetric frames (WL/WR).</li>
+                                    <li>ASCE 7-22 §2.3.1 combinations: 1.4D, 1.2D+1.6Lr, 1.2D+1.6Lr+0.5W, 1.2D+1.0W+0.5Lr, 0.9D+1.0W, each wind case with both GCpi; multi-span frames also 1.2D+1.6Lr on alternate / adjacent spans; wind from the right as well for unsymmetric frames (WL/WR).</li>
                                     <li>Web-tapered members checked section by section (AISC Design Guide 25 stress approach): Fe = Pe/A(x); LTB stress from the smallest section of each unbraced segment with Cb (F1-1).</li>
                                     <li>Flexure F2–F5 by web / flange class; compression E3 with E7 effective widths; shear G2.1 without stiffeners; interaction H1-1; h/tw ≤ 260 (F13.2).</li>
                                 </>)}
                                 {isFrame && craneOn && (
-                                    <li>Crane: wheel loads from the crab at the minimum hook approach; column reactions for runway girders simply supported between frames (one wheel over the frame). Load cases CV1 / CV2 (maximum reaction on the left / right crane column, with impact) and CH (surge at rail level, ± in combinations; with wind it acts in the wind direction). Bracket loads applied at the bracket level with the rail eccentricity moment; runway girder weight in D.</li>
+                                    <li>Crane: wheel loads from the crab at the minimum hook approach; column reactions for runway girders simply supported between frames (one wheel over the frame). Load cases CV1 / CV2 (maximum reaction on the left / right crane column; impact on the maximum wheel loads only) and CH (surge at rail level, ± in combinations; with wind it acts in the wind direction). Bracket loads applied at the bracket level with the rail eccentricity moment; runway girder weight in D.</li>
                                 )}
                                 {isFrame && craneOn && (
                                     <li>{code === 'IS800'
                                         ? 'Crane combinations (IS 800 Table 4, crane and roof live as imposed loads, each taken as leading in turn): 1.5D + 1.5C + 1.05L, 1.5D + 1.5L + 1.05C, 1.2D + 1.2C + 1.05L + 0.6W, 1.2D + 1.2C + 0.53L + 1.2W and the same with L leading.'
                                         : 'Crane combinations (ASCE 7-22 §2.3.1, crane as L with factor 1.0 in combinations 3 and 4): 1.2D + 1.6C + 0.5Lr, 1.2D + 1.6Lr + 1.0C, 1.2D + 1.0W + 1.0C + 0.5Lr.'}
-                                        {' '}Crane serviceability under static crane loads with surge: rail-level sway and change of rail gauge.</li>
+                                        {' '}Crane serviceability (rail-level sway, change of rail gauge) under static crane loads with surge, and under 0.8 × (crane + wind) with the surge in the wind direction (wind × the drift wind factor). IS 800 Table 6: H/400 cab-operated, H/200 pendent-operated cranes.</li>
                                 )}
                                 {mode === 'multispan' && (
                                     <li>Multi-span frame: exterior columns, interior columns and rafters designed as three groups; wind on the two end walls and on every roof slope; interior columns carry no wall wind. In-plane buckling from the elastic buckling analysis of the whole frame.</li>
