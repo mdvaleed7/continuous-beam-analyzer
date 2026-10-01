@@ -114,7 +114,9 @@ export function shearIS(p: SectionProps, fy: number) {
             : lambdaW < 1.2 ? (1 - 0.8 * (lambdaW - 0.8)) * fy / Math.sqrt(3)
                 : fy / (Math.sqrt(3) * lambdaW * lambdaW);
     }
-    return { Vd: p.Aw * tau_b / IS800.gm0, tau_b, lambdaW, buckling: dt > 67 * eps };
+    // Cl. 8.4.1.1: shear area of a WELDED I-section Av = d·tw (d = clear web depth); h·tw is for rolled sections
+    const Av = p.hw * p.tw;
+    return { Vd: Av * tau_b / IS800.gm0, tau_b, lambdaW, buckling: dt > 67 * eps };
 }
 
 export interface ISStationInput {
@@ -164,10 +166,10 @@ export function checkStationIS(p: SectionProps, fy: number, s: ISStationInput): 
     const Vs = shearIS(p, fy);
     const Vd = Vs.Vd;
     if (s.V > 0.6 * Vd && cls.web !== 'slender') {
-        // Cl. 9.2.2: Mdv = Md − β(Md − Mfd), β = (2V/Vd − 1)²
+        // Cl. 9.2.2: Mdv = Md − β(Md − Mfd) ≤ 1.2·Ze·fy/γm0, β = (2V/Vd − 1)²
         const Mfd = p.Af * p.h0 * fyd;
         const beta = (2 * s.V / Vd - 1) ** 2;
-        Md = Math.max(Mfd, Md - beta * (Md - Mfd));
+        Md = Math.max(Mfd, Math.min(Md - beta * (Md - Mfd), 1.2 * p.Zez * fyd));
         notes.push('high shear: moment capacity reduced (Cl. 9.2.2)');
     }
     const MdLT = Math.min(Md, s.chiLT * sec.Md);

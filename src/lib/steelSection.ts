@@ -20,7 +20,7 @@ export interface SectionProps extends ISection {
     h0: number;     // distance between flange centroids D − tf (mm)
     A: number;      // mm²
     Af: number;     // area of one flange (mm²)
-    Aw: number;     // D·tw — shear area (mm²)
+    Aw: number;     // D·tw — AISC G2.1 shear area (mm²); IS 800 8.4.1.1 (welded) uses d·tw = hw·tw
     Iz: number;     // major-axis second moment (mm⁴)
     Iy: number;     // minor-axis second moment (mm⁴)
     Zez: number;    // major-axis elastic modulus (mm³)
